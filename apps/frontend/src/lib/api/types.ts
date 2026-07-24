@@ -129,7 +129,7 @@ export type FAQPayload = Omit<FAQEntry, "id">;
 
 // --- AI Brain conversations ---
 
-export type ConversationChannel = "text";
+export type ConversationChannel = "text" | "voice";
 export type ConversationStatus = "active" | "completed";
 
 export interface Conversation {
@@ -183,4 +183,28 @@ export interface ConversationDetail {
   conversation: Conversation;
   messages: ConversationMessage[];
   outcome: ConversationOutcome | null;
+}
+
+// --- Voice ---
+
+export type VoiceProvider = "vapi";
+
+export interface VoiceLine {
+  id: string;
+  provider: VoiceProvider;
+  phone_number: string | null;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface VoiceCall {
+  id: string;
+  conversation_id: string;
+  caller_number: string | null;
+  started_at: string;
+  ended_at: string | null;
+  ended_reason: string | null;
+  duration_seconds: number | null;
+  recording_url: string | null;
 }

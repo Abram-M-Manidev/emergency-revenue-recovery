@@ -2,11 +2,14 @@
 many messages and, once the AI has enough information, one outcome (see
 `conversation_outcome.py`).
 
-`channel` is `TEXT` only for now: Milestone 3 ships a text-based API so this
-milestone is independently testable before Voice (Vapi/Twilio, Milestone 4)
-exists. Milestone 4 adds a `VOICE` channel value and a transport adapter
-that feeds real call transcripts into the same `AIBrainService` — no change
-to this entity should be needed."""
+`channel` was `TEXT` only through Milestone 3 (a text-based API so that
+milestone was independently testable before Voice existed). Milestone 4
+adds `VOICE`: a transport adapter (see `app/application/services/
+voice_service.py`) feeds real call transcripts into the same
+`AIBrainService` — no other change to this entity was needed, as
+anticipated. Voice-specific metadata (call id, recording, duration) lives
+in `VoiceCall` (`app/domain/entities/voice_call.py`), not here — this
+entity stays channel-agnostic."""
 
 from __future__ import annotations
 
@@ -18,6 +21,7 @@ from enum import Enum
 
 class ConversationChannel(str, Enum):
     TEXT = "text"
+    VOICE = "voice"
 
 
 class ConversationStatus(str, Enum):

@@ -9,6 +9,7 @@ from app.domain.exceptions.base import (
     InactiveAccountError,
     InvalidCredentialsError,
     InvalidTokenError,
+    VoiceLineNotFoundError,
 )
 
 __all__ = [
@@ -22,4 +23,5 @@ __all__ = [
     "InactiveAccountError",
     "InvalidCredentialsError",
     "InvalidTokenError",
+    "VoiceLineNotFoundError",
 ]

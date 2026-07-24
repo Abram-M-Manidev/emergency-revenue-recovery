@@ -22,6 +22,8 @@ from app.infrastructure.database.models.role import (
 from app.infrastructure.database.models.service import ServiceModel
 from app.infrastructure.database.models.service_area import ServiceAreaModel
 from app.infrastructure.database.models.user import UserModel
+from app.infrastructure.database.models.voice_call import VoiceCallModel
+from app.infrastructure.database.models.voice_line import VoiceLineModel
 
 __all__ = [
     "BusinessProfileModel",
@@ -38,6 +40,8 @@ __all__ = [
     "ServiceAreaModel",
     "ServiceModel",
     "UserModel",
+    "VoiceCallModel",
+    "VoiceLineModel",
     "WeeklyHoursModel",
     "role_permissions",
     "user_roles",

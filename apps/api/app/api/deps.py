@@ -4,15 +4,17 @@ authentication/authorization chain used by every protected route.
 
 from __future__ import annotations
 
+import hmac
 from collections.abc import Callable
 
-from fastapi import Depends
+from fastapi import Depends, Header
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.ai_brain_service import AIBrainService
 from app.application.services.auth_service import AuthService
 from app.application.services.business_knowledge_service import BusinessKnowledgeService
+from app.application.services.voice_service import VoiceService
 from app.core.config import Settings, get_settings
 from app.domain.ai.provider import AIProvider
 from app.domain.entities.user import User
@@ -31,6 +33,8 @@ from app.infrastructure.database.repositories import (
     SqlAlchemyServiceAreaRepository,
     SqlAlchemyServiceRepository,
     SqlAlchemyUserRepository,
+    SqlAlchemyVoiceCallRepository,
+    SqlAlchemyVoiceLineRepository,
 )
 from app.infrastructure.database.session import get_db
 from app.infrastructure.security.jwt import decode_access_token
@@ -85,6 +89,34 @@ def get_ai_brain_service(
         emergency_keyword_repository=SqlAlchemyEmergencyKeywordRepository(db),
         settings=settings,
     )
+
+
+def get_voice_service(
+    db: AsyncSession = Depends(get_db),
+    ai_brain_service: AIBrainService = Depends(get_ai_brain_service),
+) -> VoiceService:
+    return VoiceService(
+        voice_line_repository=SqlAlchemyVoiceLineRepository(db),
+        voice_call_repository=SqlAlchemyVoiceCallRepository(db),
+        conversation_repository=SqlAlchemyConversationRepository(db),
+        ai_brain_service=ai_brain_service,
+    )
+
+
+def verify_vapi_secret(
+    x_vapi_secret: str | None = Header(default=None),
+    settings: Settings = Depends(get_settings),
+) -> None:
+    """Guards the Vapi-facing webhook routes. Deliberately not the JWT
+    `get_current_user` chain — these are server-to-server requests from
+    Vapi, not an app user. This only proves the request came from our Vapi
+    account; it never determines *which* organization the call belongs to
+    — that is always resolved separately via `VoiceLineRepository` inside
+    `VoiceService`, the same way a valid JWT proves "a real user" while
+    RBAC/org-scoping separately proves "which org's data.\""""
+    expected = settings.VAPI_SERVER_SECRET
+    if not expected or not x_vapi_secret or not hmac.compare_digest(x_vapi_secret, expected):
+        raise InvalidTokenError("Missing or invalid Vapi webhook secret.")
 
 
 async def get_current_user(

@@ -76,11 +76,15 @@ class AIBrainService:
         self._settings = settings
 
     async def start_conversation(
-        self, organization_id: uuid.UUID, *, caller_phone_number: str | None = None
+        self,
+        organization_id: uuid.UUID,
+        *,
+        caller_phone_number: str | None = None,
+        channel: ConversationChannel = ConversationChannel.TEXT,
     ) -> Conversation:
         return await self._conversations.create(
             organization_id=organization_id,
-            channel=ConversationChannel.TEXT,
+            channel=channel,
             caller_phone_number=caller_phone_number,
         )
 

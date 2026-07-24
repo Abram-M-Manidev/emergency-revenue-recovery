@@ -14,11 +14,13 @@ import {
   startConversation,
 } from "@/lib/api/ai-conversations";
 import { ApiError } from "@/lib/api/client";
+import { fetchVoiceCall } from "@/lib/api/voice";
 import type {
   CallClassification,
   Conversation,
   ConversationMessage,
   ConversationOutcome,
+  VoiceCall,
 } from "@/lib/api/types";
 import { useToast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils/cn";
@@ -39,6 +41,7 @@ export function ChatPanel({ conversationId, onConversationChange }: ChatPanelPro
   const [conversation, setConversation] = useState<Conversation | null>(null);
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [outcome, setOutcome] = useState<ConversationOutcome | null>(null);
+  const [voiceCall, setVoiceCall] = useState<VoiceCall | null>(null);
   const [isLoadingDetail, setIsLoadingDetail] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
   const [isSending, setIsSending] = useState(false);
@@ -50,6 +53,7 @@ export function ChatPanel({ conversationId, onConversationChange }: ChatPanelPro
       setConversation(null);
       setMessages([]);
       setOutcome(null);
+      setVoiceCall(null);
       return;
     }
     let cancelled = false;
@@ -60,6 +64,17 @@ export function ChatPanel({ conversationId, onConversationChange }: ChatPanelPro
         setConversation(detail.conversation);
         setMessages(detail.messages);
         setOutcome(detail.outcome);
+        if (detail.conversation.channel === "voice") {
+          fetchVoiceCall(conversationId)
+            .then((call) => {
+              if (!cancelled) setVoiceCall(call);
+            })
+            .catch(() => {
+              if (!cancelled) setVoiceCall(null);
+            });
+        } else {
+          setVoiceCall(null);
+        }
       })
       .catch(() => toast({ title: "Failed to load conversation", variant: "destructive" }))
       .finally(() => {
@@ -143,6 +158,29 @@ export function ChatPanel({ conversationId, onConversationChange }: ChatPanelPro
             </Badge>
             <Badge variant="outline">{outcome.recommended_action.replace(/_/g, " ")}</Badge>
             <span className="text-muted-foreground">{outcome.summary}</span>
+          </div>
+        ) : null}
+
+        {voiceCall ? (
+          <div className="flex flex-wrap items-center gap-2 rounded-md border border-border bg-muted/30 p-3 text-sm text-muted-foreground">
+            <Badge variant="outline">Voice call</Badge>
+            {voiceCall.caller_number ? <span>{voiceCall.caller_number}</span> : null}
+            {voiceCall.duration_seconds != null ? (
+              <span>{voiceCall.duration_seconds}s</span>
+            ) : null}
+            {voiceCall.ended_reason ? (
+              <span>Ended: {voiceCall.ended_reason.replace(/-/g, " ")}</span>
+            ) : null}
+            {voiceCall.recording_url ? (
+              <a
+                href={voiceCall.recording_url}
+                target="_blank"
+                rel="noreferrer"
+                className="text-primary underline"
+              >
+                Recording
+              </a>
+            ) : null}
           </div>
         ) : null}
 

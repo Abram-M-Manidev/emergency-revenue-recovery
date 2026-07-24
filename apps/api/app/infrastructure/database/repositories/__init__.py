@@ -28,6 +28,12 @@ from app.infrastructure.database.repositories.service_repository_impl import (
     SqlAlchemyServiceRepository,
 )
 from app.infrastructure.database.repositories.user_repository_impl import SqlAlchemyUserRepository
+from app.infrastructure.database.repositories.voice_call_repository_impl import (
+    SqlAlchemyVoiceCallRepository,
+)
+from app.infrastructure.database.repositories.voice_line_repository_impl import (
+    SqlAlchemyVoiceLineRepository,
+)
 
 __all__ = [
     "SqlAlchemyBusinessHoursRepository",
@@ -42,4 +48,6 @@ __all__ = [
     "SqlAlchemyServiceAreaRepository",
     "SqlAlchemyServiceRepository",
     "SqlAlchemyUserRepository",
+    "SqlAlchemyVoiceCallRepository",
+    "SqlAlchemyVoiceLineRepository",
 ]

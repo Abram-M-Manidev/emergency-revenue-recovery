@@ -21,7 +21,8 @@ export default function AIConversationsPage() {
         <h1 className="text-2xl font-semibold tracking-tight">AI Conversations</h1>
         <p className="text-sm text-muted-foreground">
           Test the AI Brain with a text conversation — grounded in your Business Knowledge, not
-          hardcoded answers. Voice will front this same engine in a later milestone.
+          hardcoded answers. Real phone calls, answered by your configured voice line, show up
+          here too.
         </p>
       </div>
 

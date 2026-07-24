@@ -21,6 +21,10 @@ function statusBadgeVariant(status: Conversation["status"]) {
   return status === "completed" ? "secondary" : "outline";
 }
 
+function channelLabel(channel: Conversation["channel"]) {
+  return channel === "voice" ? "Voice" : "Text";
+}
+
 export function ConversationHistory({ refreshKey, selectedId, onSelect }: ConversationHistoryProps) {
   const [isLoading, setIsLoading] = useState(true);
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -47,7 +51,7 @@ export function ConversationHistory({ refreshKey, selectedId, onSelect }: Conver
     <Card>
       <CardHeader>
         <CardTitle className="text-base">Past conversations</CardTitle>
-        <CardDescription>Every text conversation the AI Brain has handled for this org.</CardDescription>
+        <CardDescription>Every conversation the AI Brain has handled for this org, text or voice.</CardDescription>
       </CardHeader>
       <CardContent>
         {isLoading ? (
@@ -62,6 +66,7 @@ export function ConversationHistory({ refreshKey, selectedId, onSelect }: Conver
             <TableHeader>
               <TableRow>
                 <TableHead>Started</TableHead>
+                <TableHead>Channel</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead />
               </TableRow>
@@ -77,6 +82,11 @@ export function ConversationHistory({ refreshKey, selectedId, onSelect }: Conver
                   )}
                 >
                   <TableCell>{new Date(conversation.started_at).toLocaleString()}</TableCell>
+                  <TableCell>
+                    <Badge variant={conversation.channel === "voice" ? "default" : "outline"}>
+                      {channelLabel(conversation.channel)}
+                    </Badge>
+                  </TableCell>
                   <TableCell>
                     <Badge variant={statusBadgeVariant(conversation.status)}>
                       {conversation.status}

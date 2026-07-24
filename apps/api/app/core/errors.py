@@ -34,6 +34,7 @@ from app.domain.exceptions import (
     InactiveAccountError,
     InvalidCredentialsError,
     InvalidTokenError,
+    VoiceLineNotFoundError,
 )
 
 logger = structlog.get_logger("app.errors")
@@ -55,6 +56,7 @@ _DOMAIN_ERROR_STATUS: dict[type[DomainError], int] = {
     ConversationCompletedError: status.HTTP_409_CONFLICT,
     ConversationLimitExceededError: status.HTTP_409_CONFLICT,
     AIProviderUnavailableError: status.HTTP_503_SERVICE_UNAVAILABLE,
+    VoiceLineNotFoundError: status.HTTP_404_NOT_FOUND,
 }
 
 

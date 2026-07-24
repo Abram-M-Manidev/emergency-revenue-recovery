@@ -68,3 +68,16 @@ class AIProviderUnavailableError(DomainError):
         self, message: str = "The AI Brain is not configured. Contact your administrator."
     ) -> None:
         super().__init__(message)
+
+
+class VoiceLineNotFoundError(DomainError):
+    """Raised when an inbound call's assistant/phone number id doesn't map
+    to any configured organization. The Vapi webhook endpoint (a voice
+    agent, not a JSON API consumer) catches this itself and responds with a
+    speakable fallback message instead of an error envelope — see
+    `app/api/v1/endpoints/vapi_webhooks.py`. Still registered with the
+    generic domain-error handler (`app/core/errors.py`) as a defensive
+    fallback for any other caller."""
+
+    def __init__(self, message: str = "No organization is configured for this phone line.") -> None:
+        super().__init__(message)
