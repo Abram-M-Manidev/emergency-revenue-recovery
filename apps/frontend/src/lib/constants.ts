@@ -7,6 +7,7 @@ export const ROUTES = {
   register: "/register",
   dashboard: "/dashboard",
   settings: "/settings",
+  businessKnowledge: "/business-knowledge",
 } as const;
 
 export const AUTH_COOKIE_NAME = "refresh_token";

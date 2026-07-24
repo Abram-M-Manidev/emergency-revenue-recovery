@@ -95,13 +95,22 @@ def register_exception_handlers(app: FastAPI) -> None:
     async def handle_validation_error(
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
-        logger.info("validation_error", errors=exc.errors())
+        # Pydantic's error dicts include a `ctx` entry that, for a custom
+        # validator raising `ValueError(...)` (the documented pattern, used
+        # throughout this codebase), holds the raw exception instance —
+        # not JSON-serializable. `errors(include_url=False)` still leaves
+        # that `ctx`/`input` in place, so we rebuild a minimal, always-safe
+        # shape rather than passing pydantic's dicts straight through.
+        sanitized_errors = [
+            {"type": err["type"], "loc": err["loc"], "msg": err["msg"]} for err in exc.errors()
+        ]
+        logger.info("validation_error", errors=sanitized_errors)
         return _error_response(
             request,
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             code="VALIDATION_ERROR",
             message="One or more fields failed validation.",
-            details={"errors": exc.errors()},
+            details={"errors": sanitized_errors},
         )
 
     @app.exception_handler(HTTPException)

@@ -16,7 +16,7 @@ from app.infrastructure.database.session import Base, engine
 from app.main import app
 
 
-@pytest_asyncio.fixture(scope="module", loop_scope="module")
+@pytest_asyncio.fixture(scope="module", loop_scope="session")
 async def database_ready():
     try:
         async with engine.begin() as conn:
@@ -30,14 +30,14 @@ async def database_ready():
         await conn.run_sync(Base.metadata.drop_all)
 
 
-@pytest_asyncio.fixture(loop_scope="module")
+@pytest_asyncio.fixture(loop_scope="session")
 async def client(database_ready):
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
 
 
-@pytest.mark.asyncio(loop_scope="module")
+@pytest.mark.asyncio(loop_scope="session")
 async def test_register_login_me_refresh_logout_flow(client: AsyncClient):
     register_payload = {
         "organization_name": "Acme HVAC",
@@ -79,7 +79,7 @@ async def test_register_login_me_refresh_logout_flow(client: AsyncClient):
     assert stale_refresh_response.status_code == 401
 
 
-@pytest.mark.asyncio(loop_scope="module")
+@pytest.mark.asyncio(loop_scope="session")
 async def test_register_rejects_duplicate_email(client: AsyncClient):
     payload = {
         "organization_name": "Beta Plumbing",

@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
-import { LayoutDashboard, Settings, Siren, X } from "lucide-react";
+import { BookOpen, LayoutDashboard, Settings, Siren, X } from "lucide-react";
 import { useEffect } from "react";
 
 import { ROUTES } from "@/lib/constants";
@@ -12,6 +12,7 @@ import { cn } from "@/lib/utils/cn";
 
 const NAV_ITEMS = [
   { href: ROUTES.dashboard, label: "Dashboard", icon: LayoutDashboard },
+  { href: ROUTES.businessKnowledge, label: "Business Knowledge", icon: BookOpen },
   { href: ROUTES.settings, label: "Settings", icon: Settings },
 ] as const;
 

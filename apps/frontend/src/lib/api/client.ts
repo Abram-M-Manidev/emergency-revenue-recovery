@@ -8,11 +8,35 @@ export class ApiError extends Error {
   readonly details?: Record<string, unknown>;
 
   constructor(status: number, body: ApiErrorBody) {
-    super(body.error.message);
+    super(ApiError.deriveMessage(body));
     this.name = "ApiError";
     this.status = status;
     this.code = body.error.code;
     this.details = body.error.details;
+  }
+
+  /**
+   * The API's top-level message for VALIDATION_ERROR is a generic
+   * "One or more fields failed validation." — the actionable reason (e.g.
+   * "At least one of postal_code or city is required.") lives in
+   * `details.errors[].msg`. Surface that instead when present so toasts
+   * built from `error.message` are useful rather than generic.
+   */
+  private static deriveMessage(body: ApiErrorBody): string {
+    if (body.error.code === "VALIDATION_ERROR") {
+      const errors = body.error.details?.errors;
+      if (Array.isArray(errors) && errors.length > 0) {
+        const messages = errors
+          .map((entry) =>
+            entry && typeof entry === "object" && typeof entry.msg === "string"
+              ? entry.msg.replace(/^Value error,\s*/, "")
+              : null,
+          )
+          .filter((message): message is string => Boolean(message));
+        if (messages.length > 0) return messages.join(" ");
+      }
+    }
+    return body.error.message;
   }
 }
 

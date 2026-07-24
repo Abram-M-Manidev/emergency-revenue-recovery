@@ -11,13 +11,20 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.auth_service import AuthService
+from app.application.services.business_knowledge_service import BusinessKnowledgeService
 from app.core.config import Settings, get_settings
 from app.domain.entities.user import User
 from app.domain.exceptions import AuthorizationError, InvalidTokenError
 from app.infrastructure.database.repositories import (
+    SqlAlchemyBusinessHoursRepository,
+    SqlAlchemyBusinessProfileRepository,
+    SqlAlchemyEmergencyKeywordRepository,
+    SqlAlchemyFAQRepository,
     SqlAlchemyOrganizationRepository,
     SqlAlchemyRefreshTokenRepository,
     SqlAlchemyRoleRepository,
+    SqlAlchemyServiceAreaRepository,
+    SqlAlchemyServiceRepository,
     SqlAlchemyUserRepository,
 )
 from app.infrastructure.database.session import get_db
@@ -36,6 +43,19 @@ def get_auth_service(
         role_repository=SqlAlchemyRoleRepository(db),
         refresh_token_repository=SqlAlchemyRefreshTokenRepository(db),
         settings=settings,
+    )
+
+
+def get_business_knowledge_service(
+    db: AsyncSession = Depends(get_db),
+) -> BusinessKnowledgeService:
+    return BusinessKnowledgeService(
+        business_profile_repository=SqlAlchemyBusinessProfileRepository(db),
+        business_hours_repository=SqlAlchemyBusinessHoursRepository(db),
+        service_area_repository=SqlAlchemyServiceAreaRepository(db),
+        service_repository=SqlAlchemyServiceRepository(db),
+        emergency_keyword_repository=SqlAlchemyEmergencyKeywordRepository(db),
+        faq_repository=SqlAlchemyFAQRepository(db),
     )
 
 
