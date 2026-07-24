@@ -1,0 +1,23 @@
+name: errs
+
+# Production overlay: builds the `production` Dockerfile targets instead of
+# `development`, drops source bind-mounts (the image is the artifact), and
+# does not expose Postgres on the host.
+#
+# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build
+# Requires Docker Compose v2.24+ (the `!reset` merge tag used below).
+
+services:
+  postgres:
+    ports: !reset []
+
+  api:
+    build:
+      target: production
+    volumes: !reset []
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
+
+  frontend:
+    build:
+      target: production
+    volumes: !reset []

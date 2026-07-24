@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pandoc -t markdown \"MASTER_PROJECT_VISION.docx\")",
+      "Bash(docker compose *)"
+    ]
+  }
+}
