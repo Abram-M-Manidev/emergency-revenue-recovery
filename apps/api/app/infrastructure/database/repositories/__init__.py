@@ -4,6 +4,12 @@ from app.infrastructure.database.repositories.business_hours_repository_impl imp
 from app.infrastructure.database.repositories.business_profile_repository_impl import (
     SqlAlchemyBusinessProfileRepository,
 )
+from app.infrastructure.database.repositories.conversation_outcome_repository_impl import (
+    SqlAlchemyConversationOutcomeRepository,
+)
+from app.infrastructure.database.repositories.conversation_repository_impl import (
+    SqlAlchemyConversationRepository,
+)
 from app.infrastructure.database.repositories.emergency_keyword_repository_impl import (
     SqlAlchemyEmergencyKeywordRepository,
 )
@@ -26,6 +32,8 @@ from app.infrastructure.database.repositories.user_repository_impl import SqlAlc
 __all__ = [
     "SqlAlchemyBusinessHoursRepository",
     "SqlAlchemyBusinessProfileRepository",
+    "SqlAlchemyConversationOutcomeRepository",
+    "SqlAlchemyConversationRepository",
     "SqlAlchemyEmergencyKeywordRepository",
     "SqlAlchemyFAQRepository",
     "SqlAlchemyOrganizationRepository",

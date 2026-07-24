@@ -24,6 +24,8 @@ class Permissions:
     USERS_MANAGE = "users:manage"
     BUSINESS_KNOWLEDGE_READ = "business_knowledge:read"
     BUSINESS_KNOWLEDGE_MANAGE = "business_knowledge:manage"
+    AI_CONVERSATIONS_READ = "ai_conversations:read"
+    AI_CONVERSATIONS_SIMULATE = "ai_conversations:simulate"
 
 
 PERMISSION_CATALOGUE: tuple[PermissionDefinition, ...] = (
@@ -37,6 +39,13 @@ PERMISSION_CATALOGUE: tuple[PermissionDefinition, ...] = (
         Permissions.BUSINESS_KNOWLEDGE_MANAGE,
         "Manage the organization's business knowledge (profile, hours, services, FAQs, ...)",
     ),
+    PermissionDefinition(
+        Permissions.AI_CONVERSATIONS_READ, "View AI Brain conversation logs and outcomes"
+    ),
+    PermissionDefinition(
+        Permissions.AI_CONVERSATIONS_SIMULATE,
+        "Start and send messages in test AI Brain conversations",
+    ),
 )
 
 DEFAULT_ROLES: dict[str, tuple[str, ...]] = {
@@ -46,16 +55,21 @@ DEFAULT_ROLES: dict[str, tuple[str, ...]] = {
         Permissions.USERS_MANAGE,
         Permissions.BUSINESS_KNOWLEDGE_READ,
         Permissions.BUSINESS_KNOWLEDGE_MANAGE,
+        Permissions.AI_CONVERSATIONS_READ,
+        Permissions.AI_CONVERSATIONS_SIMULATE,
     ),
     "Admin": (
         Permissions.USERS_READ,
         Permissions.USERS_MANAGE,
         Permissions.BUSINESS_KNOWLEDGE_READ,
         Permissions.BUSINESS_KNOWLEDGE_MANAGE,
+        Permissions.AI_CONVERSATIONS_READ,
+        Permissions.AI_CONVERSATIONS_SIMULATE,
     ),
     "Member": (
         Permissions.USERS_READ,
         Permissions.BUSINESS_KNOWLEDGE_READ,
+        Permissions.AI_CONVERSATIONS_READ,
     ),
 }
 

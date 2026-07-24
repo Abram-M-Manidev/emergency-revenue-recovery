@@ -1,5 +1,8 @@
 from app.domain.exceptions.base import (
+    AIProviderUnavailableError,
     AuthorizationError,
+    ConversationCompletedError,
+    ConversationLimitExceededError,
     DomainError,
     EntityAlreadyExistsError,
     EntityNotFoundError,
@@ -9,7 +12,10 @@ from app.domain.exceptions.base import (
 )
 
 __all__ = [
+    "AIProviderUnavailableError",
     "AuthorizationError",
+    "ConversationCompletedError",
+    "ConversationLimitExceededError",
     "DomainError",
     "EntityAlreadyExistsError",
     "EntityNotFoundError",

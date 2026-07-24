@@ -56,12 +56,19 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     LOG_JSON: bool = True
 
-    # --- Third-party providers (placeholders wired in later milestones) ---
+    # --- Third-party providers (Vapi/Twilio placeholders wired in a later milestone) ---
     OPENAI_API_KEY: str | None = None
+    OPENAI_MODEL: str = "gpt-5"
     VAPI_API_KEY: str | None = None
     TWILIO_ACCOUNT_SID: str | None = None
     TWILIO_AUTH_TOKEN: str | None = None
     TWILIO_PHONE_NUMBER: str | None = None
+
+    # --- AI Brain ---
+    # Counts customer+assistant message pairs; a cheap guardrail against
+    # runaway LLM cost on a single conversation until real rate limiting
+    # (Production Polish milestone) exists.
+    AI_MAX_CONVERSATION_TURNS: int = 20
 
     # --- Feature flags ---
     FEATURE_REGISTRATION_ENABLED: bool = True

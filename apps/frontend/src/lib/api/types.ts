@@ -126,3 +126,61 @@ export interface FAQEntry {
 }
 
 export type FAQPayload = Omit<FAQEntry, "id">;
+
+// --- AI Brain conversations ---
+
+export type ConversationChannel = "text";
+export type ConversationStatus = "active" | "completed";
+
+export interface Conversation {
+  id: string;
+  channel: ConversationChannel;
+  status: ConversationStatus;
+  caller_phone_number: string | null;
+  started_at: string;
+  ended_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export type MessageRole = "customer" | "assistant";
+
+export interface ConversationMessage {
+  id: string;
+  role: MessageRole;
+  content: string;
+  created_at: string;
+}
+
+export type CallClassification = "emergency" | "non_emergency" | "unknown";
+export type RecommendedAction =
+  | "create_emergency_ticket"
+  | "book_appointment"
+  | "answer_faq"
+  | "escalate_to_human"
+  | "none";
+
+export interface ConversationOutcome {
+  id: string;
+  classification: CallClassification;
+  confidence: number;
+  recommended_action: RecommendedAction;
+  matched_service_id: string | null;
+  customer_name: string | null;
+  customer_phone: string | null;
+  customer_address: string | null;
+  summary: string;
+  updated_at: string;
+}
+
+export interface SendMessageResult {
+  conversation: Conversation;
+  reply: ConversationMessage;
+  outcome: ConversationOutcome;
+}
+
+export interface ConversationDetail {
+  conversation: Conversation;
+  messages: ConversationMessage[];
+  outcome: ConversationOutcome | null;
+}

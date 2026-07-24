@@ -49,3 +49,22 @@ class InvalidTokenError(DomainError):
 class AuthorizationError(DomainError):
     def __init__(self, message: str = "You do not have permission to perform this action.") -> None:
         super().__init__(message)
+
+
+class ConversationCompletedError(DomainError):
+    def __init__(self, message: str = "This conversation has already ended.") -> None:
+        super().__init__(message)
+
+
+class ConversationLimitExceededError(DomainError):
+    def __init__(
+        self, message: str = "This conversation has reached its maximum number of turns."
+    ) -> None:
+        super().__init__(message)
+
+
+class AIProviderUnavailableError(DomainError):
+    def __init__(
+        self, message: str = "The AI Brain is not configured. Contact your administrator."
+    ) -> None:
+        super().__init__(message)

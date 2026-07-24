@@ -24,7 +24,10 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.domain.exceptions import (
+    AIProviderUnavailableError,
     AuthorizationError,
+    ConversationCompletedError,
+    ConversationLimitExceededError,
     DomainError,
     EntityAlreadyExistsError,
     EntityNotFoundError,
@@ -49,6 +52,9 @@ _DOMAIN_ERROR_STATUS: dict[type[DomainError], int] = {
     InvalidTokenError: status.HTTP_401_UNAUTHORIZED,
     InactiveAccountError: status.HTTP_403_FORBIDDEN,
     AuthorizationError: status.HTTP_403_FORBIDDEN,
+    ConversationCompletedError: status.HTTP_409_CONFLICT,
+    ConversationLimitExceededError: status.HTTP_409_CONFLICT,
+    AIProviderUnavailableError: status.HTTP_503_SERVICE_UNAVAILABLE,
 }
 
 

@@ -10,14 +10,19 @@ from fastapi import Depends
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.application.services.ai_brain_service import AIBrainService
 from app.application.services.auth_service import AuthService
 from app.application.services.business_knowledge_service import BusinessKnowledgeService
 from app.core.config import Settings, get_settings
+from app.domain.ai.provider import AIProvider
 from app.domain.entities.user import User
 from app.domain.exceptions import AuthorizationError, InvalidTokenError
+from app.infrastructure.ai.openai_provider import OpenAIProvider
 from app.infrastructure.database.repositories import (
     SqlAlchemyBusinessHoursRepository,
     SqlAlchemyBusinessProfileRepository,
+    SqlAlchemyConversationOutcomeRepository,
+    SqlAlchemyConversationRepository,
     SqlAlchemyEmergencyKeywordRepository,
     SqlAlchemyFAQRepository,
     SqlAlchemyOrganizationRepository,
@@ -56,6 +61,29 @@ def get_business_knowledge_service(
         service_repository=SqlAlchemyServiceRepository(db),
         emergency_keyword_repository=SqlAlchemyEmergencyKeywordRepository(db),
         faq_repository=SqlAlchemyFAQRepository(db),
+    )
+
+
+def get_ai_provider(settings: Settings = Depends(get_settings)) -> AIProvider:
+    return OpenAIProvider(settings)
+
+
+def get_ai_brain_service(
+    db: AsyncSession = Depends(get_db),
+    ai_provider: AIProvider = Depends(get_ai_provider),
+    settings: Settings = Depends(get_settings),
+) -> AIBrainService:
+    return AIBrainService(
+        conversation_repository=SqlAlchemyConversationRepository(db),
+        conversation_outcome_repository=SqlAlchemyConversationOutcomeRepository(db),
+        ai_provider=ai_provider,
+        business_profile_repository=SqlAlchemyBusinessProfileRepository(db),
+        business_hours_repository=SqlAlchemyBusinessHoursRepository(db),
+        service_repository=SqlAlchemyServiceRepository(db),
+        service_area_repository=SqlAlchemyServiceAreaRepository(db),
+        faq_repository=SqlAlchemyFAQRepository(db),
+        emergency_keyword_repository=SqlAlchemyEmergencyKeywordRepository(db),
+        settings=settings,
     )
 
 

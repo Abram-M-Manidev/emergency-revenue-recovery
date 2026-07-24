@@ -6,6 +6,9 @@ from app.infrastructure.database.models.business_hours import (
     WeeklyHoursModel,
 )
 from app.infrastructure.database.models.business_profile import BusinessProfileModel
+from app.infrastructure.database.models.conversation import ConversationModel
+from app.infrastructure.database.models.conversation_message import ConversationMessageModel
+from app.infrastructure.database.models.conversation_outcome import ConversationOutcomeModel
 from app.infrastructure.database.models.emergency_keyword import EmergencyKeywordModel
 from app.infrastructure.database.models.faq_entry import FAQEntryModel
 from app.infrastructure.database.models.organization import OrganizationModel
@@ -22,6 +25,9 @@ from app.infrastructure.database.models.user import UserModel
 
 __all__ = [
     "BusinessProfileModel",
+    "ConversationMessageModel",
+    "ConversationModel",
+    "ConversationOutcomeModel",
     "EmergencyKeywordModel",
     "FAQEntryModel",
     "HoursExceptionModel",
