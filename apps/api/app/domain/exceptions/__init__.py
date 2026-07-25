@@ -8,6 +8,7 @@ from app.domain.exceptions.base import (
     EntityNotFoundError,
     InactiveAccountError,
     InvalidCredentialsError,
+    InvalidTicketStatusTransitionError,
     InvalidTokenError,
     VoiceLineNotFoundError,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "EntityNotFoundError",
     "InactiveAccountError",
     "InvalidCredentialsError",
+    "InvalidTicketStatusTransitionError",
     "InvalidTokenError",
     "VoiceLineNotFoundError",
 ]

@@ -15,7 +15,9 @@ import uuid
 
 from fastapi import APIRouter, Depends, Query, status
 
-from app.api.deps import get_ai_brain_service, require_permission
+import structlog
+
+from app.api.deps import get_ai_brain_service, get_dispatch_service, require_permission
 from app.application.schemas.ai_conversations import (
     ConversationDetailResponse,
     ConversationOutcomeResponse,
@@ -26,8 +28,12 @@ from app.application.schemas.ai_conversations import (
     StartConversationRequest,
 )
 from app.application.services.ai_brain_service import AIBrainService
+from app.application.services.dispatch_service import DispatchService
 from app.domain.entities.rbac import Permissions
 from app.domain.entities.user import User
+from app.domain.exceptions import DomainError
+
+logger = structlog.get_logger("app.ai_conversations")
 
 router = APIRouter(prefix="/ai/conversations", tags=["ai-conversations"])
 
@@ -80,8 +86,24 @@ async def send_message(
     payload: SendMessageRequest,
     user: User = Depends(_simulate_user),
     service: AIBrainService = Depends(get_ai_brain_service),
+    dispatch_service: DispatchService = Depends(get_dispatch_service),
 ) -> SendMessageResult:
     result = await service.send_message(user.organization_id, conversation_id, payload.message)
+
+    try:
+        await dispatch_service.sync_ticket_from_outcome(user.organization_id, conversation_id)
+    except DomainError as exc:
+        # The conversation turn itself already succeeded — a Dispatch-side
+        # failure must never take that down with it. See
+        # `DispatchService.sync_ticket_from_outcome`'s docstring for why this
+        # call exists here at all.
+        logger.warning(
+            "dispatch_sync_failed",
+            error=exc.__class__.__name__,
+            message=exc.message,
+            conversation_id=str(conversation_id),
+        )
+
     return SendMessageResult(
         conversation=ConversationResponse.model_validate(result.conversation),
         reply=MessageResponse.model_validate(result.reply_message),

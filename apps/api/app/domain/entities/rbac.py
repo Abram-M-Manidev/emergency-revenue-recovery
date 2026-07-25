@@ -27,6 +27,9 @@ class Permissions:
     AI_CONVERSATIONS_READ = "ai_conversations:read"
     AI_CONVERSATIONS_SIMULATE = "ai_conversations:simulate"
     VOICE_READ = "voice:read"
+    DISPATCH_READ = "dispatch:read"
+    DISPATCH_MANAGE = "dispatch:manage"
+    DISPATCH_UPDATE_ASSIGNED = "dispatch:update_assigned"
 
 
 PERMISSION_CATALOGUE: tuple[PermissionDefinition, ...] = (
@@ -51,6 +54,17 @@ PERMISSION_CATALOGUE: tuple[PermissionDefinition, ...] = (
         Permissions.VOICE_READ,
         "View the organization's voice line configuration and call metadata",
     ),
+    PermissionDefinition(
+        Permissions.DISPATCH_READ, "View emergency tickets and the technician roster"
+    ),
+    PermissionDefinition(
+        Permissions.DISPATCH_MANAGE,
+        "Create/assign/cancel emergency tickets and manage the technician roster",
+    ),
+    PermissionDefinition(
+        Permissions.DISPATCH_UPDATE_ASSIGNED,
+        "Update the status of emergency tickets assigned to yourself",
+    ),
 )
 
 DEFAULT_ROLES: dict[str, tuple[str, ...]] = {
@@ -63,6 +77,8 @@ DEFAULT_ROLES: dict[str, tuple[str, ...]] = {
         Permissions.AI_CONVERSATIONS_READ,
         Permissions.AI_CONVERSATIONS_SIMULATE,
         Permissions.VOICE_READ,
+        Permissions.DISPATCH_READ,
+        Permissions.DISPATCH_MANAGE,
     ),
     "Admin": (
         Permissions.USERS_READ,
@@ -72,13 +88,21 @@ DEFAULT_ROLES: dict[str, tuple[str, ...]] = {
         Permissions.AI_CONVERSATIONS_READ,
         Permissions.AI_CONVERSATIONS_SIMULATE,
         Permissions.VOICE_READ,
+        Permissions.DISPATCH_READ,
+        Permissions.DISPATCH_MANAGE,
     ),
     "Member": (
         Permissions.USERS_READ,
         Permissions.BUSINESS_KNOWLEDGE_READ,
         Permissions.AI_CONVERSATIONS_READ,
         Permissions.VOICE_READ,
+        Permissions.DISPATCH_READ,
+    ),
+    "Technician": (
+        Permissions.DISPATCH_READ,
+        Permissions.DISPATCH_UPDATE_ASSIGNED,
     ),
 }
 
 OWNER_ROLE_NAME = "Owner"
+TECHNICIAN_ROLE_NAME = "Technician"

@@ -18,3 +18,15 @@ class RoleRepository(ABC):
 
     @abstractmethod
     async def get_by_ids(self, role_ids: list[uuid.UUID]) -> list[Role]: ...
+
+    @abstractmethod
+    async def get_or_create_by_name(
+        self, organization_id: uuid.UUID, name: str, permission_codes: tuple[str, ...]
+    ) -> Role:
+        """Lazily ensures a role exists for an organization that predates it
+        (e.g. `Technician`, added after Milestones 1-4 already seeded
+        Owner/Admin/Member for existing orgs via `seed_default_roles`).
+        Idempotent: if the role already exists, its current permission set is
+        returned as-is and `permission_codes` is ignored.
+        """
+        ...

@@ -36,6 +36,8 @@ logger = structlog.get_logger("app.voice")
 class ChatCompletionResult:
     reply_text: str
     should_end_call: bool
+    organization_id: uuid.UUID
+    conversation_id: uuid.UUID
 
 
 class VoiceService:
@@ -117,12 +119,16 @@ class VoiceService:
             return ChatCompletionResult(
                 reply_text=history[-1].content,
                 should_end_call=conversation.status is ConversationStatus.COMPLETED,
+                organization_id=organization_id,
+                conversation_id=conversation_id,
             )
 
         result = await self._ai_brain.send_message(organization_id, conversation_id, customer_utterance)
         return ChatCompletionResult(
             reply_text=result.reply_message.content,
             should_end_call=result.conversation.status is ConversationStatus.COMPLETED,
+            organization_id=organization_id,
+            conversation_id=conversation_id,
         )
 
     async def handle_end_of_call_report(

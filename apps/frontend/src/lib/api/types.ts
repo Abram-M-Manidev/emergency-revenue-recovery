@@ -208,3 +208,42 @@ export interface VoiceCall {
   duration_seconds: number | null;
   recording_url: string | null;
 }
+
+// --- Dispatch ---
+
+export type TicketStatus = "new" | "assigned" | "en_route" | "resolved" | "canceled";
+
+export interface EmergencyTicket {
+  id: string;
+  conversation_id: string;
+  matched_service_id: string | null;
+  status: TicketStatus;
+  customer_name: string | null;
+  customer_phone: string | null;
+  customer_address: string | null;
+  summary: string;
+  assigned_technician_user_id: string | null;
+  assigned_at: string | null;
+  closed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TechnicianProfile {
+  id: string;
+  user_id: string;
+  full_name: string | null;
+  email: string | null;
+  phone_number: string;
+  is_on_call: boolean;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateTechnicianPayload {
+  full_name: string;
+  email: string;
+  phone_number: string;
+  temporary_password: string;
+}

@@ -4,6 +4,7 @@ from app.api.v1.endpoints import (
     ai_conversations,
     auth,
     business_knowledge,
+    dispatch,
     health,
     vapi_webhooks,
     version,
@@ -18,3 +19,4 @@ api_router.include_router(business_knowledge.router)
 api_router.include_router(ai_conversations.router)
 api_router.include_router(voice.router)
 api_router.include_router(vapi_webhooks.router)
+api_router.include_router(dispatch.router)

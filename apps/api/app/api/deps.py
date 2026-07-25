@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.application.services.ai_brain_service import AIBrainService
 from app.application.services.auth_service import AuthService
 from app.application.services.business_knowledge_service import BusinessKnowledgeService
+from app.application.services.dispatch_service import DispatchService
 from app.application.services.voice_service import VoiceService
 from app.core.config import Settings, get_settings
 from app.domain.ai.provider import AIProvider
@@ -26,12 +27,14 @@ from app.infrastructure.database.repositories import (
     SqlAlchemyConversationOutcomeRepository,
     SqlAlchemyConversationRepository,
     SqlAlchemyEmergencyKeywordRepository,
+    SqlAlchemyEmergencyTicketRepository,
     SqlAlchemyFAQRepository,
     SqlAlchemyOrganizationRepository,
     SqlAlchemyRefreshTokenRepository,
     SqlAlchemyRoleRepository,
     SqlAlchemyServiceAreaRepository,
     SqlAlchemyServiceRepository,
+    SqlAlchemyTechnicianProfileRepository,
     SqlAlchemyUserRepository,
     SqlAlchemyVoiceCallRepository,
     SqlAlchemyVoiceLineRepository,
@@ -100,6 +103,19 @@ def get_voice_service(
         voice_call_repository=SqlAlchemyVoiceCallRepository(db),
         conversation_repository=SqlAlchemyConversationRepository(db),
         ai_brain_service=ai_brain_service,
+    )
+
+
+def get_dispatch_service(
+    db: AsyncSession = Depends(get_db),
+) -> DispatchService:
+    return DispatchService(
+        emergency_ticket_repository=SqlAlchemyEmergencyTicketRepository(db),
+        technician_profile_repository=SqlAlchemyTechnicianProfileRepository(db),
+        conversation_outcome_repository=SqlAlchemyConversationOutcomeRepository(db),
+        conversation_repository=SqlAlchemyConversationRepository(db),
+        user_repository=SqlAlchemyUserRepository(db),
+        role_repository=SqlAlchemyRoleRepository(db),
     )
 
 

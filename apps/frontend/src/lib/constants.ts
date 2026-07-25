@@ -9,6 +9,7 @@ export const ROUTES = {
   settings: "/settings",
   businessKnowledge: "/business-knowledge",
   aiConversations: "/ai-conversations",
+  dispatch: "/dispatch",
 } as const;
 
 export const AUTH_COOKIE_NAME = "refresh_token";

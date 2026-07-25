@@ -71,3 +71,28 @@ class SqlAlchemyRoleRepository(RoleRepository):
             .options(selectinload(RoleModel.permissions))
         )
         return [_to_entity(model) for model in result.scalars().all()]
+
+    async def get_or_create_by_name(
+        self, organization_id: uuid.UUID, name: str, permission_codes: tuple[str, ...]
+    ) -> Role:
+        result = await self._session.execute(
+            select(RoleModel)
+            .where(RoleModel.organization_id == organization_id, RoleModel.name == name)
+            .options(selectinload(RoleModel.permissions))
+        )
+        existing = result.scalar_one_or_none()
+        if existing is not None:
+            return _to_entity(existing)
+
+        permissions_by_code = await self._get_or_create_permissions(permission_codes)
+        model = RoleModel(
+            organization_id=organization_id,
+            name=name,
+            description=f"{name} role",
+            is_system_role=True,
+            permissions=[permissions_by_code[code] for code in permission_codes],
+        )
+        self._session.add(model)
+        await self._session.flush()
+        await self._session.refresh(model, attribute_names=["permissions"])
+        return _to_entity(model)

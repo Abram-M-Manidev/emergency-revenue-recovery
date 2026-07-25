@@ -33,6 +33,7 @@ from app.domain.exceptions import (
     EntityNotFoundError,
     InactiveAccountError,
     InvalidCredentialsError,
+    InvalidTicketStatusTransitionError,
     InvalidTokenError,
     VoiceLineNotFoundError,
 )
@@ -57,6 +58,7 @@ _DOMAIN_ERROR_STATUS: dict[type[DomainError], int] = {
     ConversationLimitExceededError: status.HTTP_409_CONFLICT,
     AIProviderUnavailableError: status.HTTP_503_SERVICE_UNAVAILABLE,
     VoiceLineNotFoundError: status.HTTP_404_NOT_FOUND,
+    InvalidTicketStatusTransitionError: status.HTTP_409_CONFLICT,
 }
 
 

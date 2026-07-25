@@ -70,6 +70,13 @@ class AIProviderUnavailableError(DomainError):
         super().__init__(message)
 
 
+class InvalidTicketStatusTransitionError(DomainError):
+    def __init__(
+        self, message: str = "This status change is not allowed for the ticket's current state."
+    ) -> None:
+        super().__init__(message)
+
+
 class VoiceLineNotFoundError(DomainError):
     """Raised when an inbound call's assistant/phone number id doesn't map
     to any configured organization. The Vapi webhook endpoint (a voice

@@ -10,6 +10,7 @@ from app.infrastructure.database.models.conversation import ConversationModel
 from app.infrastructure.database.models.conversation_message import ConversationMessageModel
 from app.infrastructure.database.models.conversation_outcome import ConversationOutcomeModel
 from app.infrastructure.database.models.emergency_keyword import EmergencyKeywordModel
+from app.infrastructure.database.models.emergency_ticket import EmergencyTicketModel
 from app.infrastructure.database.models.faq_entry import FAQEntryModel
 from app.infrastructure.database.models.organization import OrganizationModel
 from app.infrastructure.database.models.refresh_token import RefreshTokenModel
@@ -21,6 +22,7 @@ from app.infrastructure.database.models.role import (
 )
 from app.infrastructure.database.models.service import ServiceModel
 from app.infrastructure.database.models.service_area import ServiceAreaModel
+from app.infrastructure.database.models.technician_profile import TechnicianProfileModel
 from app.infrastructure.database.models.user import UserModel
 from app.infrastructure.database.models.voice_call import VoiceCallModel
 from app.infrastructure.database.models.voice_line import VoiceLineModel
@@ -31,6 +33,7 @@ __all__ = [
     "ConversationModel",
     "ConversationOutcomeModel",
     "EmergencyKeywordModel",
+    "EmergencyTicketModel",
     "FAQEntryModel",
     "HoursExceptionModel",
     "OrganizationModel",
@@ -39,6 +42,7 @@ __all__ = [
     "RoleModel",
     "ServiceAreaModel",
     "ServiceModel",
+    "TechnicianProfileModel",
     "UserModel",
     "VoiceCallModel",
     "VoiceLineModel",
