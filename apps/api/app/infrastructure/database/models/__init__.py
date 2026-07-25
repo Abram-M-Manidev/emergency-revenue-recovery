@@ -1,6 +1,7 @@
 """Import every model here so `Base.metadata` is fully populated for Alembic
 autogenerate and for `Base.metadata.create_all()` in tests."""
 
+from app.infrastructure.database.models.appointment import AppointmentModel
 from app.infrastructure.database.models.business_hours import (
     HoursExceptionModel,
     WeeklyHoursModel,
@@ -28,6 +29,7 @@ from app.infrastructure.database.models.voice_call import VoiceCallModel
 from app.infrastructure.database.models.voice_line import VoiceLineModel
 
 __all__ = [
+    "AppointmentModel",
     "BusinessProfileModel",
     "ConversationMessageModel",
     "ConversationModel",

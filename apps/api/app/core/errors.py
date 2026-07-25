@@ -32,6 +32,7 @@ from app.domain.exceptions import (
     EntityAlreadyExistsError,
     EntityNotFoundError,
     InactiveAccountError,
+    InvalidAppointmentStatusTransitionError,
     InvalidCredentialsError,
     InvalidTicketStatusTransitionError,
     InvalidTokenError,
@@ -59,6 +60,7 @@ _DOMAIN_ERROR_STATUS: dict[type[DomainError], int] = {
     AIProviderUnavailableError: status.HTTP_503_SERVICE_UNAVAILABLE,
     VoiceLineNotFoundError: status.HTTP_404_NOT_FOUND,
     InvalidTicketStatusTransitionError: status.HTTP_409_CONFLICT,
+    InvalidAppointmentStatusTransitionError: status.HTTP_409_CONFLICT,
 }
 
 

@@ -10,6 +10,7 @@ export const ROUTES = {
   businessKnowledge: "/business-knowledge",
   aiConversations: "/ai-conversations",
   dispatch: "/dispatch",
+  appointments: "/appointments",
 } as const;
 
 export const AUTH_COOKIE_NAME = "refresh_token";

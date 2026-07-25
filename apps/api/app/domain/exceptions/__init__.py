@@ -1,5 +1,6 @@
 from app.domain.exceptions.base import (
     AIProviderUnavailableError,
+    AppointmentOutsideBusinessHoursError,
     AuthorizationError,
     ConversationCompletedError,
     ConversationLimitExceededError,
@@ -7,6 +8,7 @@ from app.domain.exceptions.base import (
     EntityAlreadyExistsError,
     EntityNotFoundError,
     InactiveAccountError,
+    InvalidAppointmentStatusTransitionError,
     InvalidCredentialsError,
     InvalidTicketStatusTransitionError,
     InvalidTokenError,
@@ -15,6 +17,7 @@ from app.domain.exceptions.base import (
 
 __all__ = [
     "AIProviderUnavailableError",
+    "AppointmentOutsideBusinessHoursError",
     "AuthorizationError",
     "ConversationCompletedError",
     "ConversationLimitExceededError",
@@ -22,6 +25,7 @@ __all__ = [
     "EntityAlreadyExistsError",
     "EntityNotFoundError",
     "InactiveAccountError",
+    "InvalidAppointmentStatusTransitionError",
     "InvalidCredentialsError",
     "InvalidTicketStatusTransitionError",
     "InvalidTokenError",

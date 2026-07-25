@@ -22,6 +22,7 @@ const EMPTY_FORM: ServicePayload = {
   category: "",
   is_emergency_eligible: false,
   is_active: true,
+  default_duration_minutes: null,
 };
 
 export function ServicesSection() {
@@ -63,6 +64,7 @@ export function ServicesSection() {
       category: service.category ?? "",
       is_emergency_eligible: service.is_emergency_eligible,
       is_active: service.is_active,
+      default_duration_minutes: service.default_duration_minutes,
     });
     setModalOpen(true);
   }
@@ -75,6 +77,7 @@ export function ServicesSection() {
       category: form.category || null,
       is_emergency_eligible: form.is_emergency_eligible,
       is_active: form.is_active,
+      default_duration_minutes: form.default_duration_minutes,
     };
     try {
       if (editingId) {
@@ -213,6 +216,21 @@ export function ServicesSection() {
               placeholder="Repair"
               value={form.category ?? ""}
               onChange={(event) => setForm((current) => ({ ...current, category: event.target.value }))}
+            />
+          </div>
+          <div>
+            <label className="text-sm font-medium">Default duration (minutes)</label>
+            <Input
+              type="number"
+              min={1}
+              max={1440}
+              value={form.default_duration_minutes ?? ""}
+              onChange={(event) =>
+                setForm((current) => ({
+                  ...current,
+                  default_duration_minutes: event.target.value ? Number(event.target.value) : null,
+                }))
+              }
             />
           </div>
           <label className="flex items-center gap-2 text-sm">

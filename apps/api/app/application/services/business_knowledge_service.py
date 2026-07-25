@@ -165,6 +165,7 @@ class BusinessKnowledgeService:
         category: str | None,
         is_emergency_eligible: bool,
         is_active: bool,
+        default_duration_minutes: int | None,
     ) -> Service:
         return await self._services.create(
             organization_id=organization_id,
@@ -173,6 +174,7 @@ class BusinessKnowledgeService:
             category=category,
             is_emergency_eligible=is_emergency_eligible,
             is_active=is_active,
+            default_duration_minutes=default_duration_minutes,
         )
 
     async def update_service(
@@ -185,6 +187,7 @@ class BusinessKnowledgeService:
         category: str | None,
         is_emergency_eligible: bool,
         is_active: bool,
+        default_duration_minutes: int | None,
     ) -> Service:
         updated = await self._services.update(
             organization_id,
@@ -194,6 +197,7 @@ class BusinessKnowledgeService:
             category=category,
             is_emergency_eligible=is_emergency_eligible,
             is_active=is_active,
+            default_duration_minutes=default_duration_minutes,
         )
         if updated is None:
             raise EntityNotFoundError("Service", str(service_id))

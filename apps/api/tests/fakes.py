@@ -11,6 +11,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 
 from app.domain.ai.provider import AIProvider, AIReply, AIRequest
+from app.domain.entities.appointment import Appointment, AppointmentStatus
 from app.domain.entities.business_hours import HoursException, WeeklyHours
 from app.domain.entities.business_profile import BusinessProfile
 from app.domain.entities.conversation import Conversation, ConversationStatus
@@ -28,6 +29,7 @@ from app.domain.entities.service import Service
 from app.domain.entities.service_area import ServiceArea
 from app.domain.entities.technician_profile import TechnicianProfile
 from app.domain.entities.user import User
+from app.domain.repositories.appointment_repository import AppointmentRepository
 from app.domain.repositories.business_hours_repository import BusinessHoursRepository
 from app.domain.repositories.business_profile_repository import BusinessProfileRepository
 from app.domain.repositories.conversation_outcome_repository import ConversationOutcomeRepository
@@ -139,22 +141,33 @@ class FakeConversationOutcomeRepository(ConversationOutcomeRepository):
 
 
 class FakeBusinessProfileRepository(BusinessProfileRepository):
+    def __init__(self, profile: BusinessProfile | None = None) -> None:
+        self._profile = profile
+
     async def get_by_organization_id(self, organization_id) -> BusinessProfile | None:
-        return None
+        return self._profile
 
     async def upsert(self, **kwargs):
         raise NotImplementedError
 
 
 class FakeBusinessHoursRepository(BusinessHoursRepository):
+    def __init__(
+        self,
+        weekly: list[WeeklyHours] | None = None,
+        exceptions: list[HoursException] | None = None,
+    ) -> None:
+        self._weekly = weekly or []
+        self._exceptions = exceptions or []
+
     async def get_weekly(self, organization_id) -> list[WeeklyHours]:
-        return []
+        return self._weekly
 
     async def replace_weekly(self, organization_id, entries):
         raise NotImplementedError
 
     async def list_exceptions(self, organization_id) -> list[HoursException]:
-        return []
+        return self._exceptions
 
     async def add_exception(self, **kwargs):
         raise NotImplementedError
@@ -169,6 +182,16 @@ class FakeServiceRepository(ServiceRepository):
 
     async def list(self, organization_id):
         return self._services
+
+    async def get_by_id(self, organization_id, service_id):
+        return next(
+            (
+                s
+                for s in self._services
+                if s.id == service_id and s.organization_id == organization_id
+            ),
+            None,
+        )
 
     async def create(self, **kwargs):
         raise NotImplementedError
@@ -294,6 +317,96 @@ class FakeEmergencyTicketRepository(EmergencyTicketRepository):
             closed_at=closed_at if closed_at is not None else ticket.closed_at,
         )
         self._tickets[ticket_id] = updated
+        return updated
+
+
+class FakeAppointmentRepository(AppointmentRepository):
+    def __init__(self) -> None:
+        self._appointments: dict[uuid.UUID, Appointment] = {}
+
+    async def create(
+        self,
+        *,
+        organization_id,
+        conversation_id,
+        matched_service_id,
+        customer_name,
+        customer_phone,
+        customer_address,
+        summary,
+        duration_minutes,
+    ):
+        existing = await self.get_by_conversation_id(conversation_id)
+        if existing is not None:
+            return existing
+        now = datetime.now(timezone.utc)
+        appointment = Appointment(
+            id=uuid.uuid4(),
+            organization_id=organization_id,
+            conversation_id=conversation_id,
+            matched_service_id=matched_service_id,
+            status=AppointmentStatus.REQUESTED,
+            customer_name=customer_name,
+            customer_phone=customer_phone,
+            customer_address=customer_address,
+            summary=summary,
+            scheduled_start_at=None,
+            duration_minutes=duration_minutes,
+            assigned_technician_user_id=None,
+            assigned_at=None,
+            closed_at=None,
+            created_at=now,
+            updated_at=now,
+        )
+        self._appointments[appointment.id] = appointment
+        return appointment
+
+    async def get_by_id(self, organization_id, appointment_id):
+        appointment = self._appointments.get(appointment_id)
+        if appointment is None or appointment.organization_id != organization_id:
+            return None
+        return appointment
+
+    async def get_by_conversation_id(self, conversation_id):
+        return next(
+            (a for a in self._appointments.values() if a.conversation_id == conversation_id),
+            None,
+        )
+
+    async def list_for_organization(self, organization_id, *, status=None, limit, offset):
+        matches = [
+            a for a in self._appointments.values() if a.organization_id == organization_id
+        ]
+        if status is not None:
+            matches = [a for a in matches if a.status == status]
+        matches.sort(
+            key=lambda a: (a.scheduled_start_at is None, a.scheduled_start_at, a.created_at),
+        )
+        return matches[offset : offset + limit]
+
+    async def schedule(
+        self, appointment_id, *, scheduled_start_at, duration_minutes, technician_user_id, assigned_at
+    ):
+        appointment = self._appointments[appointment_id]
+        updated = replace(
+            appointment,
+            scheduled_start_at=scheduled_start_at,
+            duration_minutes=duration_minutes,
+            assigned_technician_user_id=technician_user_id,
+            assigned_at=assigned_at,
+            status=AppointmentStatus.SCHEDULED,
+        )
+        self._appointments[appointment_id] = updated
+        return updated
+
+    async def update_status(self, appointment_id, *, status, closed_at=None):
+        appointment = self._appointments[appointment_id]
+        updated = replace(
+            appointment,
+            status=status,
+            closed_at=closed_at if closed_at is not None else appointment.closed_at,
+        )
+        self._appointments[appointment_id] = updated
         return updated
 
 

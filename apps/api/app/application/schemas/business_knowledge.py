@@ -162,6 +162,7 @@ class CreateServiceRequest(BaseModel):
     category: str | None = Field(default=None, max_length=100)
     is_emergency_eligible: bool = False
     is_active: bool = True
+    default_duration_minutes: int | None = Field(default=None, gt=0, le=1440)
 
 
 class UpdateServiceRequest(CreateServiceRequest):
@@ -177,6 +178,7 @@ class ServiceResponse(BaseModel):
     category: str | None
     is_emergency_eligible: bool
     is_active: bool
+    default_duration_minutes: int | None
 
 
 # --- Emergency keywords ---

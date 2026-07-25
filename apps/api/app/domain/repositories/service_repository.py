@@ -11,6 +11,9 @@ class ServiceRepository(ABC):
     async def list(self, organization_id: uuid.UUID) -> list[Service]: ...
 
     @abstractmethod
+    async def get_by_id(self, organization_id: uuid.UUID, service_id: uuid.UUID) -> Service | None: ...
+
+    @abstractmethod
     async def create(
         self,
         *,
@@ -20,6 +23,7 @@ class ServiceRepository(ABC):
         category: str | None,
         is_emergency_eligible: bool,
         is_active: bool,
+        default_duration_minutes: int | None,
     ) -> Service: ...
 
     @abstractmethod
@@ -33,6 +37,7 @@ class ServiceRepository(ABC):
         category: str | None,
         is_emergency_eligible: bool,
         is_active: bool,
+        default_duration_minutes: int | None,
     ) -> Service | None:
         """Replaces the full entity with the given (already-merged) field
         values. Returns None if no matching service exists for this

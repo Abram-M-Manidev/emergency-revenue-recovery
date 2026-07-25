@@ -30,6 +30,9 @@ class Permissions:
     DISPATCH_READ = "dispatch:read"
     DISPATCH_MANAGE = "dispatch:manage"
     DISPATCH_UPDATE_ASSIGNED = "dispatch:update_assigned"
+    APPOINTMENTS_READ = "appointments:read"
+    APPOINTMENTS_MANAGE = "appointments:manage"
+    APPOINTMENTS_UPDATE_ASSIGNED = "appointments:update_assigned"
 
 
 PERMISSION_CATALOGUE: tuple[PermissionDefinition, ...] = (
@@ -65,6 +68,17 @@ PERMISSION_CATALOGUE: tuple[PermissionDefinition, ...] = (
         Permissions.DISPATCH_UPDATE_ASSIGNED,
         "Update the status of emergency tickets assigned to yourself",
     ),
+    PermissionDefinition(
+        Permissions.APPOINTMENTS_READ, "View appointment requests and the schedule"
+    ),
+    PermissionDefinition(
+        Permissions.APPOINTMENTS_MANAGE,
+        "Schedule, reschedule, and manage appointments",
+    ),
+    PermissionDefinition(
+        Permissions.APPOINTMENTS_UPDATE_ASSIGNED,
+        "Update the status of appointments assigned to yourself",
+    ),
 )
 
 DEFAULT_ROLES: dict[str, tuple[str, ...]] = {
@@ -79,6 +93,8 @@ DEFAULT_ROLES: dict[str, tuple[str, ...]] = {
         Permissions.VOICE_READ,
         Permissions.DISPATCH_READ,
         Permissions.DISPATCH_MANAGE,
+        Permissions.APPOINTMENTS_READ,
+        Permissions.APPOINTMENTS_MANAGE,
     ),
     "Admin": (
         Permissions.USERS_READ,
@@ -90,6 +106,8 @@ DEFAULT_ROLES: dict[str, tuple[str, ...]] = {
         Permissions.VOICE_READ,
         Permissions.DISPATCH_READ,
         Permissions.DISPATCH_MANAGE,
+        Permissions.APPOINTMENTS_READ,
+        Permissions.APPOINTMENTS_MANAGE,
     ),
     "Member": (
         Permissions.USERS_READ,
@@ -97,10 +115,13 @@ DEFAULT_ROLES: dict[str, tuple[str, ...]] = {
         Permissions.AI_CONVERSATIONS_READ,
         Permissions.VOICE_READ,
         Permissions.DISPATCH_READ,
+        Permissions.APPOINTMENTS_READ,
     ),
     "Technician": (
         Permissions.DISPATCH_READ,
         Permissions.DISPATCH_UPDATE_ASSIGNED,
+        Permissions.APPOINTMENTS_READ,
+        Permissions.APPOINTMENTS_UPDATE_ASSIGNED,
     ),
 }
 

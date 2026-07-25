@@ -1,3 +1,6 @@
+from app.infrastructure.database.repositories.appointment_repository_impl import (
+    SqlAlchemyAppointmentRepository,
+)
 from app.infrastructure.database.repositories.business_hours_repository_impl import (
     SqlAlchemyBusinessHoursRepository,
 )
@@ -42,6 +45,7 @@ from app.infrastructure.database.repositories.voice_line_repository_impl import 
 )
 
 __all__ = [
+    "SqlAlchemyAppointmentRepository",
     "SqlAlchemyBusinessHoursRepository",
     "SqlAlchemyBusinessProfileRepository",
     "SqlAlchemyConversationOutcomeRepository",

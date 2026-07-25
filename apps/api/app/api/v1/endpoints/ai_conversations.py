@@ -17,7 +17,12 @@ from fastapi import APIRouter, Depends, Query, status
 
 import structlog
 
-from app.api.deps import get_ai_brain_service, get_dispatch_service, require_permission
+from app.api.deps import (
+    get_ai_brain_service,
+    get_appointment_service,
+    get_dispatch_service,
+    require_permission,
+)
 from app.application.schemas.ai_conversations import (
     ConversationDetailResponse,
     ConversationOutcomeResponse,
@@ -28,6 +33,7 @@ from app.application.schemas.ai_conversations import (
     StartConversationRequest,
 )
 from app.application.services.ai_brain_service import AIBrainService
+from app.application.services.appointment_service import AppointmentService
 from app.application.services.dispatch_service import DispatchService
 from app.domain.entities.rbac import Permissions
 from app.domain.entities.user import User
@@ -87,6 +93,7 @@ async def send_message(
     user: User = Depends(_simulate_user),
     service: AIBrainService = Depends(get_ai_brain_service),
     dispatch_service: DispatchService = Depends(get_dispatch_service),
+    appointment_service: AppointmentService = Depends(get_appointment_service),
 ) -> SendMessageResult:
     result = await service.send_message(user.organization_id, conversation_id, payload.message)
 
@@ -99,6 +106,19 @@ async def send_message(
         # call exists here at all.
         logger.warning(
             "dispatch_sync_failed",
+            error=exc.__class__.__name__,
+            message=exc.message,
+            conversation_id=str(conversation_id),
+        )
+
+    try:
+        await appointment_service.sync_appointment_from_outcome(
+            user.organization_id, conversation_id
+        )
+    except DomainError as exc:
+        # Same reasoning as the dispatch sync above.
+        logger.warning(
+            "appointment_sync_failed",
             error=exc.__class__.__name__,
             message=exc.message,
             conversation_id=str(conversation_id),

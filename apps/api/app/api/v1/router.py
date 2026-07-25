@@ -2,6 +2,7 @@ from fastapi import APIRouter
 
 from app.api.v1.endpoints import (
     ai_conversations,
+    appointments,
     auth,
     business_knowledge,
     dispatch,
@@ -20,3 +21,4 @@ api_router.include_router(ai_conversations.router)
 api_router.include_router(voice.router)
 api_router.include_router(vapi_webhooks.router)
 api_router.include_router(dispatch.router)
+api_router.include_router(appointments.router)

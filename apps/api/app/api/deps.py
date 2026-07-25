@@ -12,6 +12,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.ai_brain_service import AIBrainService
+from app.application.services.appointment_service import AppointmentService
 from app.application.services.auth_service import AuthService
 from app.application.services.business_knowledge_service import BusinessKnowledgeService
 from app.application.services.dispatch_service import DispatchService
@@ -22,6 +23,7 @@ from app.domain.entities.user import User
 from app.domain.exceptions import AuthorizationError, InvalidTokenError
 from app.infrastructure.ai.openai_provider import OpenAIProvider
 from app.infrastructure.database.repositories import (
+    SqlAlchemyAppointmentRepository,
     SqlAlchemyBusinessHoursRepository,
     SqlAlchemyBusinessProfileRepository,
     SqlAlchemyConversationOutcomeRepository,
@@ -116,6 +118,19 @@ def get_dispatch_service(
         conversation_repository=SqlAlchemyConversationRepository(db),
         user_repository=SqlAlchemyUserRepository(db),
         role_repository=SqlAlchemyRoleRepository(db),
+    )
+
+
+def get_appointment_service(
+    db: AsyncSession = Depends(get_db),
+) -> AppointmentService:
+    return AppointmentService(
+        appointment_repository=SqlAlchemyAppointmentRepository(db),
+        technician_profile_repository=SqlAlchemyTechnicianProfileRepository(db),
+        conversation_outcome_repository=SqlAlchemyConversationOutcomeRepository(db),
+        service_repository=SqlAlchemyServiceRepository(db),
+        business_hours_repository=SqlAlchemyBusinessHoursRepository(db),
+        business_profile_repository=SqlAlchemyBusinessProfileRepository(db),
     )
 
 

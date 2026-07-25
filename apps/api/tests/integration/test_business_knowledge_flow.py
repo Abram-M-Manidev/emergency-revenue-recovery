@@ -158,11 +158,13 @@ async def test_business_knowledge_full_crud_flow(client: AsyncClient):
         "category": "Repair",
         "is_emergency_eligible": True,
         "is_active": True,
+        "default_duration_minutes": 60,
     }
     create_service = await client.post(
         "/api/v1/business-knowledge/services", json=service_payload, headers=headers
     )
     assert create_service.status_code == 201
+    assert create_service.json()["default_duration_minutes"] == 60
     service_id = create_service.json()["id"]
 
     update_service_payload = {**service_payload, "is_active": False}

@@ -13,3 +13,4 @@ class Service:
     category: str | None
     is_emergency_eligible: bool
     is_active: bool
+    default_duration_minutes: int | None

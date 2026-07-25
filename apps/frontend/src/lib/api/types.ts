@@ -105,6 +105,7 @@ export interface Service {
   category: string | null;
   is_emergency_eligible: boolean;
   is_active: boolean;
+  default_duration_minutes: number | null;
 }
 
 export type ServicePayload = Omit<Service, "id">;
@@ -246,4 +247,32 @@ export interface CreateTechnicianPayload {
   email: string;
   phone_number: string;
   temporary_password: string;
+}
+
+// --- Appointments ---
+
+export type AppointmentStatus = "requested" | "scheduled" | "completed" | "canceled" | "no_show";
+
+export interface Appointment {
+  id: string;
+  conversation_id: string;
+  matched_service_id: string | null;
+  status: AppointmentStatus;
+  customer_name: string | null;
+  customer_phone: string | null;
+  customer_address: string | null;
+  summary: string;
+  scheduled_start_at: string | null;
+  duration_minutes: number | null;
+  assigned_technician_user_id: string | null;
+  assigned_at: string | null;
+  closed_at: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ScheduleAppointmentPayload {
+  scheduled_start_at: string;
+  duration_minutes: number;
+  technician_user_id: string | null;
 }

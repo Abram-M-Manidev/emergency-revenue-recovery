@@ -100,6 +100,7 @@ def test_inactive_services_and_faqs_are_excluded():
             category=None,
             is_emergency_eligible=False,
             is_active=False,
+            default_duration_minutes=None,
         )
     ]
     faqs = [
@@ -127,6 +128,7 @@ def test_active_service_area_and_faq_are_included():
             category="Repair",
             is_emergency_eligible=True,
             is_active=True,
+            default_duration_minutes=None,
         )
     ]
     areas = [ServiceArea(id=uuid.uuid4(), organization_id=_ORG_ID, label="Downtown", postal_code=None, city=None, state=None)]

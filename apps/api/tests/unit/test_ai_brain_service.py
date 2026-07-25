@@ -144,6 +144,7 @@ async def test_matched_service_id_is_resolved_from_service_name():
         category=None,
         is_emergency_eligible=True,
         is_active=True,
+        default_duration_minutes=None,
     )
     provider = FakeAIProvider()
     provider.queue_reply(default_reply(matched_service_name="Furnace Repair"))

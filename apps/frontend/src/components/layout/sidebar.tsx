@@ -2,7 +2,15 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { BookOpen, LayoutDashboard, MessageCircle, Settings, Siren, Truck } from "lucide-react";
+import {
+  BookOpen,
+  CalendarClock,
+  LayoutDashboard,
+  MessageCircle,
+  Settings,
+  Siren,
+  Truck,
+} from "lucide-react";
 
 import { ROUTES } from "@/lib/constants";
 import { cn } from "@/lib/utils/cn";
@@ -12,6 +20,7 @@ const NAV_ITEMS = [
   { href: ROUTES.businessKnowledge, label: "Business Knowledge", icon: BookOpen },
   { href: ROUTES.aiConversations, label: "AI Conversations", icon: MessageCircle },
   { href: ROUTES.dispatch, label: "Dispatch", icon: Truck },
+  { href: ROUTES.appointments, label: "Appointments", icon: CalendarClock },
   { href: ROUTES.settings, label: "Settings", icon: Settings },
 ] as const;
 

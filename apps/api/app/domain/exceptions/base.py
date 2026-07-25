@@ -77,6 +77,21 @@ class InvalidTicketStatusTransitionError(DomainError):
         super().__init__(message)
 
 
+class InvalidAppointmentStatusTransitionError(DomainError):
+    def __init__(
+        self,
+        message: str = "This status change is not allowed for the appointment's current state.",
+    ) -> None:
+        super().__init__(message)
+
+
+class AppointmentOutsideBusinessHoursError(DomainError):
+    def __init__(
+        self, message: str = "The selected time is outside the organization's business hours."
+    ) -> None:
+        super().__init__(message)
+
+
 class VoiceLineNotFoundError(DomainError):
     """Raised when an inbound call's assistant/phone number id doesn't map
     to any configured organization. The Vapi webhook endpoint (a voice
