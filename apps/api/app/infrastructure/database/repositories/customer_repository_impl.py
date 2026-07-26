@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -63,6 +64,25 @@ class SqlAlchemyCustomerRepository(CustomerRepository):
             raise EntityAlreadyExistsError("Customer", "phone_number", phone_number) from exc
         await self._session.refresh(model)
         return _to_entity(model)
+
+    # --- Analytics (Milestone 8) aggregate queries ---
+
+    async def count_new_in_range(
+        self, organization_id: uuid.UUID, *, start: datetime | None, end: datetime
+    ) -> int:
+        query = select(func.count()).select_from(CustomerModel).where(
+            CustomerModel.organization_id == organization_id,
+            CustomerModel.created_at < end,
+        )
+        if start is not None:
+            query = query.where(CustomerModel.created_at >= start)
+        return (await self._session.execute(query)).scalar_one()
+
+    async def count_total(self, organization_id: uuid.UUID) -> int:
+        query = select(func.count()).select_from(CustomerModel).where(
+            CustomerModel.organization_id == organization_id
+        )
+        return (await self._session.execute(query)).scalar_one()
 
     async def get_by_id(
         self, organization_id: uuid.UUID, customer_id: uuid.UUID

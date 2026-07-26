@@ -35,6 +35,7 @@ class Permissions:
     APPOINTMENTS_UPDATE_ASSIGNED = "appointments:update_assigned"
     CUSTOMERS_READ = "customers:read"
     CUSTOMERS_MANAGE = "customers:manage"
+    ANALYTICS_READ = "analytics:read"
 
 
 PERMISSION_CATALOGUE: tuple[PermissionDefinition, ...] = (
@@ -85,6 +86,9 @@ PERMISSION_CATALOGUE: tuple[PermissionDefinition, ...] = (
     PermissionDefinition(
         Permissions.CUSTOMERS_MANAGE, "Create and edit customer records"
     ),
+    PermissionDefinition(
+        Permissions.ANALYTICS_READ, "View aggregate analytics and revenue reporting"
+    ),
 )
 
 DEFAULT_ROLES: dict[str, tuple[str, ...]] = {
@@ -103,6 +107,7 @@ DEFAULT_ROLES: dict[str, tuple[str, ...]] = {
         Permissions.APPOINTMENTS_MANAGE,
         Permissions.CUSTOMERS_READ,
         Permissions.CUSTOMERS_MANAGE,
+        Permissions.ANALYTICS_READ,
     ),
     "Admin": (
         Permissions.USERS_READ,
@@ -118,6 +123,7 @@ DEFAULT_ROLES: dict[str, tuple[str, ...]] = {
         Permissions.APPOINTMENTS_MANAGE,
         Permissions.CUSTOMERS_READ,
         Permissions.CUSTOMERS_MANAGE,
+        Permissions.ANALYTICS_READ,
     ),
     "Member": (
         Permissions.USERS_READ,
@@ -127,6 +133,7 @@ DEFAULT_ROLES: dict[str, tuple[str, ...]] = {
         Permissions.DISPATCH_READ,
         Permissions.APPOINTMENTS_READ,
         Permissions.CUSTOMERS_READ,
+        Permissions.ANALYTICS_READ,
     ),
     "Technician": (
         Permissions.DISPATCH_READ,

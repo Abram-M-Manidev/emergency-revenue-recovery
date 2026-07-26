@@ -29,9 +29,10 @@ export function scheduleAppointment(
 export function updateAppointmentStatus(
   appointmentId: string,
   status: AppointmentStatus,
+  actualValue?: number,
 ): Promise<Appointment> {
   return apiRequest<Appointment>(`${BASE}/${appointmentId}/status`, {
     method: "POST",
-    body: { status },
+    body: { status, actual_value: actualValue ?? null },
   });
 }

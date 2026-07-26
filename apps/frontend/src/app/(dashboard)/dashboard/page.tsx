@@ -1,28 +1,43 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Activity, PhoneCall, Siren, Users } from "lucide-react";
+import { PhoneCall, Siren, TrendingUp, Users } from "lucide-react";
 import Link from "next/link";
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useAuth } from "@/hooks/use-auth";
+import { fetchAnalyticsSummary } from "@/lib/api/analytics";
 import { fetchCustomers } from "@/lib/api/customers";
 import { fetchTickets } from "@/lib/api/dispatch";
+import type { AnalyticsSummary } from "@/lib/api/types";
 import { ROUTES } from "@/lib/constants";
 
-const UPCOMING_MODULES = [
-  {
-    icon: PhoneCall,
-    title: "Call activity",
-    description: "After-hours call volume and outcomes will appear here.",
-  },
-  {
-    icon: Activity,
-    title: "Revenue recovered",
-    description: "Recovered revenue analytics will appear here.",
-  },
-];
+const currencyFormatter = new Intl.NumberFormat(undefined, {
+  style: "currency",
+  currency: "USD",
+  maximumFractionDigits: 0,
+});
+
+function useAnalyticsOverview() {
+  const [summary, setSummary] = useState<AnalyticsSummary | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchAnalyticsSummary("30d")
+      .then((data) => {
+        if (!cancelled) setSummary(data);
+      })
+      .catch(() => {
+        if (!cancelled) setSummary(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return summary;
+}
 
 function useOpenTicketCount() {
   const [count, setCount] = useState<number | null>(null);
@@ -68,6 +83,7 @@ export default function DashboardPage() {
   const { user } = useAuth();
   const openTicketCount = useOpenTicketCount();
   const customerCount = useCustomerCount();
+  const analytics = useAnalyticsOverview();
 
   return (
     <div className="space-y-6">
@@ -78,7 +94,7 @@ export default function DashboardPage() {
         </p>
       </div>
 
-      <div className="grid gap-4 md:grid-cols-3">
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
         <Link href={ROUTES.dispatch}>
           <Card className="h-full transition-colors hover:border-primary/50">
             <CardHeader>
@@ -125,16 +141,52 @@ export default function DashboardPage() {
             </CardContent>
           </Card>
         </Link>
-        {UPCOMING_MODULES.map((module) => (
-          <Card key={module.title}>
+        <Link href={ROUTES.analytics}>
+          <Card className="h-full transition-colors hover:border-primary/50">
             <CardHeader>
-              <CardTitle className="text-base">{module.title}</CardTitle>
+              <CardTitle className="text-base">Call activity</CardTitle>
             </CardHeader>
             <CardContent>
-              <EmptyState icon={module.icon} title="Coming soon" description={module.description} />
+              {analytics === null ? (
+                <EmptyState
+                  icon={PhoneCall}
+                  title="—"
+                  description="After-hours call volume will appear here."
+                />
+              ) : (
+                <div className="flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border p-12 text-center">
+                  <PhoneCall className="h-6 w-6 text-muted-foreground" aria-hidden="true" />
+                  <p className="text-2xl font-semibold">{analytics.total_conversations}</p>
+                  <p className="text-sm text-muted-foreground">calls in the last 30 days</p>
+                </div>
+              )}
             </CardContent>
           </Card>
-        ))}
+        </Link>
+        <Link href={ROUTES.analytics}>
+          <Card className="h-full transition-colors hover:border-primary/50">
+            <CardHeader>
+              <CardTitle className="text-base">Revenue recovered</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {analytics === null ? (
+                <EmptyState
+                  icon={TrendingUp}
+                  title="—"
+                  description="Recovered revenue analytics will appear here."
+                />
+              ) : (
+                <div className="flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border p-12 text-center">
+                  <TrendingUp className="h-6 w-6 text-muted-foreground" aria-hidden="true" />
+                  <p className="text-2xl font-semibold">
+                    {currencyFormatter.format(analytics.total_revenue)}
+                  </p>
+                  <p className="text-sm text-muted-foreground">in the last 30 days</p>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </Link>
       </div>
     </div>
   );

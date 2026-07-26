@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import date, time
+from decimal import Decimal
 
 from app.domain.entities.business_hours import HoursException, WeeklyHours
 from app.domain.entities.business_profile import BusinessProfile, BusinessType
@@ -31,6 +32,22 @@ from app.domain.repositories.emergency_keyword_repository import EmergencyKeywor
 from app.domain.repositories.faq_repository import FAQRepository
 from app.domain.repositories.service_area_repository import ServiceAreaRepository
 from app.domain.repositories.service_repository import ServiceRepository
+
+
+def _as_decimal(value: Decimal | float | None) -> Decimal | None:
+    """`CreateServiceRequest.default_price` (application/schemas/
+    business_knowledge.py) is typed `float`, not `Decimal` — Pydantic v2
+    would otherwise serialize a bare `Decimal` field to a JSON string on
+    responses (see `ServiceResponse.default_price`'s same `float` choice).
+    The repository/DB layer, however, needs a real `Decimal`: the asyncpg
+    dialect's `Numeric` bind processor passes the Python value straight
+    through with no float->Decimal conversion of its own. Converting via
+    `str()` (not passing the float directly to `Decimal()`) avoids
+    inheriting binary float imprecision (e.g. `Decimal(19.99)` ==
+    `Decimal('19.98999999999999999...')`)."""
+    if value is None:
+        return None
+    return value if isinstance(value, Decimal) else Decimal(str(value))
 
 
 class BusinessKnowledgeService:
@@ -166,6 +183,7 @@ class BusinessKnowledgeService:
         is_emergency_eligible: bool,
         is_active: bool,
         default_duration_minutes: int | None,
+        default_price: Decimal | float | None = None,
     ) -> Service:
         return await self._services.create(
             organization_id=organization_id,
@@ -175,6 +193,7 @@ class BusinessKnowledgeService:
             is_emergency_eligible=is_emergency_eligible,
             is_active=is_active,
             default_duration_minutes=default_duration_minutes,
+            default_price=_as_decimal(default_price),
         )
 
     async def update_service(
@@ -188,6 +207,7 @@ class BusinessKnowledgeService:
         is_emergency_eligible: bool,
         is_active: bool,
         default_duration_minutes: int | None,
+        default_price: Decimal | float | None = None,
     ) -> Service:
         updated = await self._services.update(
             organization_id,
@@ -198,6 +218,7 @@ class BusinessKnowledgeService:
             is_emergency_eligible=is_emergency_eligible,
             is_active=is_active,
             default_duration_minutes=default_duration_minutes,
+            default_price=_as_decimal(default_price),
         )
         if updated is None:
             raise EntityNotFoundError("Service", str(service_id))

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 
 import pytest
 
@@ -218,6 +219,53 @@ async def test_legal_transition_sequence_sets_closed_at_on_resolve():
 
     assert ticket.status is TicketStatus.RESOLVED
     assert ticket.closed_at is not None
+
+
+@pytest.mark.asyncio
+async def test_resolving_a_ticket_persists_actual_value():
+    """Milestone 8: an optional dollar value captured when a ticket is
+    marked RESOLVED, which Analytics later sums into "revenue recovered"."""
+    service, _, technicians, outcomes = _make_service()
+    conversation_id = uuid.uuid4()
+    await _seed_emergency_outcome(outcomes, conversation_id)
+    ticket = await service.sync_ticket_from_outcome(_ORG_ID, conversation_id)
+    owner = _owner_user()
+    tech = _technician_user()
+    await technicians.create(organization_id=_ORG_ID, user_id=tech.id, phone_number="+15005550006")
+    ticket = await service.assign_ticket(_ORG_ID, ticket.id, tech.id)
+    ticket = await service.update_ticket_status(
+        _ORG_ID, ticket.id, TicketStatus.EN_ROUTE, acting_user=owner
+    )
+
+    ticket = await service.update_ticket_status(
+        _ORG_ID, ticket.id, TicketStatus.RESOLVED, acting_user=owner, actual_value=Decimal("199.99")
+    )
+
+    assert ticket.actual_value == Decimal("199.99")
+
+
+@pytest.mark.asyncio
+async def test_leaving_actual_value_unset_does_not_clear_it():
+    """A second status-affecting call with no `actual_value` (e.g. the
+    generic status endpoint used for something else afterward) must not
+    wipe out a value staff already entered."""
+    service, tickets, technicians, outcomes = _make_service()
+    conversation_id = uuid.uuid4()
+    await _seed_emergency_outcome(outcomes, conversation_id)
+    ticket = await service.sync_ticket_from_outcome(_ORG_ID, conversation_id)
+    await tickets.update_status(
+        ticket.id, status=TicketStatus.NEW, actual_value=Decimal("50.00")
+    )
+
+    owner = _owner_user()
+    tech = _technician_user()
+    await technicians.create(organization_id=_ORG_ID, user_id=tech.id, phone_number="+15005550006")
+    ticket = await service.assign_ticket(_ORG_ID, ticket.id, tech.id)
+    ticket = await service.update_ticket_status(
+        _ORG_ID, ticket.id, TicketStatus.EN_ROUTE, acting_user=owner
+    )
+
+    assert ticket.actual_value == Decimal("50.00")
 
 
 @pytest.mark.asyncio

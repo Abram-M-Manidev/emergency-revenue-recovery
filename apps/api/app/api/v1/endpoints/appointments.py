@@ -14,6 +14,7 @@ appointment requires `appointments:manage` (Owner/Admin only)."""
 from __future__ import annotations
 
 import uuid
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Query
 
@@ -83,6 +84,10 @@ async def update_appointment_status(
     service: AppointmentService = Depends(get_appointment_service),
 ) -> AppointmentResponse:
     appointment = await service.update_appointment_status(
-        user.organization_id, appointment_id, payload.status, acting_user=user
+        user.organization_id,
+        appointment_id,
+        payload.status,
+        acting_user=user,
+        actual_value=Decimal(str(payload.actual_value)) if payload.actual_value is not None else None,
     )
     return AppointmentResponse.model_validate(appointment)

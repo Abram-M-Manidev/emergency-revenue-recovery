@@ -4,7 +4,16 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
-import { BookOpen, LayoutDashboard, MessageCircle, Settings, Siren, Users, X } from "lucide-react";
+import {
+  BarChart3,
+  BookOpen,
+  LayoutDashboard,
+  MessageCircle,
+  Settings,
+  Siren,
+  Users,
+  X,
+} from "lucide-react";
 import { useEffect } from "react";
 
 import { ROUTES } from "@/lib/constants";
@@ -15,6 +24,7 @@ const NAV_ITEMS = [
   { href: ROUTES.businessKnowledge, label: "Business Knowledge", icon: BookOpen },
   { href: ROUTES.aiConversations, label: "AI Conversations", icon: MessageCircle },
   { href: ROUTES.customers, label: "Customers", icon: Users },
+  { href: ROUTES.analytics, label: "Analytics", icon: BarChart3 },
   { href: ROUTES.settings, label: "Settings", icon: Settings },
 ] as const;
 

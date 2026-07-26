@@ -106,6 +106,7 @@ export interface Service {
   is_emergency_eligible: boolean;
   is_active: boolean;
   default_duration_minutes: number | null;
+  default_price: number | null;
 }
 
 export type ServicePayload = Omit<Service, "id">;
@@ -228,6 +229,7 @@ export interface EmergencyTicket {
   closed_at: string | null;
   created_at: string;
   updated_at: string;
+  actual_value: number | null;
 }
 
 export interface TechnicianProfile {
@@ -269,6 +271,7 @@ export interface Appointment {
   closed_at: string | null;
   created_at: string;
   updated_at: string;
+  actual_value: number | null;
 }
 
 export interface ScheduleAppointmentPayload {
@@ -302,4 +305,47 @@ export interface CustomerPayload {
   email: string | null;
   address: string | null;
   notes: string | null;
+}
+
+// --- Analytics ---
+
+export type DateRangePreset = "today" | "7d" | "30d" | "90d" | "all";
+
+export interface DailyCount {
+  day: string;
+  count: number;
+}
+
+export interface DailyRevenue {
+  day: string;
+  amount: number;
+}
+
+export interface BucketCount {
+  label: string;
+  count: number;
+}
+
+export interface AnalyticsSummary {
+  range_start: string | null;
+  range_end: string;
+  total_conversations: number;
+  conversations_by_day: DailyCount[];
+  conversations_by_channel: BucketCount[];
+  classification_breakdown: BucketCount[];
+  recommended_action_breakdown: BucketCount[];
+  tickets_created: number;
+  tickets_resolved: number;
+  average_ticket_resolution_minutes: number | null;
+  appointments_created: number;
+  appointments_completed: number;
+  appointments_no_show: number;
+  appointment_show_up_rate: number | null;
+  appointment_status_breakdown: BucketCount[];
+  new_customers: number;
+  total_customers: number;
+  ticket_revenue: number;
+  appointment_revenue: number;
+  total_revenue: number;
+  revenue_by_day: DailyRevenue[];
 }

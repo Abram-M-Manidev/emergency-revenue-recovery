@@ -17,6 +17,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from app.domain.entities.conversation_outcome import CallClassification, RecommendedAction
 from app.domain.entities.emergency_ticket import EmergencyTicket, TicketStatus
@@ -163,6 +164,7 @@ class DispatchService:
         new_status: TicketStatus,
         *,
         acting_user: User,
+        actual_value: Decimal | None = None,
     ) -> EmergencyTicket:
         ticket = await self.get_ticket(organization_id, ticket_id)
 
@@ -178,7 +180,9 @@ class DispatchService:
             )
 
         closed_at = datetime.now(timezone.utc) if new_status in _CLOSED_STATUSES else None
-        return await self._tickets.update_status(ticket_id, status=new_status, closed_at=closed_at)
+        return await self._tickets.update_status(
+            ticket_id, status=new_status, closed_at=closed_at, actual_value=actual_value
+        )
 
     # --- Technicians ---
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass
+from decimal import Decimal
 
 
 @dataclass(frozen=True, slots=True)
@@ -14,3 +15,4 @@ class Service:
     is_emergency_eligible: bool
     is_active: bool
     default_duration_minutes: int | None
+    default_price: Decimal | None = None

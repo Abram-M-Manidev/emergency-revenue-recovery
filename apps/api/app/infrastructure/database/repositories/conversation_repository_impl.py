@@ -3,9 +3,10 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.entities.analytics import BucketCount, DailyCount
 from app.domain.entities.conversation import Conversation, ConversationChannel, ConversationStatus
 from app.domain.entities.conversation_message import ConversationMessage, MessageRole
 from app.domain.repositories.conversation_repository import ConversationRepository
@@ -112,3 +113,50 @@ class SqlAlchemyConversationRepository(ConversationRepository):
         await self._session.flush()
         await self._session.refresh(model)
         return _to_entity(model)
+
+    # --- Analytics (Milestone 8) aggregate queries ---
+
+    async def count_in_range(
+        self, organization_id: uuid.UUID, *, start: datetime | None, end: datetime
+    ) -> int:
+        query = select(func.count()).select_from(ConversationModel).where(
+            ConversationModel.organization_id == organization_id,
+            ConversationModel.started_at < end,
+        )
+        if start is not None:
+            query = query.where(ConversationModel.started_at >= start)
+        return (await self._session.execute(query)).scalar_one()
+
+    async def count_by_day(
+        self, organization_id: uuid.UUID, *, start: datetime | None, end: datetime
+    ) -> list[DailyCount]:
+        day = func.date_trunc("day", ConversationModel.started_at).label("day")
+        query = (
+            select(day, func.count())
+            .where(
+                ConversationModel.organization_id == organization_id,
+                ConversationModel.started_at < end,
+            )
+            .group_by(day)
+            .order_by(day)
+        )
+        if start is not None:
+            query = query.where(ConversationModel.started_at >= start)
+        rows = (await self._session.execute(query)).all()
+        return [DailyCount(day=row[0].date(), count=row[1]) for row in rows]
+
+    async def count_by_channel_in_range(
+        self, organization_id: uuid.UUID, *, start: datetime | None, end: datetime
+    ) -> list[BucketCount]:
+        query = (
+            select(ConversationModel.channel, func.count())
+            .where(
+                ConversationModel.organization_id == organization_id,
+                ConversationModel.started_at < end,
+            )
+            .group_by(ConversationModel.channel)
+        )
+        if start is not None:
+            query = query.where(ConversationModel.started_at >= start)
+        rows = (await self._session.execute(query)).all()
+        return [BucketCount(label=row[0].value, count=row[1]) for row in rows]

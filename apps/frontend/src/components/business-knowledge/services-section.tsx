@@ -23,6 +23,7 @@ const EMPTY_FORM: ServicePayload = {
   is_emergency_eligible: false,
   is_active: true,
   default_duration_minutes: null,
+  default_price: null,
 };
 
 export function ServicesSection() {
@@ -65,6 +66,7 @@ export function ServicesSection() {
       is_emergency_eligible: service.is_emergency_eligible,
       is_active: service.is_active,
       default_duration_minutes: service.default_duration_minutes,
+      default_price: service.default_price,
     });
     setModalOpen(true);
   }
@@ -78,6 +80,7 @@ export function ServicesSection() {
       is_emergency_eligible: form.is_emergency_eligible,
       is_active: form.is_active,
       default_duration_minutes: form.default_duration_minutes,
+      default_price: form.default_price,
     };
     try {
       if (editingId) {
@@ -229,6 +232,21 @@ export function ServicesSection() {
                 setForm((current) => ({
                   ...current,
                   default_duration_minutes: event.target.value ? Number(event.target.value) : null,
+                }))
+              }
+            />
+          </div>
+          <div>
+            <label className="text-sm font-medium">Default price ($)</label>
+            <Input
+              type="number"
+              min={0}
+              step="0.01"
+              value={form.default_price ?? ""}
+              onChange={(event) =>
+                setForm((current) => ({
+                  ...current,
+                  default_price: event.target.value ? Number(event.target.value) : null,
                 }))
               }
             />

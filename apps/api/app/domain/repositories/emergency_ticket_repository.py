@@ -3,7 +3,9 @@ from __future__ import annotations
 import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime
+from decimal import Decimal
 
+from app.domain.entities.analytics import DailyRevenue
 from app.domain.entities.emergency_ticket import EmergencyTicket, TicketStatus
 
 
@@ -62,7 +64,13 @@ class EmergencyTicketRepository(ABC):
         *,
         status: TicketStatus,
         closed_at: datetime | None = None,
-    ) -> EmergencyTicket: ...
+        actual_value: Decimal | None = None,
+    ) -> EmergencyTicket:
+        """`actual_value` (Milestone 8), when provided, is persisted
+        regardless of the target status — it is meaningful when closing a
+        ticket as RESOLVED, but the repository does not enforce that; see
+        `DispatchService.update_ticket_status`."""
+        ...
 
     @abstractmethod
     async def set_customer(
@@ -77,3 +85,57 @@ class EmergencyTicketRepository(ABC):
     async def list_by_customer_id(
         self, organization_id: uuid.UUID, customer_id: uuid.UUID
     ) -> list[EmergencyTicket]: ...
+
+    # --- Analytics (Milestone 8) aggregate queries ---
+
+    @abstractmethod
+    async def count_created_in_range(
+        self, organization_id: uuid.UUID, *, start: datetime | None, end: datetime
+    ) -> int: ...
+
+    @abstractmethod
+    async def count_closed_in_range(
+        self,
+        organization_id: uuid.UUID,
+        *,
+        status: TicketStatus,
+        start: datetime | None,
+        end: datetime,
+    ) -> int:
+        """Counts tickets whose `closed_at` (not `created_at`) falls in the
+        range and whose current status matches — i.e. "closed as RESOLVED
+        during this window", not "created during this window"."""
+        ...
+
+    @abstractmethod
+    async def sum_actual_value_in_range(
+        self,
+        organization_id: uuid.UUID,
+        *,
+        status: TicketStatus,
+        start: datetime | None,
+        end: datetime,
+    ) -> Decimal:
+        """Sums `actual_value` across tickets closed (by `closed_at`) with
+        the given status in the range. Returns `Decimal("0")` when there is
+        nothing to sum, never `None`."""
+        ...
+
+    @abstractmethod
+    async def revenue_by_day(
+        self,
+        organization_id: uuid.UUID,
+        *,
+        status: TicketStatus,
+        start: datetime | None,
+        end: datetime,
+    ) -> list[DailyRevenue]: ...
+
+    @abstractmethod
+    async def average_resolution_minutes(
+        self, organization_id: uuid.UUID, *, start: datetime | None, end: datetime
+    ) -> float | None:
+        """Average `closed_at - created_at`, in minutes, across tickets
+        closed as RESOLVED (by `closed_at`) in the range. `None` when there
+        are none."""
+        ...

@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from app.domain.entities.appointment import Appointment, AppointmentStatus
@@ -180,6 +181,7 @@ class AppointmentService:
         new_status: AppointmentStatus,
         *,
         acting_user: User,
+        actual_value: Decimal | None = None,
     ) -> Appointment:
         appointment = await self.get_appointment(organization_id, appointment_id)
 
@@ -196,7 +198,7 @@ class AppointmentService:
 
         closed_at = datetime.now(timezone.utc) if new_status in _CLOSED_STATUSES else None
         return await self._appointments.update_status(
-            appointment_id, status=new_status, closed_at=closed_at
+            appointment_id, status=new_status, closed_at=closed_at, actual_value=actual_value
         )
 
     async def cancel_appointment(

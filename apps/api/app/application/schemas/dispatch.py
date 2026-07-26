@@ -60,6 +60,7 @@ class EmergencyTicketResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     customer_id: uuid.UUID | None = None
+    actual_value: float | None = None
 
 
 class AssignTicketRequest(BaseModel):
@@ -68,3 +69,4 @@ class AssignTicketRequest(BaseModel):
 
 class UpdateTicketStatusRequest(BaseModel):
     status: TicketStatus
+    actual_value: float | None = Field(default=None, ge=0)

@@ -22,6 +22,7 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
+from decimal import Decimal
 from enum import Enum
 
 
@@ -50,3 +51,4 @@ class EmergencyTicket:
     created_at: datetime
     updated_at: datetime
     customer_id: uuid.UUID | None = None
+    actual_value: Decimal | None = None

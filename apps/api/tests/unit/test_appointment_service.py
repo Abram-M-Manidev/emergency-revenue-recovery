@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, time, timezone
+from decimal import Decimal
 
 import pytest
 
@@ -434,6 +435,37 @@ async def test_legal_transition_sequence_sets_closed_at_on_completed():
 
     assert completed.status is AppointmentStatus.COMPLETED
     assert completed.closed_at is not None
+
+
+@pytest.mark.asyncio
+async def test_completing_an_appointment_persists_actual_value():
+    """Milestone 8: an optional dollar value captured when an appointment
+    is marked COMPLETED, which Analytics later sums into "revenue
+    recovered"."""
+    service, appointments, technicians, outcomes = _make_service()
+    conversation_id = uuid.uuid4()
+    await _seed_book_appointment_outcome(outcomes, conversation_id)
+    appointment = await service.sync_appointment_from_outcome(_ORG_ID, conversation_id)
+    tech = _technician_user()
+    await technicians.create(organization_id=_ORG_ID, user_id=tech.id, phone_number="+15005550006")
+    appointment = await service.schedule_appointment(
+        _ORG_ID,
+        appointment.id,
+        scheduled_start_at=_MONDAY_10AM,
+        duration_minutes=30,
+        technician_user_id=tech.id,
+    )
+    owner = _owner_user()
+
+    completed = await service.update_appointment_status(
+        _ORG_ID,
+        appointment.id,
+        AppointmentStatus.COMPLETED,
+        acting_user=owner,
+        actual_value=Decimal("125.00"),
+    )
+
+    assert completed.actual_value == Decimal("125.00")
 
 
 @pytest.mark.asyncio

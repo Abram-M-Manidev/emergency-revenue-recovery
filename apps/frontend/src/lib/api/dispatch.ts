@@ -32,10 +32,11 @@ export function assignTicket(
 export function updateTicketStatus(
   ticketId: string,
   status: TicketStatus,
+  actualValue?: number,
 ): Promise<EmergencyTicket> {
   return apiRequest<EmergencyTicket>(`${BASE}/tickets/${ticketId}/status`, {
     method: "POST",
-    body: { status },
+    body: { status, actual_value: actualValue ?? null },
   });
 }
 

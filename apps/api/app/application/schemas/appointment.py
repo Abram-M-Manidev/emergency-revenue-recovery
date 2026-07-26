@@ -27,6 +27,7 @@ class AppointmentResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     customer_id: uuid.UUID | None = None
+    actual_value: float | None = None
 
 
 class ScheduleAppointmentRequest(BaseModel):
@@ -37,3 +38,4 @@ class ScheduleAppointmentRequest(BaseModel):
 
 class UpdateAppointmentStatusRequest(BaseModel):
     status: AppointmentStatus
+    actual_value: float | None = Field(default=None, ge=0)

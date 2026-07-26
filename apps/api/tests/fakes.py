@@ -7,10 +7,13 @@ own unit tests and `VoiceService`'s, which wraps it) without a database."""
 from __future__ import annotations
 
 import uuid
+from collections import defaultdict
 from dataclasses import replace
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from app.domain.ai.provider import AIProvider, AIReply, AIRequest
+from app.domain.entities.analytics import BucketCount, DailyCount, DailyRevenue
 from app.domain.entities.appointment import Appointment, AppointmentStatus
 from app.domain.entities.business_hours import HoursException, WeeklyHours
 from app.domain.entities.business_profile import BusinessProfile
@@ -45,6 +48,12 @@ from app.domain.repositories.service_area_repository import ServiceAreaRepositor
 from app.domain.repositories.service_repository import ServiceRepository
 from app.domain.repositories.technician_profile_repository import TechnicianProfileRepository
 from app.domain.repositories.user_repository import UserRepository
+
+
+def _in_range(value: datetime, start: datetime | None, end: datetime) -> bool:
+    if value >= end:
+        return False
+    return start is None or value >= start
 
 
 class FakeConversationRepository(ConversationRepository):
@@ -104,10 +113,35 @@ class FakeConversationRepository(ConversationRepository):
         self._conversations[conversation_id] = updated
         return updated
 
+    # --- Analytics (Milestone 8) ---
+
+    def _in_range(self, organization_id, *, start, end):
+        return [
+            c
+            for c in self._conversations.values()
+            if c.organization_id == organization_id and _in_range(c.started_at, start, end)
+        ]
+
+    async def count_in_range(self, organization_id, *, start, end):
+        return len(self._in_range(organization_id, start=start, end=end))
+
+    async def count_by_day(self, organization_id, *, start, end):
+        buckets: dict = defaultdict(int)
+        for c in self._in_range(organization_id, start=start, end=end):
+            buckets[c.started_at.date()] += 1
+        return [DailyCount(day=day, count=count) for day, count in sorted(buckets.items())]
+
+    async def count_by_channel_in_range(self, organization_id, *, start, end):
+        buckets: dict = defaultdict(int)
+        for c in self._in_range(organization_id, start=start, end=end):
+            buckets[c.channel.value] += 1
+        return [BucketCount(label=label, count=count) for label, count in buckets.items()]
+
 
 class FakeConversationOutcomeRepository(ConversationOutcomeRepository):
-    def __init__(self) -> None:
+    def __init__(self, conversation_repository: "FakeConversationRepository | None" = None) -> None:
         self._outcomes: dict[uuid.UUID, ConversationOutcome] = {}
+        self._conversations = conversation_repository
 
     async def upsert(
         self,
@@ -141,6 +175,38 @@ class FakeConversationOutcomeRepository(ConversationOutcomeRepository):
 
     async def get_by_conversation_id(self, conversation_id):
         return self._outcomes.get(conversation_id)
+
+    # --- Analytics (Milestone 8) ---
+    #
+    # Mirrors the real repository's join to `conversations` for org/date
+    # scoping, since `ConversationOutcome` carries neither itself — see
+    # `conversation_outcome_repository_impl.py`.
+
+    def _outcomes_in_range(self, organization_id, *, start, end):
+        assert self._conversations is not None, (
+            "FakeConversationOutcomeRepository needs a conversation_repository "
+            "to answer analytics queries."
+        )
+        matches = []
+        for outcome in self._outcomes.values():
+            conversation = self._conversations._conversations.get(outcome.conversation_id)
+            if conversation is None or conversation.organization_id != organization_id:
+                continue
+            if _in_range(conversation.started_at, start, end):
+                matches.append(outcome)
+        return matches
+
+    async def classification_breakdown(self, organization_id, *, start, end):
+        buckets: dict = defaultdict(int)
+        for outcome in self._outcomes_in_range(organization_id, start=start, end=end):
+            buckets[outcome.classification.value] += 1
+        return [BucketCount(label=label, count=count) for label, count in buckets.items()]
+
+    async def recommended_action_breakdown(self, organization_id, *, start, end):
+        buckets: dict = defaultdict(int)
+        for outcome in self._outcomes_in_range(organization_id, start=start, end=end):
+            buckets[outcome.recommended_action.value] += 1
+        return [BucketCount(label=label, count=count) for label, count in buckets.items()]
 
 
 class FakeBusinessProfileRepository(BusinessProfileRepository):
@@ -312,12 +378,13 @@ class FakeEmergencyTicketRepository(EmergencyTicketRepository):
         self._tickets[ticket_id] = updated
         return updated
 
-    async def update_status(self, ticket_id, *, status, closed_at=None):
+    async def update_status(self, ticket_id, *, status, closed_at=None, actual_value=None):
         ticket = self._tickets[ticket_id]
         updated = replace(
             ticket,
             status=status,
             closed_at=closed_at if closed_at is not None else ticket.closed_at,
+            actual_value=actual_value if actual_value is not None else ticket.actual_value,
         )
         self._tickets[ticket_id] = updated
         return updated
@@ -336,6 +403,53 @@ class FakeEmergencyTicketRepository(EmergencyTicketRepository):
         ]
         matches.sort(key=lambda t: t.created_at, reverse=True)
         return matches
+
+    # --- Analytics (Milestone 8) ---
+
+    async def count_created_in_range(self, organization_id, *, start, end):
+        return len(
+            [
+                t
+                for t in self._tickets.values()
+                if t.organization_id == organization_id and _in_range(t.created_at, start, end)
+            ]
+        )
+
+    def _closed_in_range(self, organization_id, *, status, start, end):
+        return [
+            t
+            for t in self._tickets.values()
+            if t.organization_id == organization_id
+            and t.status == status
+            and t.closed_at is not None
+            and _in_range(t.closed_at, start, end)
+        ]
+
+    async def count_closed_in_range(self, organization_id, *, status, start, end):
+        return len(self._closed_in_range(organization_id, status=status, start=start, end=end))
+
+    async def sum_actual_value_in_range(self, organization_id, *, status, start, end):
+        matches = self._closed_in_range(organization_id, status=status, start=start, end=end)
+        return sum((t.actual_value or Decimal("0") for t in matches), Decimal("0"))
+
+    async def revenue_by_day(self, organization_id, *, status, start, end):
+        matches = self._closed_in_range(organization_id, status=status, start=start, end=end)
+        buckets: dict = defaultdict(lambda: Decimal("0"))
+        for t in matches:
+            if t.actual_value is not None:
+                buckets[t.closed_at.date()] += t.actual_value
+        return [DailyRevenue(day=day, amount=amount) for day, amount in sorted(buckets.items())]
+
+    async def average_resolution_minutes(self, organization_id, *, start, end):
+        matches = self._closed_in_range(
+            organization_id, status=TicketStatus.RESOLVED, start=start, end=end
+        )
+        if not matches:
+            return None
+        total_minutes = sum(
+            (t.closed_at - t.created_at).total_seconds() / 60 for t in matches
+        )
+        return total_minutes / len(matches)
 
 
 class FakeAppointmentRepository(AppointmentRepository):
@@ -417,12 +531,13 @@ class FakeAppointmentRepository(AppointmentRepository):
         self._appointments[appointment_id] = updated
         return updated
 
-    async def update_status(self, appointment_id, *, status, closed_at=None):
+    async def update_status(self, appointment_id, *, status, closed_at=None, actual_value=None):
         appointment = self._appointments[appointment_id]
         updated = replace(
             appointment,
             status=status,
             closed_at=closed_at if closed_at is not None else appointment.closed_at,
+            actual_value=actual_value if actual_value is not None else appointment.actual_value,
         )
         self._appointments[appointment_id] = updated
         return updated
@@ -441,6 +556,49 @@ class FakeAppointmentRepository(AppointmentRepository):
         ]
         matches.sort(key=lambda a: a.created_at, reverse=True)
         return matches
+
+    # --- Analytics (Milestone 8) ---
+
+    async def count_created_in_range(self, organization_id, *, start, end):
+        return len(
+            [
+                a
+                for a in self._appointments.values()
+                if a.organization_id == organization_id and _in_range(a.created_at, start, end)
+            ]
+        )
+
+    def _closed_in_range(self, organization_id, *, status, start, end):
+        return [
+            a
+            for a in self._appointments.values()
+            if a.organization_id == organization_id
+            and a.status == status
+            and a.closed_at is not None
+            and _in_range(a.closed_at, start, end)
+        ]
+
+    async def count_closed_in_range(self, organization_id, *, status, start, end):
+        return len(self._closed_in_range(organization_id, status=status, start=start, end=end))
+
+    async def sum_actual_value_in_range(self, organization_id, *, status, start, end):
+        matches = self._closed_in_range(organization_id, status=status, start=start, end=end)
+        return sum((a.actual_value or Decimal("0") for a in matches), Decimal("0"))
+
+    async def revenue_by_day(self, organization_id, *, status, start, end):
+        matches = self._closed_in_range(organization_id, status=status, start=start, end=end)
+        buckets: dict = defaultdict(lambda: Decimal("0"))
+        for a in matches:
+            if a.actual_value is not None:
+                buckets[a.closed_at.date()] += a.actual_value
+        return [DailyRevenue(day=day, amount=amount) for day, amount in sorted(buckets.items())]
+
+    async def status_breakdown_in_range(self, organization_id, *, start, end):
+        buckets: dict = defaultdict(int)
+        for a in self._appointments.values():
+            if a.organization_id == organization_id and _in_range(a.created_at, start, end):
+                buckets[a.status.value] += 1
+        return [BucketCount(label=label, count=count) for label, count in buckets.items()]
 
 
 class FakeTechnicianProfileRepository(TechnicianProfileRepository):
@@ -545,6 +703,20 @@ class FakeCustomerRepository(CustomerRepository):
         )
         self._customers[customer_id] = updated
         return updated
+
+    # --- Analytics (Milestone 8) ---
+
+    async def count_new_in_range(self, organization_id, *, start, end):
+        return len(
+            [
+                c
+                for c in self._customers.values()
+                if c.organization_id == organization_id and _in_range(c.created_at, start, end)
+            ]
+        )
+
+    async def count_total(self, organization_id):
+        return len([c for c in self._customers.values() if c.organization_id == organization_id])
 
 
 class FakeUserRepository(UserRepository):

@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.entities.analytics import BucketCount
 from app.domain.entities.conversation_outcome import (
     CallClassification,
     ConversationOutcome,
     RecommendedAction,
 )
 from app.domain.repositories.conversation_outcome_repository import ConversationOutcomeRepository
+from app.infrastructure.database.models.conversation import ConversationModel
 from app.infrastructure.database.models.conversation_outcome import ConversationOutcomeModel
 
 
@@ -80,3 +83,49 @@ class SqlAlchemyConversationOutcomeRepository(ConversationOutcomeRepository):
         )
         model = result.scalar_one_or_none()
         return _to_entity(model) if model else None
+
+    # --- Analytics (Milestone 8) aggregate queries ---
+    #
+    # ConversationOutcomeModel has no organization_id/created_at of its
+    # own, so both queries join to `conversations` for org scoping and to
+    # filter by the parent conversation's `started_at`.
+
+    async def classification_breakdown(
+        self, organization_id: uuid.UUID, *, start: datetime | None, end: datetime
+    ) -> list[BucketCount]:
+        query = (
+            select(ConversationOutcomeModel.classification, func.count())
+            .join(
+                ConversationModel,
+                ConversationModel.id == ConversationOutcomeModel.conversation_id,
+            )
+            .where(
+                ConversationModel.organization_id == organization_id,
+                ConversationModel.started_at < end,
+            )
+            .group_by(ConversationOutcomeModel.classification)
+        )
+        if start is not None:
+            query = query.where(ConversationModel.started_at >= start)
+        rows = (await self._session.execute(query)).all()
+        return [BucketCount(label=row[0].value, count=row[1]) for row in rows]
+
+    async def recommended_action_breakdown(
+        self, organization_id: uuid.UUID, *, start: datetime | None, end: datetime
+    ) -> list[BucketCount]:
+        query = (
+            select(ConversationOutcomeModel.recommended_action, func.count())
+            .join(
+                ConversationModel,
+                ConversationModel.id == ConversationOutcomeModel.conversation_id,
+            )
+            .where(
+                ConversationModel.organization_id == organization_id,
+                ConversationModel.started_at < end,
+            )
+            .group_by(ConversationOutcomeModel.recommended_action)
+        )
+        if start is not None:
+            query = query.where(ConversationModel.started_at >= start)
+        rows = (await self._session.execute(query)).all()
+        return [BucketCount(label=row[0].value, count=row[1]) for row in rows]

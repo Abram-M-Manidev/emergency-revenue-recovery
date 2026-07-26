@@ -50,6 +50,7 @@ export function TicketQueue() {
   const [technicians, setTechnicians] = useState<TechnicianProfile[]>([]);
   const [statusFilter, setStatusFilter] = useState<TicketStatus | "all">("all");
   const [selectedTechnician, setSelectedTechnician] = useState<Record<string, string>>({});
+  const [resolvedValue, setResolvedValue] = useState<Record<string, string>>({});
 
   const technicianById = useMemo(
     () => new Map(technicians.map((t) => [t.user_id, t])),
@@ -100,9 +101,13 @@ export function TicketQueue() {
     }
   }
 
-  async function handleStatusChange(ticket: EmergencyTicket, status: TicketStatus) {
+  async function handleStatusChange(
+    ticket: EmergencyTicket,
+    status: TicketStatus,
+    actualValue?: number,
+  ) {
     try {
-      const updated = await updateTicketStatus(ticket.id, status);
+      const updated = await updateTicketStatus(ticket.id, status, actualValue);
       replaceTicket(updated);
     } catch (error) {
       toast({
@@ -213,8 +218,31 @@ export function TicketQueue() {
                           </Button>
                         </div>
                       ) : ticket.status === "en_route" ? (
-                        <div className="flex gap-2">
-                          <Button size="sm" onClick={() => handleStatusChange(ticket, "resolved")}>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="number"
+                            min={0}
+                            step="0.01"
+                            placeholder="Value ($)"
+                            className="h-8 w-24 rounded-md border border-input bg-background px-2 text-xs"
+                            value={resolvedValue[ticket.id] ?? ""}
+                            onChange={(event) =>
+                              setResolvedValue((current) => ({
+                                ...current,
+                                [ticket.id]: event.target.value,
+                              }))
+                            }
+                          />
+                          <Button
+                            size="sm"
+                            onClick={() =>
+                              handleStatusChange(
+                                ticket,
+                                "resolved",
+                                resolvedValue[ticket.id] ? Number(resolvedValue[ticket.id]) : undefined,
+                              )
+                            }
+                          >
                             Mark resolved
                           </Button>
                           <Button

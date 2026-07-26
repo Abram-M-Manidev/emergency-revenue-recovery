@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
+from decimal import Decimal
 
 from app.domain.entities.service import Service
 
@@ -24,6 +25,7 @@ class ServiceRepository(ABC):
         is_emergency_eligible: bool,
         is_active: bool,
         default_duration_minutes: int | None,
+        default_price: Decimal | None = None,
     ) -> Service: ...
 
     @abstractmethod
@@ -38,6 +40,7 @@ class ServiceRepository(ABC):
         is_emergency_eligible: bool,
         is_active: bool,
         default_duration_minutes: int | None,
+        default_price: Decimal | None = None,
     ) -> Service | None:
         """Replaces the full entity with the given (already-merged) field
         values. Returns None if no matching service exists for this

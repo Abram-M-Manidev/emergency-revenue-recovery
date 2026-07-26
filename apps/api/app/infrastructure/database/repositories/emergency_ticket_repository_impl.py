@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.domain.entities.analytics import DailyRevenue
 from app.domain.entities.emergency_ticket import EmergencyTicket, TicketStatus
 from app.domain.repositories.emergency_ticket_repository import EmergencyTicketRepository
 from app.infrastructure.database.models.emergency_ticket import EmergencyTicketModel
@@ -29,6 +31,7 @@ def _to_entity(model: EmergencyTicketModel) -> EmergencyTicket:
         created_at=model.created_at,
         updated_at=model.updated_at,
         customer_id=model.customer_id,
+        actual_value=model.actual_value,
     )
 
 
@@ -137,6 +140,7 @@ class SqlAlchemyEmergencyTicketRepository(EmergencyTicketRepository):
         *,
         status: TicketStatus,
         closed_at: datetime | None = None,
+        actual_value: Decimal | None = None,
     ) -> EmergencyTicket:
         result = await self._session.execute(
             select(EmergencyTicketModel).where(EmergencyTicketModel.id == ticket_id)
@@ -145,6 +149,8 @@ class SqlAlchemyEmergencyTicketRepository(EmergencyTicketRepository):
         model.status = status
         if closed_at is not None:
             model.closed_at = closed_at
+        if actual_value is not None:
+            model.actual_value = actual_value
         await self._session.flush()
         await self._session.refresh(model)
         return _to_entity(model)
@@ -173,3 +179,96 @@ class SqlAlchemyEmergencyTicketRepository(EmergencyTicketRepository):
             .order_by(EmergencyTicketModel.created_at.desc())
         )
         return [_to_entity(model) for model in result.scalars().all()]
+
+    # --- Analytics (Milestone 8) aggregate queries ---
+
+    async def count_created_in_range(
+        self, organization_id: uuid.UUID, *, start: datetime | None, end: datetime
+    ) -> int:
+        query = select(func.count()).select_from(EmergencyTicketModel).where(
+            EmergencyTicketModel.organization_id == organization_id,
+            EmergencyTicketModel.created_at < end,
+        )
+        if start is not None:
+            query = query.where(EmergencyTicketModel.created_at >= start)
+        return (await self._session.execute(query)).scalar_one()
+
+    async def count_closed_in_range(
+        self,
+        organization_id: uuid.UUID,
+        *,
+        status: TicketStatus,
+        start: datetime | None,
+        end: datetime,
+    ) -> int:
+        query = select(func.count()).select_from(EmergencyTicketModel).where(
+            EmergencyTicketModel.organization_id == organization_id,
+            EmergencyTicketModel.status == status,
+            EmergencyTicketModel.closed_at.is_not(None),
+            EmergencyTicketModel.closed_at < end,
+        )
+        if start is not None:
+            query = query.where(EmergencyTicketModel.closed_at >= start)
+        return (await self._session.execute(query)).scalar_one()
+
+    async def sum_actual_value_in_range(
+        self,
+        organization_id: uuid.UUID,
+        *,
+        status: TicketStatus,
+        start: datetime | None,
+        end: datetime,
+    ) -> Decimal:
+        query = select(func.coalesce(func.sum(EmergencyTicketModel.actual_value), 0)).where(
+            EmergencyTicketModel.organization_id == organization_id,
+            EmergencyTicketModel.status == status,
+            EmergencyTicketModel.closed_at.is_not(None),
+            EmergencyTicketModel.closed_at < end,
+        )
+        if start is not None:
+            query = query.where(EmergencyTicketModel.closed_at >= start)
+        total = (await self._session.execute(query)).scalar_one()
+        return Decimal(total)
+
+    async def revenue_by_day(
+        self,
+        organization_id: uuid.UUID,
+        *,
+        status: TicketStatus,
+        start: datetime | None,
+        end: datetime,
+    ) -> list[DailyRevenue]:
+        day = func.date_trunc("day", EmergencyTicketModel.closed_at).label("day")
+        query = (
+            select(day, func.coalesce(func.sum(EmergencyTicketModel.actual_value), 0))
+            .where(
+                EmergencyTicketModel.organization_id == organization_id,
+                EmergencyTicketModel.status == status,
+                EmergencyTicketModel.closed_at.is_not(None),
+                EmergencyTicketModel.actual_value.is_not(None),
+                EmergencyTicketModel.closed_at < end,
+            )
+            .group_by(day)
+            .order_by(day)
+        )
+        if start is not None:
+            query = query.where(EmergencyTicketModel.closed_at >= start)
+        rows = (await self._session.execute(query)).all()
+        return [DailyRevenue(day=row[0].date(), amount=Decimal(row[1])) for row in rows]
+
+    async def average_resolution_minutes(
+        self, organization_id: uuid.UUID, *, start: datetime | None, end: datetime
+    ) -> float | None:
+        seconds_elapsed = func.extract(
+            "epoch", EmergencyTicketModel.closed_at - EmergencyTicketModel.created_at
+        )
+        query = select(func.avg(seconds_elapsed / 60)).where(
+            EmergencyTicketModel.organization_id == organization_id,
+            EmergencyTicketModel.status == TicketStatus.RESOLVED,
+            EmergencyTicketModel.closed_at.is_not(None),
+            EmergencyTicketModel.closed_at < end,
+        )
+        if start is not None:
+            query = query.where(EmergencyTicketModel.closed_at >= start)
+        result = (await self._session.execute(query)).scalar_one()
+        return float(result) if result is not None else None

@@ -12,6 +12,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.application.services.ai_brain_service import AIBrainService
+from app.application.services.analytics_service import AnalyticsService
 from app.application.services.appointment_service import AppointmentService
 from app.application.services.auth_service import AuthService
 from app.application.services.business_knowledge_service import BusinessKnowledgeService
@@ -144,6 +145,19 @@ def get_customer_service(
         conversation_outcome_repository=SqlAlchemyConversationOutcomeRepository(db),
         emergency_ticket_repository=SqlAlchemyEmergencyTicketRepository(db),
         appointment_repository=SqlAlchemyAppointmentRepository(db),
+    )
+
+
+def get_analytics_service(
+    db: AsyncSession = Depends(get_db),
+) -> AnalyticsService:
+    return AnalyticsService(
+        conversation_repository=SqlAlchemyConversationRepository(db),
+        conversation_outcome_repository=SqlAlchemyConversationOutcomeRepository(db),
+        emergency_ticket_repository=SqlAlchemyEmergencyTicketRepository(db),
+        appointment_repository=SqlAlchemyAppointmentRepository(db),
+        customer_repository=SqlAlchemyCustomerRepository(db),
+        business_profile_repository=SqlAlchemyBusinessProfileRepository(db),
     )
 
 

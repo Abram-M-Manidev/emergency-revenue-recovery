@@ -73,6 +73,7 @@ export function AppointmentQueue() {
   const [modalAppointment, setModalAppointment] = useState<Appointment | null>(null);
   const [form, setForm] = useState<ScheduleFormState>(EMPTY_SCHEDULE_FORM);
   const [isSaving, setIsSaving] = useState(false);
+  const [completedValue, setCompletedValue] = useState<Record<string, string>>({});
 
   const technicianById = useMemo(
     () => new Map(technicians.map((t) => [t.user_id, t])),
@@ -140,9 +141,13 @@ export function AppointmentQueue() {
     }
   }
 
-  async function handleStatusChange(appointment: Appointment, status: AppointmentStatus) {
+  async function handleStatusChange(
+    appointment: Appointment,
+    status: AppointmentStatus,
+    actualValue?: number,
+  ) {
     try {
-      const updated = await updateAppointmentStatus(appointment.id, status);
+      const updated = await updateAppointmentStatus(appointment.id, status, actualValue);
       replaceAppointment(updated);
     } catch (error) {
       toast({
@@ -242,13 +247,35 @@ export function AppointmentQueue() {
                           </Button>
                         </div>
                       ) : appointment.status === "scheduled" ? (
-                        <div className="flex flex-wrap gap-2">
+                        <div className="flex flex-wrap items-center gap-2">
                           <Button size="sm" variant="outline" onClick={() => openSchedule(appointment)}>
                             Reschedule
                           </Button>
+                          <input
+                            type="number"
+                            min={0}
+                            step="0.01"
+                            placeholder="Value ($)"
+                            className="h-8 w-24 rounded-md border border-input bg-background px-2 text-xs"
+                            value={completedValue[appointment.id] ?? ""}
+                            onChange={(event) =>
+                              setCompletedValue((current) => ({
+                                ...current,
+                                [appointment.id]: event.target.value,
+                              }))
+                            }
+                          />
                           <Button
                             size="sm"
-                            onClick={() => handleStatusChange(appointment, "completed")}
+                            onClick={() =>
+                              handleStatusChange(
+                                appointment,
+                                "completed",
+                                completedValue[appointment.id]
+                                  ? Number(completedValue[appointment.id])
+                                  : undefined,
+                              )
+                            }
                           >
                             Mark completed
                           </Button>

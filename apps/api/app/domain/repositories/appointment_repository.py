@@ -3,7 +3,9 @@ from __future__ import annotations
 import uuid
 from abc import ABC, abstractmethod
 from datetime import datetime
+from decimal import Decimal
 
+from app.domain.entities.analytics import BucketCount, DailyRevenue
 from app.domain.entities.appointment import Appointment, AppointmentStatus
 
 
@@ -74,7 +76,13 @@ class AppointmentRepository(ABC):
         *,
         status: AppointmentStatus,
         closed_at: datetime | None = None,
-    ) -> Appointment: ...
+        actual_value: Decimal | None = None,
+    ) -> Appointment:
+        """`actual_value` (Milestone 8), when provided, is persisted
+        regardless of the target status — it is meaningful when closing an
+        appointment as COMPLETED, but the repository does not enforce that;
+        see `AppointmentService.update_appointment_status`."""
+        ...
 
     @abstractmethod
     async def set_customer(
@@ -89,3 +97,56 @@ class AppointmentRepository(ABC):
     async def list_by_customer_id(
         self, organization_id: uuid.UUID, customer_id: uuid.UUID
     ) -> list[Appointment]: ...
+
+    # --- Analytics (Milestone 8) aggregate queries ---
+
+    @abstractmethod
+    async def count_created_in_range(
+        self, organization_id: uuid.UUID, *, start: datetime | None, end: datetime
+    ) -> int: ...
+
+    @abstractmethod
+    async def count_closed_in_range(
+        self,
+        organization_id: uuid.UUID,
+        *,
+        status: AppointmentStatus,
+        start: datetime | None,
+        end: datetime,
+    ) -> int:
+        """Counts appointments whose `closed_at` (not `created_at`) falls in
+        the range and whose current status matches."""
+        ...
+
+    @abstractmethod
+    async def sum_actual_value_in_range(
+        self,
+        organization_id: uuid.UUID,
+        *,
+        status: AppointmentStatus,
+        start: datetime | None,
+        end: datetime,
+    ) -> Decimal:
+        """Sums `actual_value` across appointments closed (by `closed_at`)
+        with the given status in the range. Returns `Decimal("0")` when
+        there is nothing to sum, never `None`."""
+        ...
+
+    @abstractmethod
+    async def revenue_by_day(
+        self,
+        organization_id: uuid.UUID,
+        *,
+        status: AppointmentStatus,
+        start: datetime | None,
+        end: datetime,
+    ) -> list[DailyRevenue]: ...
+
+    @abstractmethod
+    async def status_breakdown_in_range(
+        self, organization_id: uuid.UUID, *, start: datetime | None, end: datetime
+    ) -> list[BucketCount]:
+        """Groups appointments *created* in the range by their current
+        status — a simple distribution chart, unlike tickets (which have no
+        equivalent breakdown method; see `EmergencyTicketRepository`)."""
+        ...

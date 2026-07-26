@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -22,6 +23,7 @@ def _to_entity(model: ServiceModel) -> Service:
         is_emergency_eligible=model.is_emergency_eligible,
         is_active=model.is_active,
         default_duration_minutes=model.default_duration_minutes,
+        default_price=model.default_price,
     )
 
 
@@ -56,6 +58,7 @@ class SqlAlchemyServiceRepository(ServiceRepository):
         is_emergency_eligible: bool,
         is_active: bool,
         default_duration_minutes: int | None,
+        default_price: Decimal | None = None,
     ) -> Service:
         model = ServiceModel(
             organization_id=organization_id,
@@ -65,6 +68,7 @@ class SqlAlchemyServiceRepository(ServiceRepository):
             is_emergency_eligible=is_emergency_eligible,
             is_active=is_active,
             default_duration_minutes=default_duration_minutes,
+            default_price=default_price,
         )
         self._session.add(model)
         try:
@@ -85,6 +89,7 @@ class SqlAlchemyServiceRepository(ServiceRepository):
         is_emergency_eligible: bool,
         is_active: bool,
         default_duration_minutes: int | None,
+        default_price: Decimal | None = None,
     ) -> Service | None:
         result = await self._session.execute(
             select(ServiceModel).where(
@@ -101,6 +106,7 @@ class SqlAlchemyServiceRepository(ServiceRepository):
         model.is_emergency_eligible = is_emergency_eligible
         model.is_active = is_active
         model.default_duration_minutes = default_duration_minutes
+        model.default_price = default_price
 
         try:
             await self._session.flush()

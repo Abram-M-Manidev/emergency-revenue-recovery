@@ -13,6 +13,7 @@ ticket queue or technician roster requires `dispatch:manage`
 from __future__ import annotations
 
 import uuid
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Query, status
 
@@ -81,7 +82,11 @@ async def update_ticket_status(
     service: DispatchService = Depends(get_dispatch_service),
 ) -> EmergencyTicketResponse:
     ticket = await service.update_ticket_status(
-        user.organization_id, ticket_id, payload.status, acting_user=user
+        user.organization_id,
+        ticket_id,
+        payload.status,
+        acting_user=user,
+        actual_value=Decimal(str(payload.actual_value)) if payload.actual_value is not None else None,
     )
     return EmergencyTicketResponse.model_validate(ticket)
 

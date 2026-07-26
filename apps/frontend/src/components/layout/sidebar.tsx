@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
+  BarChart3,
   BookOpen,
   CalendarClock,
   LayoutDashboard,
@@ -23,6 +24,7 @@ const NAV_ITEMS = [
   { href: ROUTES.dispatch, label: "Dispatch", icon: Truck },
   { href: ROUTES.appointments, label: "Appointments", icon: CalendarClock },
   { href: ROUTES.customers, label: "Customers", icon: Users },
+  { href: ROUTES.analytics, label: "Analytics", icon: BarChart3 },
   { href: ROUTES.settings, label: "Settings", icon: Settings },
 ] as const;
 
