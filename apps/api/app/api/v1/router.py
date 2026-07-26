@@ -5,6 +5,7 @@ from app.api.v1.endpoints import (
     appointments,
     auth,
     business_knowledge,
+    customers,
     dispatch,
     health,
     vapi_webhooks,
@@ -22,3 +23,4 @@ api_router.include_router(voice.router)
 api_router.include_router(vapi_webhooks.router)
 api_router.include_router(dispatch.router)
 api_router.include_router(appointments.router)
+api_router.include_router(customers.router)

@@ -276,3 +276,30 @@ export interface ScheduleAppointmentPayload {
   duration_minutes: number;
   technician_user_id: string | null;
 }
+
+// --- Customers ---
+
+export interface Customer {
+  id: string;
+  full_name: string | null;
+  phone_number: string;
+  email: string | null;
+  address: string | null;
+  notes: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CustomerHistory {
+  customer: Customer;
+  tickets: EmergencyTicket[];
+  appointments: Appointment[];
+}
+
+export interface CustomerPayload {
+  full_name: string | null;
+  phone_number: string;
+  email: string | null;
+  address: string | null;
+  notes: string | null;
+}

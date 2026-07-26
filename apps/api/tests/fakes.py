@@ -21,6 +21,7 @@ from app.domain.entities.conversation_outcome import (
     ConversationOutcome,
     RecommendedAction,
 )
+from app.domain.entities.customer import Customer
 from app.domain.entities.emergency_keyword import EmergencyKeyword
 from app.domain.entities.emergency_ticket import EmergencyTicket, TicketStatus
 from app.domain.entities.faq_entry import FAQEntry
@@ -29,11 +30,13 @@ from app.domain.entities.service import Service
 from app.domain.entities.service_area import ServiceArea
 from app.domain.entities.technician_profile import TechnicianProfile
 from app.domain.entities.user import User
+from app.domain.exceptions import EntityAlreadyExistsError
 from app.domain.repositories.appointment_repository import AppointmentRepository
 from app.domain.repositories.business_hours_repository import BusinessHoursRepository
 from app.domain.repositories.business_profile_repository import BusinessProfileRepository
 from app.domain.repositories.conversation_outcome_repository import ConversationOutcomeRepository
 from app.domain.repositories.conversation_repository import ConversationRepository
+from app.domain.repositories.customer_repository import CustomerRepository
 from app.domain.repositories.emergency_keyword_repository import EmergencyKeywordRepository
 from app.domain.repositories.emergency_ticket_repository import EmergencyTicketRepository
 from app.domain.repositories.faq_repository import FAQRepository
@@ -319,6 +322,21 @@ class FakeEmergencyTicketRepository(EmergencyTicketRepository):
         self._tickets[ticket_id] = updated
         return updated
 
+    async def set_customer(self, ticket_id, *, customer_id):
+        ticket = self._tickets[ticket_id]
+        updated = replace(ticket, customer_id=customer_id)
+        self._tickets[ticket_id] = updated
+        return updated
+
+    async def list_by_customer_id(self, organization_id, customer_id):
+        matches = [
+            t
+            for t in self._tickets.values()
+            if t.organization_id == organization_id and t.customer_id == customer_id
+        ]
+        matches.sort(key=lambda t: t.created_at, reverse=True)
+        return matches
+
 
 class FakeAppointmentRepository(AppointmentRepository):
     def __init__(self) -> None:
@@ -409,6 +427,21 @@ class FakeAppointmentRepository(AppointmentRepository):
         self._appointments[appointment_id] = updated
         return updated
 
+    async def set_customer(self, appointment_id, *, customer_id):
+        appointment = self._appointments[appointment_id]
+        updated = replace(appointment, customer_id=customer_id)
+        self._appointments[appointment_id] = updated
+        return updated
+
+    async def list_by_customer_id(self, organization_id, customer_id):
+        matches = [
+            a
+            for a in self._appointments.values()
+            if a.organization_id == organization_id and a.customer_id == customer_id
+        ]
+        matches.sort(key=lambda a: a.created_at, reverse=True)
+        return matches
+
 
 class FakeTechnicianProfileRepository(TechnicianProfileRepository):
     def __init__(self) -> None:
@@ -442,6 +475,75 @@ class FakeTechnicianProfileRepository(TechnicianProfileRepository):
         profile = self._profiles[user_id]
         updated = replace(profile, is_on_call=is_on_call)
         self._profiles[user_id] = updated
+        return updated
+
+
+class FakeCustomerRepository(CustomerRepository):
+    def __init__(self) -> None:
+        self._customers: dict[uuid.UUID, Customer] = {}
+
+    async def create(
+        self, *, organization_id, full_name, phone_number, email=None, address=None, notes=None
+    ):
+        if await self.get_by_phone_number(organization_id, phone_number) is not None:
+            raise EntityAlreadyExistsError("Customer", "phone_number", phone_number)
+        now = datetime.now(timezone.utc)
+        customer = Customer(
+            id=uuid.uuid4(),
+            organization_id=organization_id,
+            full_name=full_name,
+            phone_number=phone_number,
+            email=email,
+            address=address,
+            notes=notes,
+            created_at=now,
+            updated_at=now,
+        )
+        self._customers[customer.id] = customer
+        return customer
+
+    async def get_by_id(self, organization_id, customer_id):
+        customer = self._customers.get(customer_id)
+        if customer is None or customer.organization_id != organization_id:
+            return None
+        return customer
+
+    async def get_by_phone_number(self, organization_id, phone_number):
+        return next(
+            (
+                c
+                for c in self._customers.values()
+                if c.organization_id == organization_id and c.phone_number == phone_number
+            ),
+            None,
+        )
+
+    async def list_for_organization(self, organization_id, *, search=None, limit, offset):
+        matches = [c for c in self._customers.values() if c.organization_id == organization_id]
+        if search:
+            needle = search.lower()
+            matches = [
+                c
+                for c in matches
+                if needle in (c.full_name or "").lower() or needle in c.phone_number.lower()
+            ]
+        matches.sort(key=lambda c: c.created_at, reverse=True)
+        return matches[offset : offset + limit]
+
+    async def update(self, customer_id, *, full_name, phone_number, email, address, notes):
+        customer = self._customers[customer_id]
+        colliding = await self.get_by_phone_number(customer.organization_id, phone_number)
+        if colliding is not None and colliding.id != customer_id:
+            raise EntityAlreadyExistsError("Customer", "phone_number", phone_number)
+        updated = replace(
+            customer,
+            full_name=full_name,
+            phone_number=phone_number,
+            email=email,
+            address=address,
+            notes=notes,
+        )
+        self._customers[customer_id] = updated
         return updated
 
 

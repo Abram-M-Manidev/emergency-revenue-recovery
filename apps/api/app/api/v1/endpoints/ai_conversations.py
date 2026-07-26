@@ -20,6 +20,7 @@ import structlog
 from app.api.deps import (
     get_ai_brain_service,
     get_appointment_service,
+    get_customer_service,
     get_dispatch_service,
     require_permission,
 )
@@ -34,6 +35,7 @@ from app.application.schemas.ai_conversations import (
 )
 from app.application.services.ai_brain_service import AIBrainService
 from app.application.services.appointment_service import AppointmentService
+from app.application.services.customer_service import CustomerService
 from app.application.services.dispatch_service import DispatchService
 from app.domain.entities.rbac import Permissions
 from app.domain.entities.user import User
@@ -94,6 +96,7 @@ async def send_message(
     service: AIBrainService = Depends(get_ai_brain_service),
     dispatch_service: DispatchService = Depends(get_dispatch_service),
     appointment_service: AppointmentService = Depends(get_appointment_service),
+    customer_service: CustomerService = Depends(get_customer_service),
 ) -> SendMessageResult:
     result = await service.send_message(user.organization_id, conversation_id, payload.message)
 
@@ -119,6 +122,20 @@ async def send_message(
         # Same reasoning as the dispatch sync above.
         logger.warning(
             "appointment_sync_failed",
+            error=exc.__class__.__name__,
+            message=exc.message,
+            conversation_id=str(conversation_id),
+        )
+
+    try:
+        # Runs last, after dispatch/appointment sync, so it can link
+        # whichever ticket/appointment those two calls just created — see
+        # `CustomerService.sync_customer_from_outcome`'s docstring.
+        await customer_service.sync_customer_from_outcome(user.organization_id, conversation_id)
+    except DomainError as exc:
+        # Same reasoning as the dispatch/appointment syncs above.
+        logger.warning(
+            "customer_sync_failed",
             error=exc.__class__.__name__,
             message=exc.message,
             conversation_id=str(conversation_id),

@@ -11,6 +11,7 @@ export const ROUTES = {
   aiConversations: "/ai-conversations",
   dispatch: "/dispatch",
   appointments: "/appointments",
+  customers: "/customers",
 } as const;
 
 export const AUTH_COOKIE_NAME = "refresh_token";

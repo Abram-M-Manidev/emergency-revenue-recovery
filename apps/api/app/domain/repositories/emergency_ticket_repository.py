@@ -63,3 +63,17 @@ class EmergencyTicketRepository(ABC):
         status: TicketStatus,
         closed_at: datetime | None = None,
     ) -> EmergencyTicket: ...
+
+    @abstractmethod
+    async def set_customer(
+        self, ticket_id: uuid.UUID, *, customer_id: uuid.UUID
+    ) -> EmergencyTicket:
+        """Links a ticket to a `Customer` (Milestone 7) after the fact —
+        called by `CustomerService.sync_customer_from_outcome`, never at
+        ticket-creation time."""
+        ...
+
+    @abstractmethod
+    async def list_by_customer_id(
+        self, organization_id: uuid.UUID, customer_id: uuid.UUID
+    ) -> list[EmergencyTicket]: ...

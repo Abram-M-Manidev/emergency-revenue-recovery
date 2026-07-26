@@ -75,3 +75,17 @@ class AppointmentRepository(ABC):
         status: AppointmentStatus,
         closed_at: datetime | None = None,
     ) -> Appointment: ...
+
+    @abstractmethod
+    async def set_customer(
+        self, appointment_id: uuid.UUID, *, customer_id: uuid.UUID
+    ) -> Appointment:
+        """Links an appointment to a `Customer` (Milestone 7) after the
+        fact — called by `CustomerService.sync_customer_from_outcome`,
+        never at appointment-creation time."""
+        ...
+
+    @abstractmethod
+    async def list_by_customer_id(
+        self, organization_id: uuid.UUID, customer_id: uuid.UUID
+    ) -> list[Appointment]: ...

@@ -10,6 +10,7 @@ import {
   Settings,
   Siren,
   Truck,
+  Users,
 } from "lucide-react";
 
 import { ROUTES } from "@/lib/constants";
@@ -21,6 +22,7 @@ const NAV_ITEMS = [
   { href: ROUTES.aiConversations, label: "AI Conversations", icon: MessageCircle },
   { href: ROUTES.dispatch, label: "Dispatch", icon: Truck },
   { href: ROUTES.appointments, label: "Appointments", icon: CalendarClock },
+  { href: ROUTES.customers, label: "Customers", icon: Users },
   { href: ROUTES.settings, label: "Settings", icon: Settings },
 ] as const;
 

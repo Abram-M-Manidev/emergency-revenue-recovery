@@ -9,7 +9,13 @@ Customer fields and `summary` are a point-in-time copy of what the AI Brain
 had learned when the ticket was created — not a live link back to the
 conversation, so the ticket keeps its own operational history (status,
 assignment) independent of anything that happens in the conversation
-afterward."""
+afterward.
+
+`customer_id` (Milestone 7) is a best-effort link to the unified
+`Customer` record for the same caller — set after the fact by
+`CustomerService.sync_customer_from_outcome`, not at ticket-creation time,
+so it starts `None` and may stay `None` if the AI Brain never captured a
+phone number for this conversation."""
 
 from __future__ import annotations
 
@@ -43,3 +49,4 @@ class EmergencyTicket:
     closed_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    customer_id: uuid.UUID | None = None

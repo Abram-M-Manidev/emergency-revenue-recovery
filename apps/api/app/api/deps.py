@@ -15,6 +15,7 @@ from app.application.services.ai_brain_service import AIBrainService
 from app.application.services.appointment_service import AppointmentService
 from app.application.services.auth_service import AuthService
 from app.application.services.business_knowledge_service import BusinessKnowledgeService
+from app.application.services.customer_service import CustomerService
 from app.application.services.dispatch_service import DispatchService
 from app.application.services.voice_service import VoiceService
 from app.core.config import Settings, get_settings
@@ -28,6 +29,7 @@ from app.infrastructure.database.repositories import (
     SqlAlchemyBusinessProfileRepository,
     SqlAlchemyConversationOutcomeRepository,
     SqlAlchemyConversationRepository,
+    SqlAlchemyCustomerRepository,
     SqlAlchemyEmergencyKeywordRepository,
     SqlAlchemyEmergencyTicketRepository,
     SqlAlchemyFAQRepository,
@@ -131,6 +133,17 @@ def get_appointment_service(
         service_repository=SqlAlchemyServiceRepository(db),
         business_hours_repository=SqlAlchemyBusinessHoursRepository(db),
         business_profile_repository=SqlAlchemyBusinessProfileRepository(db),
+    )
+
+
+def get_customer_service(
+    db: AsyncSession = Depends(get_db),
+) -> CustomerService:
+    return CustomerService(
+        customer_repository=SqlAlchemyCustomerRepository(db),
+        conversation_outcome_repository=SqlAlchemyConversationOutcomeRepository(db),
+        emergency_ticket_repository=SqlAlchemyEmergencyTicketRepository(db),
+        appointment_repository=SqlAlchemyAppointmentRepository(db),
     )
 
 

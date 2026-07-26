@@ -1,12 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Activity, PhoneCall, Siren } from "lucide-react";
+import { Activity, PhoneCall, Siren, Users } from "lucide-react";
 import Link from "next/link";
 
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useAuth } from "@/hooks/use-auth";
+import { fetchCustomers } from "@/lib/api/customers";
 import { fetchTickets } from "@/lib/api/dispatch";
 import { ROUTES } from "@/lib/constants";
 
@@ -43,9 +44,30 @@ function useOpenTicketCount() {
   return count;
 }
 
+function useCustomerCount() {
+  const [count, setCount] = useState<number | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchCustomers()
+      .then((customers) => {
+        if (!cancelled) setCount(customers.length);
+      })
+      .catch(() => {
+        if (!cancelled) setCount(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return count;
+}
+
 export default function DashboardPage() {
   const { user } = useAuth();
   const openTicketCount = useOpenTicketCount();
+  const customerCount = useCustomerCount();
 
   return (
     <div className="space-y-6">
@@ -74,6 +96,30 @@ export default function DashboardPage() {
                   <Siren className="h-6 w-6 text-muted-foreground" aria-hidden="true" />
                   <p className="text-2xl font-semibold">{openTicketCount}</p>
                   <p className="text-sm text-muted-foreground">open ticket{openTicketCount === 1 ? "" : "s"}</p>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </Link>
+        <Link href={ROUTES.customers}>
+          <Card className="h-full transition-colors hover:border-primary/50">
+            <CardHeader>
+              <CardTitle className="text-base">Customers</CardTitle>
+            </CardHeader>
+            <CardContent>
+              {customerCount === null ? (
+                <EmptyState
+                  icon={Users}
+                  title="—"
+                  description="Unified customer records are tracked here."
+                />
+              ) : (
+                <div className="flex flex-col items-center justify-center gap-2 rounded-lg border border-dashed border-border p-12 text-center">
+                  <Users className="h-6 w-6 text-muted-foreground" aria-hidden="true" />
+                  <p className="text-2xl font-semibold">{customerCount}</p>
+                  <p className="text-sm text-muted-foreground">
+                    customer{customerCount === 1 ? "" : "s"}
+                  </p>
                 </div>
               )}
             </CardContent>

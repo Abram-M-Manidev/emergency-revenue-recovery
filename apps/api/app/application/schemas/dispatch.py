@@ -59,6 +59,7 @@ class EmergencyTicketResponse(BaseModel):
     closed_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    customer_id: uuid.UUID | None = None
 
 
 class AssignTicketRequest(BaseModel):

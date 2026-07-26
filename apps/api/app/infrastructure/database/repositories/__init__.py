@@ -13,6 +13,9 @@ from app.infrastructure.database.repositories.conversation_outcome_repository_im
 from app.infrastructure.database.repositories.conversation_repository_impl import (
     SqlAlchemyConversationRepository,
 )
+from app.infrastructure.database.repositories.customer_repository_impl import (
+    SqlAlchemyCustomerRepository,
+)
 from app.infrastructure.database.repositories.emergency_keyword_repository_impl import (
     SqlAlchemyEmergencyKeywordRepository,
 )
@@ -50,6 +53,7 @@ __all__ = [
     "SqlAlchemyBusinessProfileRepository",
     "SqlAlchemyConversationOutcomeRepository",
     "SqlAlchemyConversationRepository",
+    "SqlAlchemyCustomerRepository",
     "SqlAlchemyEmergencyKeywordRepository",
     "SqlAlchemyEmergencyTicketRepository",
     "SqlAlchemyFAQRepository",

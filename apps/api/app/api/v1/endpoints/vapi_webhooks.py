@@ -20,12 +20,14 @@ from fastapi import APIRouter, Body, Depends
 
 from app.api.deps import (
     get_appointment_service,
+    get_customer_service,
     get_dispatch_service,
     get_voice_service,
     verify_vapi_secret,
 )
 from app.application.schemas.voice import VapiChatCompletionRequest
 from app.application.services.appointment_service import AppointmentService
+from app.application.services.customer_service import CustomerService
 from app.application.services.dispatch_service import DispatchService
 from app.application.services.voice_service import VoiceService
 from app.domain.exceptions import DomainError
@@ -48,6 +50,7 @@ async def vapi_chat_completions(
     service: VoiceService = Depends(get_voice_service),
     dispatch_service: DispatchService = Depends(get_dispatch_service),
     appointment_service: AppointmentService = Depends(get_appointment_service),
+    customer_service: CustomerService = Depends(get_customer_service),
 ) -> dict[str, Any]:
     customer_utterance = _latest_customer_utterance(payload)
     if customer_utterance is None:
@@ -100,6 +103,22 @@ async def vapi_chat_completions(
         # already succeeded and must still reach the caller.
         logger.warning(
             "appointment_sync_failed",
+            error=exc.__class__.__name__,
+            message=exc.message,
+            vapi_call_id=payload.call.id,
+        )
+
+    try:
+        # Runs last, after dispatch/appointment sync, so it can link
+        # whichever ticket/appointment those two calls just created — see
+        # `CustomerService.sync_customer_from_outcome`'s docstring.
+        await customer_service.sync_customer_from_outcome(
+            result.organization_id, result.conversation_id
+        )
+    except DomainError as exc:
+        # Same reasoning as the dispatch/appointment syncs above.
+        logger.warning(
+            "customer_sync_failed",
             error=exc.__class__.__name__,
             message=exc.message,
             vapi_call_id=payload.call.id,

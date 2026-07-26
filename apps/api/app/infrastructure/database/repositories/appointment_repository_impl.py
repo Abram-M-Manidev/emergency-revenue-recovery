@@ -30,6 +30,7 @@ def _to_entity(model: AppointmentModel) -> Appointment:
         closed_at=model.closed_at,
         created_at=model.created_at,
         updated_at=model.updated_at,
+        customer_id=model.customer_id,
     )
 
 
@@ -158,3 +159,28 @@ class SqlAlchemyAppointmentRepository(AppointmentRepository):
         await self._session.flush()
         await self._session.refresh(model)
         return _to_entity(model)
+
+    async def set_customer(
+        self, appointment_id: uuid.UUID, *, customer_id: uuid.UUID
+    ) -> Appointment:
+        result = await self._session.execute(
+            select(AppointmentModel).where(AppointmentModel.id == appointment_id)
+        )
+        model = result.scalar_one()
+        model.customer_id = customer_id
+        await self._session.flush()
+        await self._session.refresh(model)
+        return _to_entity(model)
+
+    async def list_by_customer_id(
+        self, organization_id: uuid.UUID, customer_id: uuid.UUID
+    ) -> list[Appointment]:
+        result = await self._session.execute(
+            select(AppointmentModel)
+            .where(
+                AppointmentModel.organization_id == organization_id,
+                AppointmentModel.customer_id == customer_id,
+            )
+            .order_by(AppointmentModel.created_at.desc())
+        )
+        return [_to_entity(model) for model in result.scalars().all()]
