@@ -99,3 +99,43 @@ class SqlAlchemyUserRepository(UserRepository):
         if model is not None:
             model.last_login_at = datetime.now(timezone.utc)
             await self._session.flush()
+
+    async def list_by_organization_id(self, organization_id: uuid.UUID) -> list[User]:
+        result = await self._session.execute(
+            select(UserModel)
+            .where(UserModel.organization_id == organization_id)
+            .options(*_LOAD_OPTIONS)
+            .order_by(UserModel.created_at.asc())
+        )
+        return [_to_entity(model) for model in result.scalars().all()]
+
+    async def set_active(self, user_id: uuid.UUID, *, is_active: bool) -> User:
+        result = await self._session.execute(
+            select(UserModel).where(UserModel.id == user_id).options(*_LOAD_OPTIONS)
+        )
+        model = result.scalar_one()
+        model.is_active = is_active
+        await self._session.flush()
+        # `updated_at` has `onupdate=func.now()` (server-computed), so the
+        # flush above expires it — a plain column, not "roles" (untouched
+        # here), needs the refresh.
+        await self._session.refresh(model, attribute_names=["updated_at"])
+        return _to_entity(model)
+
+    async def set_roles(self, user_id: uuid.UUID, *, role_ids: list[uuid.UUID]) -> User:
+        result = await self._session.execute(
+            select(UserModel).where(UserModel.id == user_id).options(*_LOAD_OPTIONS)
+        )
+        model = result.scalar_one()
+        roles: list[RoleModel] = []
+        if role_ids:
+            role_result = await self._session.execute(
+                select(RoleModel).where(RoleModel.id.in_(role_ids))
+            )
+            roles = list(role_result.scalars().all())
+        model.roles = roles
+        await self._session.flush()
+        await self._session.refresh(model, attribute_names=["roles"])
+        for role in model.roles:
+            await self._session.refresh(role, attribute_names=["permissions"])
+        return _to_entity(model)

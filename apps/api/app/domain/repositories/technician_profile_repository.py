@@ -27,4 +27,9 @@ class TechnicianProfileRepository(ABC):
     ) -> list[TechnicianProfile]: ...
 
     @abstractmethod
-    async def set_on_call(self, user_id: uuid.UUID, is_on_call: bool) -> TechnicianProfile: ...
+    async def set_on_call(
+        self, organization_id: uuid.UUID, user_id: uuid.UUID, is_on_call: bool
+    ) -> TechnicianProfile:
+        """`organization_id` scopes the lookup itself (Milestone 9
+        tenant-isolation hardening)."""
+        ...

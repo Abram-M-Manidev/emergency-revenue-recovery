@@ -210,7 +210,7 @@ async def test_ticket_revenue_and_resolution_time():
     )
     tickets._tickets[ticket.id] = replace(ticket, created_at=created)
     await tickets.update_status(
-        ticket.id, status=TicketStatus.RESOLVED, closed_at=created + timedelta(minutes=90),
+        _ORG_ID, ticket.id, status=TicketStatus.RESOLVED, closed_at=created + timedelta(minutes=90),
         actual_value=Decimal("250.00"),
     )
 
@@ -240,7 +240,7 @@ async def test_ticket_revenue_is_not_counted_unless_resolved():
     # Canceled, not resolved — a value entered here (if any) must not count
     # as revenue recovered.
     await tickets.update_status(
-        ticket.id, status=TicketStatus.CANCELED, closed_at=datetime.now(timezone.utc)
+        _ORG_ID, ticket.id, status=TicketStatus.CANCELED, closed_at=datetime.now(timezone.utc)
     )
 
     summary = await service.get_summary(_ORG_ID, preset=DateRangePreset.ALL_TIME)
@@ -264,6 +264,7 @@ async def test_appointment_revenue_and_show_up_rate():
         duration_minutes=60,
     )
     await appointments.update_status(
+        _ORG_ID,
         completed.id,
         status=AppointmentStatus.COMPLETED,
         closed_at=datetime.now(timezone.utc),
@@ -281,7 +282,7 @@ async def test_appointment_revenue_and_show_up_rate():
         duration_minutes=60,
     )
     await appointments.update_status(
-        no_show.id, status=AppointmentStatus.NO_SHOW, closed_at=datetime.now(timezone.utc)
+        _ORG_ID, no_show.id, status=AppointmentStatus.NO_SHOW, closed_at=datetime.now(timezone.utc)
     )
 
     summary = await service.get_summary(_ORG_ID, preset=DateRangePreset.ALL_TIME)
@@ -321,7 +322,7 @@ async def test_combined_revenue_merges_ticket_and_appointment_days():
         summary="Burst pipe.",
     )
     await tickets.update_status(
-        ticket.id, status=TicketStatus.RESOLVED, closed_at=now, actual_value=Decimal("100.00")
+        _ORG_ID, ticket.id, status=TicketStatus.RESOLVED, closed_at=now, actual_value=Decimal("100.00")
     )
 
     appointment = await appointments.create(
@@ -335,7 +336,7 @@ async def test_combined_revenue_merges_ticket_and_appointment_days():
         duration_minutes=60,
     )
     await appointments.update_status(
-        appointment.id, status=AppointmentStatus.COMPLETED, closed_at=now, actual_value=Decimal("50.00")
+        _ORG_ID, appointment.id, status=AppointmentStatus.COMPLETED, closed_at=now, actual_value=Decimal("50.00")
     )
 
     summary = await service.get_summary(_ORG_ID, preset=DateRangePreset.ALL_TIME)

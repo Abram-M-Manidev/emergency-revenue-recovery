@@ -167,6 +167,7 @@ class AppointmentService:
         await self._ensure_within_business_hours(organization_id, scheduled_start_at)
 
         return await self._appointments.schedule(
+            organization_id,
             appointment_id,
             scheduled_start_at=scheduled_start_at,
             duration_minutes=duration_minutes,
@@ -198,7 +199,7 @@ class AppointmentService:
 
         closed_at = datetime.now(timezone.utc) if new_status in _CLOSED_STATUSES else None
         return await self._appointments.update_status(
-            appointment_id, status=new_status, closed_at=closed_at, actual_value=actual_value
+            organization_id, appointment_id, status=new_status, closed_at=closed_at, actual_value=actual_value
         )
 
     async def cancel_appointment(

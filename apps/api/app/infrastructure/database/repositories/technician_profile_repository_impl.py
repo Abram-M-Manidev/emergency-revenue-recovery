@@ -66,9 +66,14 @@ class SqlAlchemyTechnicianProfileRepository(TechnicianProfileRepository):
         result = await self._session.execute(query)
         return [_to_entity(model) for model in result.scalars().all()]
 
-    async def set_on_call(self, user_id: uuid.UUID, is_on_call: bool) -> TechnicianProfile:
+    async def set_on_call(
+        self, organization_id: uuid.UUID, user_id: uuid.UUID, is_on_call: bool
+    ) -> TechnicianProfile:
         result = await self._session.execute(
-            select(TechnicianProfileModel).where(TechnicianProfileModel.user_id == user_id)
+            select(TechnicianProfileModel).where(
+                TechnicianProfileModel.user_id == user_id,
+                TechnicianProfileModel.organization_id == organization_id,
+            )
         )
         model = result.scalar_one()
         model.is_on_call = is_on_call

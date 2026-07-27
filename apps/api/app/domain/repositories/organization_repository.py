@@ -15,3 +15,14 @@ class OrganizationRepository(ABC):
 
     @abstractmethod
     async def create(self, *, name: str, slug: str) -> Organization: ...
+
+    @abstractmethod
+    async def update(
+        self,
+        organization_id: uuid.UUID,
+        *,
+        name: str | None = None,
+        is_active: bool | None = None,
+    ) -> Organization:
+        """Partial update: only fields explicitly passed are changed."""
+        ...

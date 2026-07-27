@@ -349,3 +349,42 @@ export interface AnalyticsSummary {
   total_revenue: number;
   revenue_by_day: DailyRevenue[];
 }
+
+// --- Team (Milestone 9) ---
+
+export type InvitableRole = "Admin" | "Member";
+export type AssignableRole = "Owner" | "Admin" | "Member";
+
+export interface TeamMember {
+  id: string;
+  email: string;
+  full_name: string;
+  roles: string[];
+  is_active: boolean;
+  is_superuser: boolean;
+  last_login_at: string | null;
+  created_at: string;
+}
+
+export interface InviteTeamMemberPayload {
+  full_name: string;
+  email: string;
+  temporary_password: string;
+  role: InvitableRole;
+}
+
+// --- Organization settings (Milestone 9) ---
+
+export interface Organization {
+  id: string;
+  name: string;
+  slug: string;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface UpdateOrganizationPayload {
+  name?: string;
+  is_active?: boolean;
+}

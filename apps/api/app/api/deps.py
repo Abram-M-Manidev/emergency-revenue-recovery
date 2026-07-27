@@ -18,6 +18,8 @@ from app.application.services.auth_service import AuthService
 from app.application.services.business_knowledge_service import BusinessKnowledgeService
 from app.application.services.customer_service import CustomerService
 from app.application.services.dispatch_service import DispatchService
+from app.application.services.organization_service import OrganizationService
+from app.application.services.team_service import TeamService
 from app.application.services.voice_service import VoiceService
 from app.core.config import Settings, get_settings
 from app.domain.ai.provider import AIProvider
@@ -159,6 +161,21 @@ def get_analytics_service(
         customer_repository=SqlAlchemyCustomerRepository(db),
         business_profile_repository=SqlAlchemyBusinessProfileRepository(db),
     )
+
+
+def get_team_service(
+    db: AsyncSession = Depends(get_db),
+) -> TeamService:
+    return TeamService(
+        user_repository=SqlAlchemyUserRepository(db),
+        role_repository=SqlAlchemyRoleRepository(db),
+    )
+
+
+def get_organization_service(
+    db: AsyncSession = Depends(get_db),
+) -> OrganizationService:
+    return OrganizationService(organization_repository=SqlAlchemyOrganizationRepository(db))
 
 
 def verify_vapi_secret(

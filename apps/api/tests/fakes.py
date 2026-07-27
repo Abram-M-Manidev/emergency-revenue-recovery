@@ -28,6 +28,7 @@ from app.domain.entities.customer import Customer
 from app.domain.entities.emergency_keyword import EmergencyKeyword
 from app.domain.entities.emergency_ticket import EmergencyTicket, TicketStatus
 from app.domain.entities.faq_entry import FAQEntry
+from app.domain.entities.organization import Organization
 from app.domain.entities.role import Role
 from app.domain.entities.service import Service
 from app.domain.entities.service_area import ServiceArea
@@ -43,6 +44,7 @@ from app.domain.repositories.customer_repository import CustomerRepository
 from app.domain.repositories.emergency_keyword_repository import EmergencyKeywordRepository
 from app.domain.repositories.emergency_ticket_repository import EmergencyTicketRepository
 from app.domain.repositories.faq_repository import FAQRepository
+from app.domain.repositories.organization_repository import OrganizationRepository
 from app.domain.repositories.role_repository import RoleRepository
 from app.domain.repositories.service_area_repository import ServiceAreaRepository
 from app.domain.repositories.service_repository import ServiceRepository
@@ -378,7 +380,9 @@ class FakeEmergencyTicketRepository(EmergencyTicketRepository):
         self._tickets[ticket_id] = updated
         return updated
 
-    async def update_status(self, ticket_id, *, status, closed_at=None, actual_value=None):
+    async def update_status(
+        self, organization_id, ticket_id, *, status, closed_at=None, actual_value=None
+    ):
         ticket = self._tickets[ticket_id]
         updated = replace(
             ticket,
@@ -389,7 +393,7 @@ class FakeEmergencyTicketRepository(EmergencyTicketRepository):
         self._tickets[ticket_id] = updated
         return updated
 
-    async def set_customer(self, ticket_id, *, customer_id):
+    async def set_customer(self, organization_id, ticket_id, *, customer_id):
         ticket = self._tickets[ticket_id]
         updated = replace(ticket, customer_id=customer_id)
         self._tickets[ticket_id] = updated
@@ -517,7 +521,14 @@ class FakeAppointmentRepository(AppointmentRepository):
         return matches[offset : offset + limit]
 
     async def schedule(
-        self, appointment_id, *, scheduled_start_at, duration_minutes, technician_user_id, assigned_at
+        self,
+        organization_id,
+        appointment_id,
+        *,
+        scheduled_start_at,
+        duration_minutes,
+        technician_user_id,
+        assigned_at,
     ):
         appointment = self._appointments[appointment_id]
         updated = replace(
@@ -531,7 +542,9 @@ class FakeAppointmentRepository(AppointmentRepository):
         self._appointments[appointment_id] = updated
         return updated
 
-    async def update_status(self, appointment_id, *, status, closed_at=None, actual_value=None):
+    async def update_status(
+        self, organization_id, appointment_id, *, status, closed_at=None, actual_value=None
+    ):
         appointment = self._appointments[appointment_id]
         updated = replace(
             appointment,
@@ -542,7 +555,7 @@ class FakeAppointmentRepository(AppointmentRepository):
         self._appointments[appointment_id] = updated
         return updated
 
-    async def set_customer(self, appointment_id, *, customer_id):
+    async def set_customer(self, organization_id, appointment_id, *, customer_id):
         appointment = self._appointments[appointment_id]
         updated = replace(appointment, customer_id=customer_id)
         self._appointments[appointment_id] = updated
@@ -629,7 +642,7 @@ class FakeTechnicianProfileRepository(TechnicianProfileRepository):
             matches = [p for p in matches if p.is_on_call]
         return matches
 
-    async def set_on_call(self, user_id, is_on_call):
+    async def set_on_call(self, organization_id, user_id, is_on_call):
         profile = self._profiles[user_id]
         updated = replace(profile, is_on_call=is_on_call)
         self._profiles[user_id] = updated
@@ -688,7 +701,9 @@ class FakeCustomerRepository(CustomerRepository):
         matches.sort(key=lambda c: c.created_at, reverse=True)
         return matches[offset : offset + limit]
 
-    async def update(self, customer_id, *, full_name, phone_number, email, address, notes):
+    async def update(
+        self, organization_id, customer_id, *, full_name, phone_number, email, address, notes
+    ):
         customer = self._customers[customer_id]
         colliding = await self.get_by_phone_number(customer.organization_id, phone_number)
         if colliding is not None and colliding.id != customer_id:
@@ -720,11 +735,16 @@ class FakeCustomerRepository(CustomerRepository):
 
 
 class FakeUserRepository(UserRepository):
-    """Only the methods `DispatchService.create_technician` actually calls
-    are implemented — same convention as every other fake in this module."""
+    """Covers what `DispatchService.create_technician` and `TeamService`
+    (Milestone 9) need — same "only what's actually called" convention as
+    every other fake in this module. `role_repository`, when provided,
+    lets `set_roles` resolve role ids to real `Role` objects, mirroring how
+    `FakeConversationOutcomeRepository` shares state with a conversation
+    repository for its analytics methods."""
 
-    def __init__(self) -> None:
+    def __init__(self, role_repository: "FakeRoleRepository | None" = None) -> None:
         self._users: dict[uuid.UUID, User] = {}
+        self._roles = role_repository
 
     async def get_by_id(self, user_id):
         return self._users.get(user_id)
@@ -736,6 +756,7 @@ class FakeUserRepository(UserRepository):
         self, *, organization_id, email, hashed_password, full_name, role_ids, is_superuser=False
     ):
         now = datetime.now(timezone.utc)
+        roles = self._resolve_roles(role_ids)
         user = User(
             id=uuid.uuid4(),
             organization_id=organization_id,
@@ -747,13 +768,35 @@ class FakeUserRepository(UserRepository):
             created_at=now,
             updated_at=now,
             last_login_at=None,
-            roles=(),
+            roles=roles,
         )
         self._users[user.id] = user
         return user
 
     async def record_login(self, user_id):
         raise NotImplementedError
+
+    async def list_by_organization_id(self, organization_id):
+        matches = [u for u in self._users.values() if u.organization_id == organization_id]
+        matches.sort(key=lambda u: u.created_at)
+        return matches
+
+    async def set_active(self, user_id, *, is_active):
+        user = self._users[user_id]
+        updated = replace(user, is_active=is_active)
+        self._users[user_id] = updated
+        return updated
+
+    async def set_roles(self, user_id, *, role_ids):
+        user = self._users[user_id]
+        updated = replace(user, roles=self._resolve_roles(role_ids))
+        self._users[user_id] = updated
+        return updated
+
+    def _resolve_roles(self, role_ids: list[uuid.UUID]) -> tuple[Role, ...]:
+        if not role_ids or self._roles is None:
+            return ()
+        return tuple(role for role in self._roles._roles.values() if role.id in role_ids)
 
 
 class FakeRoleRepository(RoleRepository):
@@ -784,6 +827,38 @@ class FakeRoleRepository(RoleRepository):
         )
         self._roles[key] = role
         return role
+
+
+class FakeOrganizationRepository(OrganizationRepository):
+    def __init__(self) -> None:
+        self._organizations: dict[uuid.UUID, Organization] = {}
+
+    def seed(self, organization: Organization) -> None:
+        self._organizations[organization.id] = organization
+
+    async def get_by_id(self, organization_id):
+        return self._organizations.get(organization_id)
+
+    async def get_by_slug(self, slug):
+        return next((o for o in self._organizations.values() if o.slug == slug), None)
+
+    async def create(self, *, name, slug):
+        now = datetime.now(timezone.utc)
+        organization = Organization(
+            id=uuid.uuid4(), name=name, slug=slug, is_active=True, created_at=now, updated_at=now
+        )
+        self._organizations[organization.id] = organization
+        return organization
+
+    async def update(self, organization_id, *, name=None, is_active=None):
+        organization = self._organizations[organization_id]
+        updated = replace(
+            organization,
+            name=name if name is not None else organization.name,
+            is_active=is_active if is_active is not None else organization.is_active,
+        )
+        self._organizations[organization_id] = updated
+        return updated
 
 
 def default_reply(**overrides) -> AIReply:

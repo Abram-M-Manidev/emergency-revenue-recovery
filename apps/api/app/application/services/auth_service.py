@@ -103,6 +103,7 @@ class AuthService:
             raise InvalidCredentialsError()
         if not user.is_active:
             raise InactiveAccountError()
+        await self._ensure_organization_active(user.organization_id)
 
         await self._users.record_login(user.id)
         return await self._issue_session(user, user_agent=user_agent, ip_address=ip_address)
@@ -126,6 +127,7 @@ class AuthService:
         user = await self._users.get_by_id(record.user_id)
         if user is None or not user.is_active:
             raise InvalidTokenError("Refresh token no longer maps to an active user.")
+        await self._ensure_organization_active(user.organization_id)
 
         session = await self._issue_session(user, user_agent=user_agent, ip_address=ip_address)
 
@@ -173,6 +175,19 @@ class AuthService:
             refresh_token_id=issued.token_id,
             refresh_token_expires_at=expires_at,
         )
+
+    async def _ensure_organization_active(self, organization_id: uuid.UUID) -> None:
+        """Blocks login/refresh once an org has been deactivated (Milestone
+        9). `get_current_user` (app/api/deps.py) re-fetches the user fresh
+        from the database on every request, so user-level deactivation and
+        role/permission changes already take effect immediately — but it
+        never re-checks the organization's own `is_active`, so an
+        already-issued access token from a just-deactivated org keeps
+        working until it expires (`ACCESS_TOKEN_EXPIRE_MINUTES`) and the
+        client is forced to refresh, which does check it, here."""
+        organization = await self._organizations.get_by_id(organization_id)
+        if organization is None or not organization.is_active:
+            raise InactiveAccountError()
 
     async def _unique_slug(self, organization_name: str) -> str:
         base_slug = slugify(organization_name)

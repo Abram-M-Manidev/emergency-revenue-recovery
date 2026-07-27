@@ -11,6 +11,7 @@ import {
   MessageCircle,
   Settings,
   Siren,
+  UserCog,
   Users,
   X,
 } from "lucide-react";
@@ -25,6 +26,7 @@ const NAV_ITEMS = [
   { href: ROUTES.aiConversations, label: "AI Conversations", icon: MessageCircle },
   { href: ROUTES.customers, label: "Customers", icon: Users },
   { href: ROUTES.analytics, label: "Analytics", icon: BarChart3 },
+  { href: ROUTES.team, label: "Team", icon: UserCog },
   { href: ROUTES.settings, label: "Settings", icon: Settings },
 ] as const;
 

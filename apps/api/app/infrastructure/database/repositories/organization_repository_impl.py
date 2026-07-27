@@ -42,3 +42,22 @@ class SqlAlchemyOrganizationRepository(OrganizationRepository):
         await self._session.flush()
         await self._session.refresh(model)
         return _to_entity(model)
+
+    async def update(
+        self,
+        organization_id: uuid.UUID,
+        *,
+        name: str | None = None,
+        is_active: bool | None = None,
+    ) -> Organization:
+        result = await self._session.execute(
+            select(OrganizationModel).where(OrganizationModel.id == organization_id)
+        )
+        model = result.scalar_one()
+        if name is not None:
+            model.name = name
+        if is_active is not None:
+            model.is_active = is_active
+        await self._session.flush()
+        await self._session.refresh(model)
+        return _to_entity(model)

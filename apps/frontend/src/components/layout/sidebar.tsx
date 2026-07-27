@@ -11,6 +11,7 @@ import {
   Settings,
   Siren,
   Truck,
+  UserCog,
   Users,
 } from "lucide-react";
 
@@ -25,6 +26,7 @@ const NAV_ITEMS = [
   { href: ROUTES.appointments, label: "Appointments", icon: CalendarClock },
   { href: ROUTES.customers, label: "Customers", icon: Users },
   { href: ROUTES.analytics, label: "Analytics", icon: BarChart3 },
+  { href: ROUTES.team, label: "Team", icon: UserCog },
   { href: ROUTES.settings, label: "Settings", icon: Settings },
 ] as const;
 

@@ -131,6 +131,7 @@ class SqlAlchemyCustomerRepository(CustomerRepository):
 
     async def update(
         self,
+        organization_id: uuid.UUID,
         customer_id: uuid.UUID,
         *,
         full_name: str | None,
@@ -140,7 +141,10 @@ class SqlAlchemyCustomerRepository(CustomerRepository):
         notes: str | None,
     ) -> Customer:
         result = await self._session.execute(
-            select(CustomerModel).where(CustomerModel.id == customer_id)
+            select(CustomerModel).where(
+                CustomerModel.id == customer_id,
+                CustomerModel.organization_id == organization_id,
+            )
         )
         model = result.scalar_one()
         model.full_name = full_name

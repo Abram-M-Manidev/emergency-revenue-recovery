@@ -12,6 +12,7 @@ from app.domain.exceptions.base import (
     InvalidCredentialsError,
     InvalidTicketStatusTransitionError,
     InvalidTokenError,
+    LastOwnerError,
     VoiceLineNotFoundError,
 )
 
@@ -29,5 +30,6 @@ __all__ = [
     "InvalidCredentialsError",
     "InvalidTicketStatusTransitionError",
     "InvalidTokenError",
+    "LastOwnerError",
     "VoiceLineNotFoundError",
 ]

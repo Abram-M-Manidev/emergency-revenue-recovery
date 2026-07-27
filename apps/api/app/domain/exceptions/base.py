@@ -92,6 +92,14 @@ class AppointmentOutsideBusinessHoursError(DomainError):
         super().__init__(message)
 
 
+class LastOwnerError(DomainError):
+    def __init__(
+        self,
+        message: str = "An organization must always retain at least one active Owner.",
+    ) -> None:
+        super().__init__(message)
+
+
 class VoiceLineNotFoundError(DomainError):
     """Raised when an inbound call's assistant/phone number id doesn't map
     to any configured organization. The Vapi webhook endpoint (a voice

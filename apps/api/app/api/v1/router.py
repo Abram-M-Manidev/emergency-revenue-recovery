@@ -9,6 +9,8 @@ from app.api.v1.endpoints import (
     customers,
     dispatch,
     health,
+    organizations,
+    team,
     vapi_webhooks,
     version,
     voice,
@@ -26,3 +28,5 @@ api_router.include_router(dispatch.router)
 api_router.include_router(appointments.router)
 api_router.include_router(customers.router)
 api_router.include_router(analytics.router)
+api_router.include_router(team.router)
+api_router.include_router(organizations.router)

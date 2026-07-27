@@ -254,7 +254,7 @@ async def test_leaving_actual_value_unset_does_not_clear_it():
     await _seed_emergency_outcome(outcomes, conversation_id)
     ticket = await service.sync_ticket_from_outcome(_ORG_ID, conversation_id)
     await tickets.update_status(
-        ticket.id, status=TicketStatus.NEW, actual_value=Decimal("50.00")
+        _ORG_ID, ticket.id, status=TicketStatus.NEW, actual_value=Decimal("50.00")
     )
 
     owner = _owner_user()

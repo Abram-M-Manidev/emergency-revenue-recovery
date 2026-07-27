@@ -27,3 +27,15 @@ class UserRepository(ABC):
 
     @abstractmethod
     async def record_login(self, user_id: uuid.UUID) -> None: ...
+
+    @abstractmethod
+    async def list_by_organization_id(self, organization_id: uuid.UUID) -> list[User]: ...
+
+    @abstractmethod
+    async def set_active(self, user_id: uuid.UUID, *, is_active: bool) -> User: ...
+
+    @abstractmethod
+    async def set_roles(self, user_id: uuid.UUID, *, role_ids: list[uuid.UUID]) -> User:
+        """Replaces the user's entire role set (this app has always assigned
+        exactly one role per user, even though `user_roles` is M2M)."""
+        ...

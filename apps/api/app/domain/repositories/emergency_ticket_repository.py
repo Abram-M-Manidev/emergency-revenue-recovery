@@ -60,6 +60,7 @@ class EmergencyTicketRepository(ABC):
     @abstractmethod
     async def update_status(
         self,
+        organization_id: uuid.UUID,
         ticket_id: uuid.UUID,
         *,
         status: TicketStatus,
@@ -69,16 +70,18 @@ class EmergencyTicketRepository(ABC):
         """`actual_value` (Milestone 8), when provided, is persisted
         regardless of the target status — it is meaningful when closing a
         ticket as RESOLVED, but the repository does not enforce that; see
-        `DispatchService.update_ticket_status`."""
+        `DispatchService.update_ticket_status`. `organization_id` scopes the
+        lookup itself (Milestone 9 tenant-isolation hardening)."""
         ...
 
     @abstractmethod
     async def set_customer(
-        self, ticket_id: uuid.UUID, *, customer_id: uuid.UUID
+        self, organization_id: uuid.UUID, ticket_id: uuid.UUID, *, customer_id: uuid.UUID
     ) -> EmergencyTicket:
         """Links a ticket to a `Customer` (Milestone 7) after the fact —
         called by `CustomerService.sync_customer_from_outcome`, never at
-        ticket-creation time."""
+        ticket-creation time. `organization_id` scopes the lookup itself
+        (Milestone 9 tenant-isolation hardening)."""
         ...
 
     @abstractmethod

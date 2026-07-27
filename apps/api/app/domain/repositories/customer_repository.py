@@ -53,6 +53,7 @@ class CustomerRepository(ABC):
     @abstractmethod
     async def update(
         self,
+        organization_id: uuid.UUID,
         customer_id: uuid.UUID,
         *,
         full_name: str | None,
@@ -62,7 +63,10 @@ class CustomerRepository(ABC):
         notes: str | None,
     ) -> Customer:
         """Must raise `EntityAlreadyExistsError` if the new `phone_number`
-        collides with a different customer in the same organization."""
+        collides with a different customer in the same organization.
+        `organization_id` scopes the lookup itself (Milestone 9
+        tenant-isolation hardening) rather than relying solely on the
+        caller having already verified ownership."""
         ...
 
     # --- Analytics (Milestone 8) aggregate queries ---

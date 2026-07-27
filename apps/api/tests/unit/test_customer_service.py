@@ -175,7 +175,7 @@ async def test_sync_does_not_relink_already_linked_ticket():
         summary="Emergency.",
     )
     other_customer_id = uuid.uuid4()
-    await tickets.set_customer(ticket.id, customer_id=other_customer_id)
+    await tickets.set_customer(_ORG_ID, ticket.id, customer_id=other_customer_id)
 
     await service.sync_customer_from_outcome(_ORG_ID, conversation_id)
 

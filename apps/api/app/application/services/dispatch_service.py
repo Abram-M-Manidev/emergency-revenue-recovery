@@ -181,7 +181,7 @@ class DispatchService:
 
         closed_at = datetime.now(timezone.utc) if new_status in _CLOSED_STATUSES else None
         return await self._tickets.update_status(
-            ticket_id, status=new_status, closed_at=closed_at, actual_value=actual_value
+            organization_id, ticket_id, status=new_status, closed_at=closed_at, actual_value=actual_value
         )
 
     # --- Technicians ---
@@ -216,7 +216,7 @@ class DispatchService:
         technician = await self._technicians.get_by_user_id(user_id)
         if technician is None or technician.organization_id != organization_id:
             raise EntityNotFoundError("TechnicianProfile", str(user_id))
-        return await self._technicians.set_on_call(user_id, is_on_call)
+        return await self._technicians.set_on_call(organization_id, user_id, is_on_call)
 
     async def create_technician(
         self,

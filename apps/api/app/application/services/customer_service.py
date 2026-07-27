@@ -104,11 +104,13 @@ class CustomerService:
     ) -> None:
         ticket = await self._tickets.get_by_conversation_id(conversation_id)
         if ticket is not None and ticket.customer_id is None:
-            await self._tickets.set_customer(ticket.id, customer_id=customer_id)
+            await self._tickets.set_customer(organization_id, ticket.id, customer_id=customer_id)
 
         appointment = await self._appointments.get_by_conversation_id(conversation_id)
         if appointment is not None and appointment.customer_id is None:
-            await self._appointments.set_customer(appointment.id, customer_id=customer_id)
+            await self._appointments.set_customer(
+                organization_id, appointment.id, customer_id=customer_id
+            )
 
     # --- Customers ---
 
@@ -173,6 +175,7 @@ class CustomerService:
     ) -> Customer:
         await self.get_customer(organization_id, customer_id)
         return await self._customers.update(
+            organization_id,
             customer_id,
             full_name=full_name,
             phone_number=phone_number,

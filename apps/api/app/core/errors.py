@@ -36,6 +36,7 @@ from app.domain.exceptions import (
     InvalidCredentialsError,
     InvalidTicketStatusTransitionError,
     InvalidTokenError,
+    LastOwnerError,
     VoiceLineNotFoundError,
 )
 
@@ -61,6 +62,7 @@ _DOMAIN_ERROR_STATUS: dict[type[DomainError], int] = {
     VoiceLineNotFoundError: status.HTTP_404_NOT_FOUND,
     InvalidTicketStatusTransitionError: status.HTTP_409_CONFLICT,
     InvalidAppointmentStatusTransitionError: status.HTTP_409_CONFLICT,
+    LastOwnerError: status.HTTP_409_CONFLICT,
 }
 
 

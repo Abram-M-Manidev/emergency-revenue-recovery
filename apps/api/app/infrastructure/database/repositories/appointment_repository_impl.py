@@ -125,6 +125,7 @@ class SqlAlchemyAppointmentRepository(AppointmentRepository):
 
     async def schedule(
         self,
+        organization_id: uuid.UUID,
         appointment_id: uuid.UUID,
         *,
         scheduled_start_at: datetime,
@@ -133,7 +134,10 @@ class SqlAlchemyAppointmentRepository(AppointmentRepository):
         assigned_at: datetime,
     ) -> Appointment:
         result = await self._session.execute(
-            select(AppointmentModel).where(AppointmentModel.id == appointment_id)
+            select(AppointmentModel).where(
+                AppointmentModel.id == appointment_id,
+                AppointmentModel.organization_id == organization_id,
+            )
         )
         model = result.scalar_one()
         model.scheduled_start_at = scheduled_start_at
@@ -147,6 +151,7 @@ class SqlAlchemyAppointmentRepository(AppointmentRepository):
 
     async def update_status(
         self,
+        organization_id: uuid.UUID,
         appointment_id: uuid.UUID,
         *,
         status: AppointmentStatus,
@@ -154,7 +159,10 @@ class SqlAlchemyAppointmentRepository(AppointmentRepository):
         actual_value: Decimal | None = None,
     ) -> Appointment:
         result = await self._session.execute(
-            select(AppointmentModel).where(AppointmentModel.id == appointment_id)
+            select(AppointmentModel).where(
+                AppointmentModel.id == appointment_id,
+                AppointmentModel.organization_id == organization_id,
+            )
         )
         model = result.scalar_one()
         model.status = status
@@ -167,10 +175,13 @@ class SqlAlchemyAppointmentRepository(AppointmentRepository):
         return _to_entity(model)
 
     async def set_customer(
-        self, appointment_id: uuid.UUID, *, customer_id: uuid.UUID
+        self, organization_id: uuid.UUID, appointment_id: uuid.UUID, *, customer_id: uuid.UUID
     ) -> Appointment:
         result = await self._session.execute(
-            select(AppointmentModel).where(AppointmentModel.id == appointment_id)
+            select(AppointmentModel).where(
+                AppointmentModel.id == appointment_id,
+                AppointmentModel.organization_id == organization_id,
+            )
         )
         model = result.scalar_one()
         model.customer_id = customer_id

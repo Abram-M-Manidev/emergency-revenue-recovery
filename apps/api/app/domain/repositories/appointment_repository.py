@@ -56,6 +56,7 @@ class AppointmentRepository(ABC):
     @abstractmethod
     async def schedule(
         self,
+        organization_id: uuid.UUID,
         appointment_id: uuid.UUID,
         *,
         scheduled_start_at: datetime,
@@ -66,12 +67,14 @@ class AppointmentRepository(ABC):
         """Sets scheduled_start_at/duration_minutes/
         assigned_technician_user_id/assigned_at and status=SCHEDULED in one
         write. Used for both the initial schedule and any later
-        reschedule."""
+        reschedule. `organization_id` scopes the lookup itself (Milestone 9
+        tenant-isolation hardening)."""
         ...
 
     @abstractmethod
     async def update_status(
         self,
+        organization_id: uuid.UUID,
         appointment_id: uuid.UUID,
         *,
         status: AppointmentStatus,
@@ -81,16 +84,18 @@ class AppointmentRepository(ABC):
         """`actual_value` (Milestone 8), when provided, is persisted
         regardless of the target status — it is meaningful when closing an
         appointment as COMPLETED, but the repository does not enforce that;
-        see `AppointmentService.update_appointment_status`."""
+        see `AppointmentService.update_appointment_status`. `organization_id`
+        scopes the lookup itself (Milestone 9 tenant-isolation hardening)."""
         ...
 
     @abstractmethod
     async def set_customer(
-        self, appointment_id: uuid.UUID, *, customer_id: uuid.UUID
+        self, organization_id: uuid.UUID, appointment_id: uuid.UUID, *, customer_id: uuid.UUID
     ) -> Appointment:
         """Links an appointment to a `Customer` (Milestone 7) after the
         fact — called by `CustomerService.sync_customer_from_outcome`,
-        never at appointment-creation time."""
+        never at appointment-creation time. `organization_id` scopes the
+        lookup itself (Milestone 9 tenant-isolation hardening)."""
         ...
 
     @abstractmethod

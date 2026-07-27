@@ -13,6 +13,7 @@ export const ROUTES = {
   appointments: "/appointments",
   customers: "/customers",
   analytics: "/analytics",
+  team: "/team",
 } as const;
 
 export const AUTH_COOKIE_NAME = "refresh_token";

@@ -136,6 +136,7 @@ class SqlAlchemyEmergencyTicketRepository(EmergencyTicketRepository):
 
     async def update_status(
         self,
+        organization_id: uuid.UUID,
         ticket_id: uuid.UUID,
         *,
         status: TicketStatus,
@@ -143,7 +144,10 @@ class SqlAlchemyEmergencyTicketRepository(EmergencyTicketRepository):
         actual_value: Decimal | None = None,
     ) -> EmergencyTicket:
         result = await self._session.execute(
-            select(EmergencyTicketModel).where(EmergencyTicketModel.id == ticket_id)
+            select(EmergencyTicketModel).where(
+                EmergencyTicketModel.id == ticket_id,
+                EmergencyTicketModel.organization_id == organization_id,
+            )
         )
         model = result.scalar_one()
         model.status = status
@@ -156,10 +160,13 @@ class SqlAlchemyEmergencyTicketRepository(EmergencyTicketRepository):
         return _to_entity(model)
 
     async def set_customer(
-        self, ticket_id: uuid.UUID, *, customer_id: uuid.UUID
+        self, organization_id: uuid.UUID, ticket_id: uuid.UUID, *, customer_id: uuid.UUID
     ) -> EmergencyTicket:
         result = await self._session.execute(
-            select(EmergencyTicketModel).where(EmergencyTicketModel.id == ticket_id)
+            select(EmergencyTicketModel).where(
+                EmergencyTicketModel.id == ticket_id,
+                EmergencyTicketModel.organization_id == organization_id,
+            )
         )
         model = result.scalar_one()
         model.customer_id = customer_id
