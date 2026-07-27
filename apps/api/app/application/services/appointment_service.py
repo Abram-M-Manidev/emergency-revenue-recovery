@@ -186,11 +186,13 @@ class AppointmentService:
     ) -> Appointment:
         appointment = await self.get_appointment(organization_id, appointment_id)
 
-        if not acting_user.has_permission(Permissions.APPOINTMENTS_MANAGE):
-            if appointment.assigned_technician_user_id != acting_user.id:
-                raise AuthorizationError(
-                    "You can only update the status of appointments assigned to you."
-                )
+        if (
+            not acting_user.has_permission(Permissions.APPOINTMENTS_MANAGE)
+            and appointment.assigned_technician_user_id != acting_user.id
+        ):
+            raise AuthorizationError(
+                "You can only update the status of appointments assigned to you."
+            )
 
         if new_status not in _ALLOWED_TRANSITIONS[appointment.status]:
             raise InvalidAppointmentStatusTransitionError(

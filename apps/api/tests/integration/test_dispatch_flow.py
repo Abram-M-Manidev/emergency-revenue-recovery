@@ -148,7 +148,7 @@ async def test_assign_and_resolve_ticket_as_the_assigned_technician(
     technician = await _create_technician(
         client, owner_token, email="tech-b@example.com", password="temp-pass-123"
     )
-    other_technician = await _create_technician(
+    await _create_technician(
         client, owner_token, email="tech-b2@example.com", password="temp-pass-123"
     )
     tech_token = await _login(client, "tech-b@example.com", "temp-pass-123")

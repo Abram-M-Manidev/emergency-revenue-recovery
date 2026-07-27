@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, Numeric, String, Text
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -16,6 +16,17 @@ from app.infrastructure.database.session import Base
 
 class AppointmentModel(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "appointments"
+    __table_args__ = (
+        # Matches real query patterns in `appointment_repository_impl.py`:
+        # `list_for_organization` filters org+status; `count_created_in_range`
+        # filters org+created_at; `count_closed_in_range`/
+        # `sum_actual_value_in_range`/`revenue_by_day` all filter
+        # org+closed_at. Kept in sync with migration `a2b3c4d5e6f7` so
+        # autogenerate never sees a spurious index-drop diff.
+        Index("ix_appointments_org_status", "organization_id", "status"),
+        Index("ix_appointments_org_created_at", "organization_id", "created_at"),
+        Index("ix_appointments_org_closed_at", "organization_id", "closed_at"),
+    )
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True),

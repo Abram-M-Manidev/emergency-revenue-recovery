@@ -7,6 +7,7 @@ should never grow past "assemble the pieces."
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -15,7 +16,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.v1.router import api_router
 from app.core.config import get_settings
 from app.core.errors import register_exception_handlers
-from app.core.middleware import RequestIDMiddleware, RequestLoggingMiddleware
+from app.core.middleware import (
+    MaxBodySizeMiddleware,
+    RateLimitMiddleware,
+    RequestIDMiddleware,
+    RequestLoggingMiddleware,
+    SecurityHeadersMiddleware,
+)
 from app.core.version import APP_VERSION
 from app.infrastructure.database.session import engine
 from app.shared.logging.setup import configure_logging, get_logger
@@ -26,7 +33,7 @@ logger = get_logger("app.lifecycle")
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("app_startup", environment=settings.ENVIRONMENT, version=APP_VERSION)
     yield
     await engine.dispose()
@@ -41,6 +48,22 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    # Starlette's `add_middleware()` prepends each call, so the LAST call
+    # here ends up OUTERMOST and the FIRST call ends up INNERMOST (closest
+    # to routing). Order (outermost -> innermost): RequestLoggingMiddleware
+    # -> RequestIDMiddleware -> SecurityHeadersMiddleware ->
+    # MaxBodySizeMiddleware -> RateLimitMiddleware. This keeps the original
+    # two middlewares' relative order unchanged and nests the three new
+    # ones inside both, so: (a) RequestIDMiddleware still wraps every new
+    # middleware, meaning `request.state.request_id`/the `X-Request-ID`
+    # header exist even for a request the new middlewares reject; (b)
+    # RequestLoggingMiddleware still logs exactly one line per request,
+    # rejected or not; (c) MaxBodySizeMiddleware runs before
+    # RateLimitMiddleware so an oversized request doesn't also consume a
+    # rate-limit slot before being rejected anyway.
+    app.add_middleware(RateLimitMiddleware)
+    app.add_middleware(MaxBodySizeMiddleware)
+    app.add_middleware(SecurityHeadersMiddleware)
     app.add_middleware(RequestIDMiddleware)
     app.add_middleware(RequestLoggingMiddleware)
 

@@ -1,0 +1,68 @@
+name: Backend CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/api/**"
+      - ".github/workflows/backend-ci.yml"
+  pull_request:
+    paths:
+      - "apps/api/**"
+      - ".github/workflows/backend-ci.yml"
+
+defaults:
+  run:
+    working-directory: apps/api
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    # POSTGRES_DB is already `_test`-suffixed so tests/conftest.py's
+    # `_test`-suffix regex (which forces integration tests onto an
+    # isolated database, never the dev one) is a no-op here — no
+    # CI-specific test code needed.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: errs
+          POSTGRES_PASSWORD: errs
+          POSTGRES_DB: errs_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U errs"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      ENVIRONMENT: testing
+      DATABASE_URL: postgresql+asyncpg://errs:errs@localhost:5432/errs_test
+      JWT_SECRET_KEY: ci-test-secret-key-not-for-production-use-only-CHANGE-ME
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Matches apps/api/Dockerfile's runtime (python:3.12-slim) and
+      # pyproject.toml's target-version/python_version.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: apps/api/requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      # Fail fast on lint before paying for a DB-backed test run.
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Type-check (mypy)
+        run: mypy app
+
+      - name: Test (pytest)
+        run: pytest

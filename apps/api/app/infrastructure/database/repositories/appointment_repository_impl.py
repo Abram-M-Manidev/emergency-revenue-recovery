@@ -250,7 +250,11 @@ class SqlAlchemyAppointmentRepository(AppointmentRepository):
         if start is not None:
             query = query.where(AppointmentModel.closed_at >= start)
         total = (await self._session.execute(query)).scalar_one()
-        return Decimal(total)
+        # `coalesce(..., 0)` guarantees this is never actually None at
+        # runtime; mypy can't infer that through func.sum()'s generic
+        # return type, so this satisfies the type checker without
+        # changing behavior.
+        return Decimal(total) if total is not None else Decimal(0)
 
     async def revenue_by_day(
         self,

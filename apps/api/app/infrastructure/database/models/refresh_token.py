@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import DateTime, ForeignKey, String, func
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
@@ -14,6 +15,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.infrastructure.database.models.mixins import UUIDPrimaryKeyMixin
 from app.infrastructure.database.session import Base
+
+if TYPE_CHECKING:
+    from app.infrastructure.database.models.user import UserModel
 
 
 class RefreshTokenModel(UUIDPrimaryKeyMixin, Base):
@@ -34,7 +38,7 @@ class RefreshTokenModel(UUIDPrimaryKeyMixin, Base):
     user_agent: Mapped[str | None] = mapped_column(String(255), nullable=True)
     ip_address: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
-    user: Mapped[UserModel] = relationship(back_populates="refresh_tokens")  # noqa: F821
+    user: Mapped[UserModel] = relationship(back_populates="refresh_tokens")
 
     @property
     def is_active(self) -> bool:

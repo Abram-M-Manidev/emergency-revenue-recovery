@@ -45,15 +45,19 @@ class FakeVoiceLineRepository(VoiceLineRepository):
 
     async def get_by_organization_id(self, organization_id):
         return next(
-            (l for l in self._lines.values() if l.organization_id == organization_id), None
+            (line for line in self._lines.values() if line.organization_id == organization_id),
+            None,
         )
 
     async def get_by_vapi_assistant_id(self, assistant_id):
-        return next((l for l in self._lines.values() if l.vapi_assistant_id == assistant_id), None)
+        return next(
+            (line for line in self._lines.values() if line.vapi_assistant_id == assistant_id), None
+        )
 
     async def get_by_vapi_phone_number_id(self, phone_number_id):
         return next(
-            (l for l in self._lines.values() if l.vapi_phone_number_id == phone_number_id), None
+            (line for line in self._lines.values() if line.vapi_phone_number_id == phone_number_id),
+            None,
         )
 
     async def create(

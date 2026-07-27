@@ -168,11 +168,13 @@ class DispatchService:
     ) -> EmergencyTicket:
         ticket = await self.get_ticket(organization_id, ticket_id)
 
-        if not acting_user.has_permission(Permissions.DISPATCH_MANAGE):
-            if ticket.assigned_technician_user_id != acting_user.id:
-                raise AuthorizationError(
-                    "You can only update the status of tickets assigned to you."
-                )
+        if (
+            not acting_user.has_permission(Permissions.DISPATCH_MANAGE)
+            and ticket.assigned_technician_user_id != acting_user.id
+        ):
+            raise AuthorizationError(
+                "You can only update the status of tickets assigned to you."
+            )
 
         if new_status not in _ALLOWED_TRANSITIONS[ticket.status]:
             raise InvalidTicketStatusTransitionError(

@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, String, func
+from sqlalchemy import DateTime, ForeignKey, Index, String, func
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -23,6 +23,14 @@ if TYPE_CHECKING:
 
 class ConversationModel(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "conversations"
+    __table_args__ = (
+        # Matches Analytics' org+date-range aggregates (`count_in_range`,
+        # `count_by_day`, `count_by_channel_in_range` in
+        # `conversation_repository_impl.py`, all filtered on `started_at`,
+        # not `created_at`) — kept in sync with migration `a2b3c4d5e6f7` so
+        # autogenerate never sees a spurious index-drop diff.
+        Index("ix_conversations_org_started_at", "organization_id", "started_at"),
+    )
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True),

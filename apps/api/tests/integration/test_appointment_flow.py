@@ -176,7 +176,7 @@ async def test_schedule_and_complete_appointment_as_assigned_technician(
     technician = await _create_technician(
         client, owner_token, email="tech-appt-b@example.com", password="temp-pass-123"
     )
-    other_technician = await _create_technician(
+    await _create_technician(
         client, owner_token, email="tech-appt-b2@example.com", password="temp-pass-123"
     )
     tech_token = await _login(client, "tech-appt-b@example.com", "temp-pass-123")

@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 
-from openai import AsyncOpenAI
+from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
 from pydantic import BaseModel
 
 from app.core.config import Settings
@@ -88,7 +88,16 @@ class OpenAIProvider(AIProvider):
         if not self._settings.OPENAI_API_KEY:
             raise AIProviderUnavailableError()
         if self._client is None:
-            self._client = AsyncOpenAI(api_key=self._settings.OPENAI_API_KEY)
+            # `timeout`/`max_retries` are the SDK's own client-level knobs —
+            # it already implements correct backoff for transient failures,
+            # so no hand-rolled retry loop is needed here. Without an
+            # explicit timeout, a hung call could block a live emergency
+            # call's request indefinitely.
+            self._client = AsyncOpenAI(
+                api_key=self._settings.OPENAI_API_KEY,
+                timeout=self._settings.OPENAI_TIMEOUT_SECONDS,
+                max_retries=self._settings.OPENAI_MAX_RETRIES,
+            )
         return self._client
 
     async def generate_reply(self, request: AIRequest) -> AIReply:
@@ -100,11 +109,23 @@ class OpenAIProvider(AIProvider):
             messages.append({"role": role, "content": turn.content})
         messages.append({"role": "user", "content": request.latest_customer_message})
 
-        response = await client.chat.completions.create(
-            model=self._settings.OPENAI_MODEL,
-            messages=messages,  # type: ignore[call-overload]
-            response_format={"type": "json_schema", "json_schema": _JSON_SCHEMA},
-        )
+        try:
+            response = await client.chat.completions.create(
+                model=self._settings.OPENAI_MODEL,
+                messages=messages,  # type: ignore[call-overload]
+                response_format={"type": "json_schema", "json_schema": _JSON_SCHEMA},
+            )
+        except APITimeoutError as exc:
+            raise AIProviderUnavailableError("The AI Brain timed out. Please try again.") from exc
+        except APIConnectionError as exc:
+            raise AIProviderUnavailableError(
+                "Could not reach the AI Brain. Please try again shortly."
+            ) from exc
+        except APIStatusError as exc:
+            raise AIProviderUnavailableError(
+                "The AI Brain is temporarily unavailable. Please try again shortly."
+            ) from exc
+
         content = response.choices[0].message.content
         if content is None:
             raise AIProviderUnavailableError("OpenAI returned an empty response.")

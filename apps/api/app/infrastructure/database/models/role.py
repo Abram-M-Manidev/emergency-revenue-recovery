@@ -7,6 +7,7 @@ app/domain/entities/rbac.py.
 from __future__ import annotations
 
 import uuid
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Boolean, Column, ForeignKey, String, Table, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
@@ -14,6 +15,10 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.infrastructure.database.models.mixins import TimestampMixin, UUIDPrimaryKeyMixin
 from app.infrastructure.database.session import Base
+
+if TYPE_CHECKING:
+    from app.infrastructure.database.models.organization import OrganizationModel
+    from app.infrastructure.database.models.user import UserModel
 
 role_permissions = Table(
     "role_permissions",
@@ -46,13 +51,11 @@ class RoleModel(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     description: Mapped[str | None] = mapped_column(String(255), nullable=True)
     is_system_role: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
-    organization: Mapped[OrganizationModel] = relationship(back_populates="roles")  # noqa: F821
+    organization: Mapped[OrganizationModel] = relationship(back_populates="roles")
     permissions: Mapped[list[PermissionModel]] = relationship(
         secondary=role_permissions, back_populates="roles"
     )
-    users: Mapped[list[UserModel]] = relationship(  # noqa: F821
-        secondary=user_roles, back_populates="roles"
-    )
+    users: Mapped[list[UserModel]] = relationship(secondary=user_roles, back_populates="roles")
 
 
 class PermissionModel(UUIDPrimaryKeyMixin, TimestampMixin, Base):

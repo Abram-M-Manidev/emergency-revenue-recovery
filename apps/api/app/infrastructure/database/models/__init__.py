@@ -10,6 +10,7 @@ from app.infrastructure.database.models.business_profile import BusinessProfileM
 from app.infrastructure.database.models.conversation import ConversationModel
 from app.infrastructure.database.models.conversation_message import ConversationMessageModel
 from app.infrastructure.database.models.conversation_outcome import ConversationOutcomeModel
+from app.infrastructure.database.models.customer import CustomerModel
 from app.infrastructure.database.models.emergency_keyword import EmergencyKeywordModel
 from app.infrastructure.database.models.emergency_ticket import EmergencyTicketModel
 from app.infrastructure.database.models.faq_entry import FAQEntryModel
@@ -34,6 +35,7 @@ __all__ = [
     "ConversationMessageModel",
     "ConversationModel",
     "ConversationOutcomeModel",
+    "CustomerModel",
     "EmergencyKeywordModel",
     "EmergencyTicketModel",
     "FAQEntryModel",

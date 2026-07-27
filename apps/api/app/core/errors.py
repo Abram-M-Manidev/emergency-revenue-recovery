@@ -66,7 +66,7 @@ _DOMAIN_ERROR_STATUS: dict[type[DomainError], int] = {
 }
 
 
-def _error_response(
+def error_response(
     request: Request,
     *,
     status_code: int,
@@ -74,6 +74,16 @@ def _error_response(
     message: str,
     details: dict[str, Any] | None = None,
 ) -> JSONResponse:
+    """Builds the same error envelope every exception handler below uses.
+
+    Public (not `_`-prefixed) because middleware added via
+    `app.add_middleware()` sits outside the ASGI layer that dispatches to
+    `@app.exception_handler(...)` (see `app/core/middleware.py`'s
+    `RateLimitMiddleware`/`MaxBodySizeMiddleware`) — those need to build
+    this exact envelope themselves rather than raising, since an exception
+    raised from that outer layer would only ever reach the generic 500
+    handler, never the specific one for its status code.
+    """
     request_id = getattr(request.state, "request_id", None)
     body: dict[str, Any] = {
         "error": {"code": code, "message": message},
@@ -98,7 +108,7 @@ def register_exception_handlers(app: FastAPI) -> None:
         else:
             logger.info("domain_error", error=exc.__class__.__name__, message=exc.message)
 
-        return _error_response(
+        return error_response(
             request,
             status_code=status_code,
             code=_domain_error_code(exc),
@@ -119,7 +129,7 @@ def register_exception_handlers(app: FastAPI) -> None:
             {"type": err["type"], "loc": err["loc"], "msg": err["msg"]} for err in exc.errors()
         ]
         logger.info("validation_error", errors=sanitized_errors)
-        return _error_response(
+        return error_response(
             request,
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             code="VALIDATION_ERROR",
@@ -130,7 +140,7 @@ def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(HTTPException)
     async def handle_http_exception(request: Request, exc: HTTPException) -> JSONResponse:
         logger.info("http_exception", status_code=exc.status_code, detail=exc.detail)
-        return _error_response(
+        return error_response(
             request,
             status_code=exc.status_code,
             code=_code_for_status(exc.status_code),
@@ -140,7 +150,7 @@ def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(Exception)
     async def handle_unhandled_exception(request: Request, exc: Exception) -> JSONResponse:
         logger.exception("unhandled_exception", error=str(exc))
-        return _error_response(
+        return error_response(
             request,
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             code="INTERNAL_SERVER_ERROR",
@@ -155,6 +165,7 @@ def _code_for_status(status_code: int) -> str:
         status.HTTP_403_FORBIDDEN: "FORBIDDEN",
         status.HTTP_404_NOT_FOUND: "NOT_FOUND",
         status.HTTP_409_CONFLICT: "CONFLICT",
+        status.HTTP_413_REQUEST_ENTITY_TOO_LARGE: "REQUEST_ENTITY_TOO_LARGE",
         status.HTTP_422_UNPROCESSABLE_ENTITY: "VALIDATION_ERROR",
         status.HTTP_429_TOO_MANY_REQUESTS: "RATE_LIMITED",
     }.get(status_code, "HTTP_ERROR")

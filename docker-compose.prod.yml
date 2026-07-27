@@ -15,6 +15,15 @@ services:
     build:
       target: production
     volumes: !reset []
+    # 4 workers, each with its own DB connection pool
+    # (DATABASE_POOL_SIZE + DATABASE_MAX_OVERFLOW) — that total x 4 must
+    # stay under Postgres's max_connections (100 by default on
+    # postgres:16-alpine, unmodified by this compose file). The repo's
+    # dev-oriented .env.example defaults (10+20) would allow up to 120,
+    # exceeding that; override them here for a real production deploy.
+    environment:
+      DATABASE_POOL_SIZE: ${DATABASE_POOL_SIZE:-5}
+      DATABASE_MAX_OVERFLOW: ${DATABASE_MAX_OVERFLOW:-5}
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
 
   frontend:

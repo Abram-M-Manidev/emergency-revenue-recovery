@@ -6,7 +6,11 @@ addopts = "-ra"
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+# Matches the Dockerfile's actual runtime (python:3.12-slim) — this used to
+# say py310, which never matched what's actually deployed. Corrected as
+# part of Milestone 10's CI setup, since CI needs one canonical version to
+# check against.
+target-version = "py312"
 extend-exclude = ["alembic/versions"]
 
 [tool.ruff.lint]
@@ -14,11 +18,20 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 ignore = [
     "E501",
     "B008",   # FastAPI's Depends()-as-default is the documented DI pattern, not a bug
-    "UP017",  # datetime.UTC requires 3.11+; targets Python 3.10 (see target-version)
+    "UP017",  # datetime.UTC vs datetime.timezone.utc: kept ignored even at
+              # py312 to avoid an unrelated codebase-wide rename touching
+              # every existing milestone's files; out of scope for this pass.
 ]
 
+[tool.ruff.lint.per-file-ignores]
+# Pre-existing import-order finding (never run through `ruff check` before
+# Milestone 10 added CI). ai_conversations.py is one of the files the
+# Milestone 10 plan explicitly keeps untouched (AI Brain/Voice decoupling),
+# so this is silenced here in config rather than fixed by editing that file.
+"app/api/v1/endpoints/ai_conversations.py" = ["I001"]
+
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.12"
 disallow_untyped_defs = true
 ignore_missing_imports = true
 plugins = []

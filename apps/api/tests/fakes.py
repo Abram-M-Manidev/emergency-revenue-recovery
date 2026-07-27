@@ -18,7 +18,7 @@ from app.domain.entities.appointment import Appointment, AppointmentStatus
 from app.domain.entities.business_hours import HoursException, WeeklyHours
 from app.domain.entities.business_profile import BusinessProfile
 from app.domain.entities.conversation import Conversation, ConversationStatus
-from app.domain.entities.conversation_message import ConversationMessage, MessageRole
+from app.domain.entities.conversation_message import ConversationMessage
 from app.domain.entities.conversation_outcome import (
     CallClassification,
     ConversationOutcome,
@@ -141,7 +141,7 @@ class FakeConversationRepository(ConversationRepository):
 
 
 class FakeConversationOutcomeRepository(ConversationOutcomeRepository):
-    def __init__(self, conversation_repository: "FakeConversationRepository | None" = None) -> None:
+    def __init__(self, conversation_repository: FakeConversationRepository | None = None) -> None:
         self._outcomes: dict[uuid.UUID, ConversationOutcome] = {}
         self._conversations = conversation_repository
 
@@ -742,7 +742,7 @@ class FakeUserRepository(UserRepository):
     `FakeConversationOutcomeRepository` shares state with a conversation
     repository for its analytics methods."""
 
-    def __init__(self, role_repository: "FakeRoleRepository | None" = None) -> None:
+    def __init__(self, role_repository: FakeRoleRepository | None = None) -> None:
         self._users: dict[uuid.UUID, User] = {}
         self._roles = role_repository
 
