@@ -6,6 +6,7 @@ services, not a mocked stand-in for it."""
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -14,17 +15,20 @@ from types import SimpleNamespace
 import pytest
 
 from app.application.services.ai_brain_service import AIBrainService
-from app.application.services.voice_service import VoiceService
+from app.application.services.voice_service import TranscriptSupersession, VoiceService
 from app.domain.entities.conversation import ConversationChannel, ConversationStatus
+from app.domain.entities.conversation_outcome import CallClassification, RecommendedAction
 from app.domain.entities.voice_call import VoiceCall
 from app.domain.entities.voice_line import VoiceLine, VoiceProvider
 from app.domain.exceptions import EntityNotFoundError, VoiceLineNotFoundError
 from app.domain.repositories.voice_call_repository import VoiceCallRepository
 from app.domain.repositories.voice_line_repository import VoiceLineRepository
 from tests.fakes import (
+    BlockingAIProvider,
     FakeAIProvider,
     FakeBusinessHoursRepository,
     FakeBusinessProfileRepository,
+    FakeCallLock,
     FakeConversationOutcomeRepository,
     FakeConversationRepository,
     FakeEmergencyKeywordRepository,
@@ -122,7 +126,11 @@ class FakeVoiceCallRepository(VoiceCallRepository):
 
 
 def _make_voice_service(
-    *, ai_provider: FakeAIProvider | None = None, voice_lines: list[VoiceLine] | None = None
+    *,
+    ai_provider: FakeAIProvider | None = None,
+    voice_lines: list[VoiceLine] | None = None,
+    call_lock: FakeCallLock | None = None,
+    supersession: TranscriptSupersession | None = None,
 ):
     provider = ai_provider or FakeAIProvider()
     conversation_repo = FakeConversationRepository()
@@ -145,6 +153,11 @@ def _make_voice_service(
         voice_call_repository=voice_call_repo,
         conversation_repository=conversation_repo,
         ai_brain_service=ai_brain,
+        # Fresh per test: the production default is a module-level registry,
+        # which would leak sequence state between tests and make them
+        # order-dependent.
+        call_lock=call_lock or FakeCallLock(),
+        supersession=supersession or TranscriptSupersession(),
     )
     return service, provider, conversation_repo, voice_call_repo, voice_line_repo
 
@@ -347,3 +360,334 @@ async def test_get_voice_call_raises_not_found_for_cross_tenant():
 
     with pytest.raises(EntityNotFoundError):
         await service.get_voice_call(uuid.uuid4(), voice_call.conversation_id)
+
+
+# --- concurrent / interim transcript suppression ---------------------------
+#
+# Vapi issues a Custom-LLM request every time its transcription grows. A live
+# call produced eight requests for three spoken sentences, five of them for a
+# single sentence, with three overlapping an in-flight predecessor. Crucially
+# the utterances were strict prefixes of one another and never identical, so
+# equality-based dedupe caught none of them.
+#
+# `BlockingAIProvider` gates inside the provider so the interleaving is
+# forced rather than timing-dependent.
+
+
+async def _start(service, *, call_id: str, utterance: str):
+    """Schedules a webhook turn and yields control so it reaches the lock."""
+    task = asyncio.create_task(
+        service.handle_chat_completion(
+            vapi_call_id=call_id,
+            assistant_id=_ASSISTANT_ID,
+            phone_number_id=None,
+            customer_number=None,
+            customer_utterance=utterance,
+        )
+    )
+    await asyncio.sleep(0)
+    return task
+
+
+@pytest.mark.asyncio
+async def test_two_concurrent_identical_transcripts_make_one_ai_call():
+    """A. The plain retry case, but genuinely concurrent — the sequential
+    dedupe alone could not see the first turn's messages because they were
+    not committed yet."""
+    provider = BlockingAIProvider()
+    service, _, _, _, _ = _make_voice_service(
+        ai_provider=provider, voice_lines=[_voice_line()]
+    )
+
+    first = await _start(service, call_id="call_c", utterance="My furnace died.")
+    second = await _start(service, call_id="call_c", utterance="My furnace died.")
+    await provider.entered.wait()
+    provider.release()
+    results = await asyncio.gather(first, second)
+
+    assert len(provider.requests) == 1
+    assert results[0].reply_text == results[1].reply_text
+
+
+@pytest.mark.asyncio
+async def test_five_concurrent_growing_transcripts_collapse_to_the_latest():
+    """B. The exact shape of the observed failure: five overlapping requests
+    whose transcripts grow.
+
+    The reachable guarantee is "everything overtaken while queued is
+    dropped", not "only one request ever generates". A request that is still
+    the newest when it passes the check has no way to know a longer
+    transcript is coming, so it must be answered — the future is not
+    knowable. What the burst must collapse to is the already-in-flight
+    request plus the final transcript, never the five in between."""
+    provider = BlockingAIProvider()
+    service, _, _, _, _ = _make_voice_service(
+        ai_provider=provider, voice_lines=[_voice_line()]
+    )
+    # Seed one completed turn so a cached reply exists, matching a real call
+    # where the burst follows the greeting and an earlier answer.
+    provider.release()
+    await service.handle_chat_completion(
+        vapi_call_id="call_c",
+        assistant_id=_ASSISTANT_ID,
+        phone_number_id=None,
+        customer_number=None,
+        customer_utterance="Hello?",
+    )
+    calls_after_seed = len(provider.requests)
+    provider.gate.clear()
+    provider.entered.clear()
+
+    growing = [
+        "My name is Lucky.",
+        "My name is Lucky. My number is one,",
+        "My name is Lucky. My number is one, two, three.",
+        "My name is Lucky. My number is one, two, three. My address",
+        "My name is Lucky. My number is one, two, three. My address is 16 Street.",
+    ]
+    tasks = [await _start(service, call_id="call_c", utterance=u) for u in growing]
+    await provider.entered.wait()
+    provider.release()
+    await asyncio.gather(*tasks)
+
+    new_requests = provider.requests[calls_after_seed:]
+    # Five overlapping requests collapse to two: the one already generating
+    # when the burst began, and the winner carrying the complete transcript.
+    # The three in between never reach the model.
+    assert len(new_requests) == 2, f"expected 2 AI calls for the burst, got {len(new_requests)}"
+    assert new_requests[0].latest_customer_message == growing[0]
+    assert new_requests[-1].latest_customer_message == growing[-1], (
+        "the final answer must come from the complete transcript"
+    )
+
+
+@pytest.mark.asyncio
+async def test_legitimate_second_turn_is_not_suppressed():
+    """C. Supersession must never outlive the burst that caused it."""
+    provider = FakeAIProvider()
+    service, _, _, _, _ = _make_voice_service(
+        ai_provider=provider, voice_lines=[_voice_line()]
+    )
+
+    for utterance in ("My furnace died.", "It is making a loud noise.", "Please hurry."):
+        await service.handle_chat_completion(
+            vapi_call_id="call_c",
+            assistant_id=_ASSISTANT_ID,
+            phone_number_id=None,
+            customer_number=None,
+            customer_utterance=utterance,
+        )
+
+    assert len(provider.requests) == 3
+    assert [r.latest_customer_message for r in provider.requests] == [
+        "My furnace died.",
+        "It is making a loud noise.",
+        "Please hurry.",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_failed_turn_releases_the_lock_for_the_next_request():
+    """D. A provider failure must not wedge the rest of a live call."""
+    provider = BlockingAIProvider()
+    provider.fail_with = RuntimeError("provider exploded")
+    service, _, _, _, _ = _make_voice_service(
+        ai_provider=provider, voice_lines=[_voice_line()]
+    )
+
+    provider.release()
+    with pytest.raises(RuntimeError):
+        await service.handle_chat_completion(
+            vapi_call_id="call_c",
+            assistant_id=_ASSISTANT_ID,
+            phone_number_id=None,
+            customer_number=None,
+            customer_utterance="My furnace died.",
+        )
+
+    provider.fail_with = None
+    result = await service.handle_chat_completion(
+        vapi_call_id="call_c",
+        assistant_id=_ASSISTANT_ID,
+        phone_number_id=None,
+        customer_number=None,
+        customer_utterance="Are you there?",
+    )
+    assert result.reply_text
+
+
+@pytest.mark.asyncio
+async def test_cancellation_releases_the_lock():
+    """E. Vapi hanging up mid-turn cancels the request task."""
+    provider = BlockingAIProvider()
+    lock = FakeCallLock()
+    service, _, _, _, _ = _make_voice_service(
+        ai_provider=provider, voice_lines=[_voice_line()], call_lock=lock
+    )
+
+    doomed = await _start(service, call_id="call_c", utterance="My furnace died.")
+    await provider.entered.wait()
+    doomed.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await doomed
+
+    provider.gate.set()
+    result = await asyncio.wait_for(
+        service.handle_chat_completion(
+            vapi_call_id="call_c",
+            assistant_id=_ASSISTANT_ID,
+            phone_number_id=None,
+            customer_number=None,
+            customer_utterance="Hello?",
+        ),
+        timeout=5,
+    )
+    assert result.reply_text
+
+
+@pytest.mark.asyncio
+async def test_concurrent_requests_never_overlap_and_never_deadlock():
+    """F. The property the production advisory lock exists to guarantee."""
+    provider = FakeAIProvider()
+    lock = FakeCallLock()
+    service, _, _, _, _ = _make_voice_service(
+        ai_provider=provider, voice_lines=[_voice_line()], call_lock=lock
+    )
+
+    tasks = [
+        await _start(service, call_id="call_c", utterance=f"utterance {i}") for i in range(6)
+    ]
+    await asyncio.wait_for(asyncio.gather(*tasks), timeout=10)
+
+    assert lock.max_concurrent == 1
+    assert lock.acquisitions == 6
+
+
+@pytest.mark.asyncio
+async def test_different_calls_are_not_serialised_against_each_other():
+    """G. One caller must never be blocked behind another caller's turn."""
+    provider = BlockingAIProvider()
+    lock = FakeCallLock()
+    service, _, _, _, _ = _make_voice_service(
+        ai_provider=provider, voice_lines=[_voice_line()], call_lock=lock
+    )
+
+    a = await _start(service, call_id="call_a", utterance="Caller A emergency.")
+    b = await _start(service, call_id="call_b", utterance="Caller B emergency.")
+    await provider.entered.wait()
+    provider.release()
+    await asyncio.wait_for(asyncio.gather(a, b), timeout=5)
+
+    # Both reached the model: neither was treated as the other's duplicate.
+    assert len(provider.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_supersession_does_not_leak_across_tenants():
+    """H. Two organisations, two calls — resolution stays per voice line."""
+    other_org = uuid.uuid4()
+    lines = [
+        _voice_line(vapi_assistant_id="asst_org_a"),
+        _voice_line(
+            id=uuid.uuid4(),
+            organization_id=other_org,
+            vapi_assistant_id="asst_org_b",
+            vapi_phone_number_id="pn_org_b",
+        ),
+    ]
+    provider = FakeAIProvider()
+    service, _, _, voice_call_repo, _ = _make_voice_service(
+        ai_provider=provider, voice_lines=lines
+    )
+
+    a = await service.handle_chat_completion(
+        vapi_call_id="call_org_a",
+        assistant_id="asst_org_a",
+        phone_number_id=None,
+        customer_number=None,
+        customer_utterance="Org A emergency.",
+    )
+    b = await service.handle_chat_completion(
+        vapi_call_id="call_org_b",
+        assistant_id="asst_org_b",
+        phone_number_id=None,
+        customer_number=None,
+        customer_utterance="Org B emergency.",
+    )
+
+    assert a.organization_id == _ORG_ID
+    assert b.organization_id == other_org
+    assert a.conversation_id != b.conversation_id
+    assert len(provider.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_sequential_exact_repeat_still_returns_cached_reply():
+    """I. The pre-existing retry protection must survive unchanged."""
+    provider = FakeAIProvider()
+    service, _, _, _, _ = _make_voice_service(
+        ai_provider=provider, voice_lines=[_voice_line()]
+    )
+
+    first = await service.handle_chat_completion(
+        vapi_call_id="call_c",
+        assistant_id=_ASSISTANT_ID,
+        phone_number_id=None,
+        customer_number=None,
+        customer_utterance="My furnace died.",
+    )
+    second = await service.handle_chat_completion(
+        vapi_call_id="call_c",
+        assistant_id=_ASSISTANT_ID,
+        phone_number_id=None,
+        customer_number=None,
+        customer_utterance="My furnace died.",
+    )
+
+    assert len(provider.requests) == 1
+    assert second.reply_text == first.reply_text
+
+
+@pytest.mark.asyncio
+async def test_superseded_burst_preserves_emergency_outcome():
+    """J. Suppression must not cost the emergency classification that the
+    winning transcript produced."""
+    provider = BlockingAIProvider()
+    service, _, conversation_repo, _, _ = _make_voice_service(
+        ai_provider=provider, voice_lines=[_voice_line()]
+    )
+    provider.release()
+    await service.handle_chat_completion(
+        vapi_call_id="call_c",
+        assistant_id=_ASSISTANT_ID,
+        phone_number_id=None,
+        customer_number=None,
+        customer_utterance="Hello?",
+    )
+    provider.gate.clear()
+    provider.entered.clear()
+    # Both the in-flight request and the winner reach the model (see test B),
+    # so script an emergency verdict for each — the winner's is the one that
+    # must survive as the persisted outcome.
+    for _ in range(2):
+        provider.queue_reply(
+            default_reply(
+                message_to_customer="Help is on the way.",
+                classification=CallClassification.EMERGENCY,
+                recommended_action=RecommendedAction.CREATE_EMERGENCY_TICKET,
+            )
+        )
+
+    tasks = [
+        await _start(service, call_id="call_c", utterance=u)
+        for u in ("My basement", "My basement is flooding!")
+    ]
+    await provider.entered.wait()
+    provider.release()
+    results = await asyncio.gather(*tasks)
+
+    winner = results[-1]
+    outcome = await service._ai_brain.get_outcome(_ORG_ID, winner.conversation_id)
+    assert outcome is not None
+    assert outcome.classification is CallClassification.EMERGENCY
+    assert outcome.recommended_action is RecommendedAction.CREATE_EMERGENCY_TICKET

@@ -6,8 +6,11 @@ own unit tests and `VoiceService`'s, which wraps it) without a database."""
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from collections import defaultdict
+from collections.abc import AsyncIterator
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -35,6 +38,7 @@ from app.domain.entities.service_area import ServiceArea
 from app.domain.entities.technician_profile import TechnicianProfile
 from app.domain.entities.user import User
 from app.domain.exceptions import EntityAlreadyExistsError, EntityNotFoundError
+from app.domain.locks import CallLock
 from app.domain.repositories.appointment_repository import AppointmentRepository
 from app.domain.repositories.business_hours_repository import BusinessHoursRepository
 from app.domain.repositories.business_profile_repository import BusinessProfileRepository
@@ -922,3 +926,62 @@ class FakeAIProvider(AIProvider):
         if self._queue:
             return self._queue.pop(0)
         return default_reply()
+
+
+class BlockingAIProvider(FakeAIProvider):
+    """`generate_reply` parks on an `asyncio.Event` until `release()` is
+    called.
+
+    This is what makes the concurrency tests deterministic: a race can be
+    set up by starting several requests, waiting for `entered` to confirm
+    one is genuinely inside the provider, then releasing — rather than
+    sleeping and hoping the interleaving happens."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.gate = asyncio.Event()
+        self.entered = asyncio.Event()
+        self.fail_with: Exception | None = None
+
+    def release(self) -> None:
+        self.gate.set()
+
+    async def generate_reply(self, request: AIRequest) -> AIReply:
+        self.requests.append(request)
+        self.entered.set()
+        await self.gate.wait()
+        if self.fail_with is not None:
+            raise self.fail_with
+        if self._queue:
+            return self._queue.pop(0)
+        return default_reply()
+
+
+class FakeCallLock(CallLock):
+    """Per-key `asyncio.Lock`, mirroring the mutual exclusion
+    `PostgresAdvisoryCallLock` provides.
+
+    A single-process test cannot exercise cross-worker behaviour, but it can
+    verify the property the production lock exists to guarantee — that two
+    requests for one call never overlap — which `max_concurrent` records."""
+
+    def __init__(self) -> None:
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._active = 0
+        self.max_concurrent = 0
+        self.acquisitions = 0
+
+    def hold(self, key: str) -> AbstractAsyncContextManager[None]:
+        return self._hold(key)
+
+    @asynccontextmanager
+    async def _hold(self, key: str) -> AsyncIterator[None]:
+        lock = self._locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            self.acquisitions += 1
+            self._active += 1
+            self.max_concurrent = max(self.max_concurrent, self._active)
+            try:
+                yield
+            finally:
+                self._active -= 1

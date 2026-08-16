@@ -10,6 +10,7 @@ happen as early as another test module's import — same reasoning as why
 `FakeAIProvider` for the same reason `test_ai_conversation_flow.py` does:
 never make a real, paid, non-deterministic OpenAI call in CI."""
 
+import json
 import uuid
 
 import pytest
@@ -302,3 +303,353 @@ async def test_unmapped_assistant_gets_speakable_fallback_not_a_5xx(
 
     assert response.status_code == 200
     assert response.json()["choices"][0]["message"]["content"]
+
+
+# --- Streaming transport (Vapi live calls) ---------------------------------
+#
+# Vapi sets `stream: true` and reads the reply as SSE. Before that was
+# handled, the endpoint answered every request with a single JSON body:
+# Vapi returned HTTP 200, parsed zero completion tokens out of it, sent
+# nothing to TTS, and hung up on `silence-timed-out`. These cover both
+# transports so the non-streaming path cannot silently regress either.
+
+
+def _parse_sse(raw: str) -> tuple[list[dict], bool]:
+    """Splits an SSE body into decoded `data:` payloads plus whether the
+    stream was properly terminated by `[DONE]`."""
+    frames: list[dict] = []
+    done = False
+    for block in raw.strip().split("\n\n"):
+        line = block.strip()
+        if not line.startswith("data: "):
+            continue
+        body = line[len("data: ") :].strip()
+        if body == "[DONE]":
+            done = True
+            continue
+        frames.append(json.loads(body))
+    return frames, done
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_stream_false_still_returns_the_original_json_body(
+    client: AsyncClient, fake_ai_provider: FakeAIProvider
+):
+    """The text/simulation path and every pre-existing caller must keep the
+    single non-streamed `chat.completion` body, shape unchanged."""
+    _, org_id = await _register(client, "Voice Stream Org A", "owner-stream-a@example.com")
+    await _seed_voice_line(org_id, assistant_id=_ASSISTANT_ID + "-s1")
+
+    response = await client.post(
+        "/api/v1/voice/vapi/chat/completions",
+        json={
+            "call": {"id": "call_s1", "assistantId": _ASSISTANT_ID + "-s1"},
+            "messages": [{"role": "user", "content": "What are your hours?"}],
+            "stream": False,
+        },
+        headers=_vapi_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
+    body = response.json()
+    assert body["object"] == "chat.completion"
+    assert body["model"] == "errs-ai-brain"
+    assert body["choices"][0]["message"]["role"] == "assistant"
+    assert body["choices"][0]["message"]["content"]
+    assert body["choices"][0]["finish_reason"] == "stop"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_omitting_stream_defaults_to_the_json_body(
+    client: AsyncClient, fake_ai_provider: FakeAIProvider
+):
+    """Absence of the field must behave exactly as it did before it existed."""
+    _, org_id = await _register(client, "Voice Stream Org B", "owner-stream-b@example.com")
+    await _seed_voice_line(org_id, assistant_id=_ASSISTANT_ID + "-s2")
+
+    response = await client.post(
+        "/api/v1/voice/vapi/chat/completions",
+        json={
+            "call": {"id": "call_s2", "assistantId": _ASSISTANT_ID + "-s2"},
+            "messages": [{"role": "user", "content": "Hello?"}],
+        },
+        headers=_vapi_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("application/json")
+    assert response.json()["object"] == "chat.completion"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_stream_true_returns_sse_with_content_and_done(
+    client: AsyncClient, fake_ai_provider: FakeAIProvider
+):
+    """The live-call transport: Vapi sets `stream: true` and reads SSE."""
+    _, org_id = await _register(client, "Voice Stream Org C", "owner-stream-c@example.com")
+    await _seed_voice_line(org_id, assistant_id=_ASSISTANT_ID + "-s3")
+    fake_ai_provider.queue_reply(default_reply(message_to_customer="Help is on the way."))
+
+    response = await client.post(
+        "/api/v1/voice/vapi/chat/completions",
+        json={
+            "call": {"id": "call_s3", "assistantId": _ASSISTANT_ID + "-s3"},
+            "messages": [{"role": "user", "content": "My furnace died."}],
+            "stream": True,
+        },
+        headers=_vapi_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+
+    frames, done = _parse_sse(response.text)
+    assert done, "stream must terminate with data: [DONE]"
+    assert frames, "expected at least one chunk frame"
+    assert all(f["object"] == "chat.completion.chunk" for f in frames)
+    # id/created stay constant across frames, as a real OpenAI stream does.
+    assert len({f["id"] for f in frames}) == 1
+    assert len({f["created"] for f in frames}) == 1
+
+    assert frames[0]["choices"][0]["delta"] == {"role": "assistant"}
+    streamed = "".join(f["choices"][0]["delta"].get("content", "") for f in frames)
+    assert streamed == "Help is on the way."
+    assert frames[-1]["choices"][0]["finish_reason"] == "stop"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_stream_true_emits_end_call_tool_call_and_finish_reason(
+    client: AsyncClient, fake_ai_provider: FakeAIProvider
+):
+    """A completed conversation must still hang the call up over SSE."""
+    _, org_id = await _register(client, "Voice Stream Org D", "owner-stream-d@example.com")
+    await _seed_voice_line(org_id, assistant_id=_ASSISTANT_ID + "-s4")
+    fake_ai_provider.queue_reply(
+        default_reply(
+            message_to_customer="A technician is on the way. Goodbye!",
+            classification=CallClassification.EMERGENCY,
+            recommended_action=RecommendedAction.CREATE_EMERGENCY_TICKET,
+            is_conversation_complete=True,
+        )
+    )
+
+    response = await client.post(
+        "/api/v1/voice/vapi/chat/completions",
+        json={
+            "call": {"id": "call_s4", "assistantId": _ASSISTANT_ID + "-s4"},
+            "messages": [{"role": "user", "content": "My basement is flooding!"}],
+            "stream": True,
+        },
+        headers=_vapi_headers(),
+    )
+
+    assert response.status_code == 200
+    frames, done = _parse_sse(response.text)
+    assert done
+
+    tool_frames = [f for f in frames if "tool_calls" in f["choices"][0]["delta"]]
+    assert len(tool_frames) == 1
+    tool_call = tool_frames[0]["choices"][0]["delta"]["tool_calls"][0]
+    assert tool_call["index"] == 0
+    assert tool_call["type"] == "function"
+    assert tool_call["function"]["name"] == "endCall"
+    assert frames[-1]["choices"][0]["finish_reason"] == "tool_calls"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_stream_true_unmapped_assistant_still_streams_speakable_fallback(
+    client: AsyncClient, fake_ai_provider: FakeAIProvider
+):
+    """The error path must honour the requested transport too — answering a
+    streaming caller with JSON is exactly what produced dead air before."""
+    response = await client.post(
+        "/api/v1/voice/vapi/chat/completions",
+        json={
+            "call": {"id": "call_s5", "assistantId": "totally-unknown-assistant"},
+            "messages": [{"role": "user", "content": "Hello?"}],
+            "stream": True,
+        },
+        headers=_vapi_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    frames, done = _parse_sse(response.text)
+    assert done
+    streamed = "".join(f["choices"][0]["delta"].get("content", "") for f in frames)
+    assert streamed, "caller must hear something rather than silence"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_streaming_request_still_requires_the_vapi_secret(
+    client: AsyncClient, fake_ai_provider: FakeAIProvider
+):
+    """Authentication is unaffected by the transport."""
+    payload = {
+        "call": {"id": "call_s6", "assistantId": _ASSISTANT_ID},
+        "messages": [{"role": "user", "content": "Hello?"}],
+        "stream": True,
+    }
+
+    no_header = await client.post("/api/v1/voice/vapi/chat/completions", json=payload)
+    assert no_header.status_code == 401
+
+    wrong = await client.post(
+        "/api/v1/voice/vapi/chat/completions",
+        json=payload,
+        headers={"x-vapi-secret": "not-the-right-secret"},
+    )
+    assert wrong.status_code == 401
+
+
+# --- P2: genuine end-to-end streaming --------------------------------------
+#
+# The SSE transport already existed; what is new is that content frames are
+# produced while the model is still generating rather than after it has
+# finished. `FakeAIProvider` inherits the non-streaming default
+# implementation of `stream_reply`, so these prove the *pipeline* carries
+# deltas end to end and that persistence, endCall, and the syncs still
+# happen — the token-level behaviour is covered offline in
+# `tests/unit/test_openai_provider.py`.
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_streaming_turn_persists_and_emits_done(
+    client: AsyncClient, fake_ai_provider: FakeAIProvider
+):
+    """Q. Persistence must still happen — this is the test that would have
+    caught the FastAPI dependency-lifecycle trap, because the DB session is
+    used from inside the streaming generator."""
+    token, org_id = await _register(client, "Voice P2 Org A", "owner-p2-a@example.com")
+    await _seed_voice_line(org_id, assistant_id=_ASSISTANT_ID + "-p2a")
+    fake_ai_provider.queue_reply(default_reply(message_to_customer="Stay on the line."))
+
+    response = await client.post(
+        "/api/v1/voice/vapi/chat/completions",
+        json={
+            "call": {"id": "call_p2a", "assistantId": _ASSISTANT_ID + "-p2a"},
+            "messages": [{"role": "user", "content": "My furnace died."}],
+            "stream": True,
+        },
+        headers=_vapi_headers(),
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    frames, done = _parse_sse(response.text)
+    assert done, "stream must terminate with [DONE]"
+    assert response.text.count("data: [DONE]") == 1, "L. exactly one terminator"
+
+    spoken = "".join(f["choices"][0]["delta"].get("content", "") for f in frames)
+    assert spoken == "Stay on the line."
+
+    # The turn reached the database from inside the streaming generator.
+    detail = await client.get("/api/v1/ai/conversations", headers=_auth_headers(token))
+    conversation_id = detail.json()[0]["id"]
+    messages = await client.get(
+        f"/api/v1/ai/conversations/{conversation_id}", headers=_auth_headers(token)
+    )
+    body = messages.json()
+    assert [m["role"] for m in body["messages"]] == ["customer", "assistant"]
+    assert body["messages"][1]["content"] == "Stay on the line."
+    assert body["outcome"] is not None
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_streaming_emergency_creates_ticket_before_done(
+    client: AsyncClient, fake_ai_provider: FakeAIProvider
+):
+    """J. endCall only after the validated result, and the downstream syncs
+    still run inside the request — NOT detached (that would be P3)."""
+    token, org_id = await _register(client, "Voice P2 Org B", "owner-p2-b@example.com")
+    await _seed_voice_line(org_id, assistant_id=_ASSISTANT_ID + "-p2b")
+    fake_ai_provider.queue_reply(
+        default_reply(
+            message_to_customer="A technician is on the way. Goodbye!",
+            classification=CallClassification.EMERGENCY,
+            recommended_action=RecommendedAction.CREATE_EMERGENCY_TICKET,
+            is_conversation_complete=True,
+        )
+    )
+
+    response = await client.post(
+        "/api/v1/voice/vapi/chat/completions",
+        json={
+            "call": {"id": "call_p2b", "assistantId": _ASSISTANT_ID + "-p2b"},
+            "messages": [{"role": "user", "content": "My basement is flooding!"}],
+            "stream": True,
+        },
+        headers=_vapi_headers(),
+    )
+
+    assert response.status_code == 200
+    frames, done = _parse_sse(response.text)
+    assert done
+
+    tool_frames = [f for f in frames if "tool_calls" in f["choices"][0]["delta"]]
+    assert len(tool_frames) == 1
+    assert tool_frames[0]["choices"][0]["delta"]["tool_calls"][0]["function"]["name"] == "endCall"
+    assert frames[-1]["choices"][0]["finish_reason"] == "tool_calls"
+
+    # The ticket exists by the time the stream finished — the syncs ran
+    # before [DONE], not as a detached task.
+    tickets = await client.get("/api/v1/dispatch/tickets", headers=_auth_headers(token))
+    assert tickets.status_code == 200
+    assert len(tickets.json()) == 1
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_streaming_unmapped_assistant_streams_fallback_without_endcall(
+    client: AsyncClient, fake_ai_provider: FakeAIProvider
+):
+    """M. A domain failure mid-stream must still be speakable, must not
+    expose JSON, and must not guess at hanging up."""
+    response = await client.post(
+        "/api/v1/voice/vapi/chat/completions",
+        json={
+            "call": {"id": "call_p2c", "assistantId": "totally-unknown-assistant"},
+            "messages": [{"role": "user", "content": "Hello?"}],
+            "stream": True,
+        },
+        headers=_vapi_headers(),
+    )
+
+    assert response.status_code == 200
+    frames, done = _parse_sse(response.text)
+    assert done
+    spoken = "".join(f["choices"][0]["delta"].get("content", "") for f in frames)
+    assert spoken, "caller must hear something rather than silence"
+    assert "{" not in spoken and "classification" not in spoken
+    assert not any("tool_calls" in f["choices"][0]["delta"] for f in frames)
+    assert frames[-1]["choices"][0]["finish_reason"] == "stop"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_streaming_second_turn_continues_the_same_conversation(
+    client: AsyncClient, fake_ai_provider: FakeAIProvider
+):
+    """P./S. Supersession and tenant scoping still behave across turns of a
+    streamed call."""
+    token, org_id = await _register(client, "Voice P2 Org D", "owner-p2-d@example.com")
+    await _seed_voice_line(org_id, assistant_id=_ASSISTANT_ID + "-p2d")
+
+    for utterance in ("What are your hours?", "Thanks, goodbye."):
+        response = await client.post(
+            "/api/v1/voice/vapi/chat/completions",
+            json={
+                "call": {"id": "call_p2d", "assistantId": _ASSISTANT_ID + "-p2d"},
+                "messages": [{"role": "user", "content": utterance}],
+                "stream": True,
+            },
+            headers=_vapi_headers(),
+        )
+        assert response.status_code == 200
+
+    listing = await client.get("/api/v1/ai/conversations", headers=_auth_headers(token))
+    assert len(listing.json()) == 1, "both turns belong to one conversation"
+    conversation_id = listing.json()[0]["id"]
+    detail = await client.get(
+        f"/api/v1/ai/conversations/{conversation_id}", headers=_auth_headers(token)
+    )
+    assert len(detail.json()["messages"]) == 4

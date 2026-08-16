@@ -11,11 +11,19 @@ in-memory fakes, same intent as `AuthService`."""
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import date
 
 from app.core.config import Settings
-from app.domain.ai.provider import AIProvider, AIRequest, ConversationTurn
+from app.domain.ai.provider import (
+    AIModelProfile,
+    AIProvider,
+    AIReply,
+    AIRequest,
+    AITextDelta,
+    ConversationTurn,
+)
 from app.domain.entities.business_hours import HoursException, WeeklyHours
 from app.domain.entities.business_profile import BusinessProfile
 from app.domain.entities.conversation import Conversation, ConversationChannel, ConversationStatus
@@ -26,6 +34,7 @@ from app.domain.entities.faq_entry import FAQEntry
 from app.domain.entities.service import Service
 from app.domain.entities.service_area import ServiceArea
 from app.domain.exceptions import (
+    AIProviderUnavailableError,
     ConversationCompletedError,
     ConversationLimitExceededError,
     EntityNotFoundError,
@@ -47,6 +56,37 @@ class ConversationTurnResult:
     conversation: Conversation
     reply_message: ConversationMessage
     outcome: ConversationOutcome
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationTextDelta:
+    """A fragment of the caller-facing reply, forwarded as the model
+    produces it."""
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class ConversationTurnComplete:
+    """Terminal event: everything is persisted and the outcome is
+    authoritative."""
+
+    result: ConversationTurnResult
+
+
+ConversationStreamEvent = ConversationTextDelta | ConversationTurnComplete
+
+
+# A VOICE conversation is a live phone call: every second spent reasoning is
+# silence the caller hears, so it gets the latency-optimised profile. TEXT is
+# the dashboard simulation, where depth is worth the wait. Derived from the
+# `Conversation` the service already loads — no caller has to pass anything,
+# and `VoiceService` already creates its conversations with
+# `channel=ConversationChannel.VOICE`, so the routing is automatic.
+_CHANNEL_PROFILES: dict[ConversationChannel, AIModelProfile] = {
+    ConversationChannel.TEXT: AIModelProfile.QUALITY,
+    ConversationChannel.VOICE: AIModelProfile.REALTIME,
+}
 
 
 class AIBrainService:
@@ -118,6 +158,48 @@ class AIBrainService:
     async def send_message(
         self, organization_id: uuid.UUID, conversation_id: uuid.UUID, customer_message: str
     ) -> ConversationTurnResult:
+        conversation, request, services = await self._prepare_turn(
+            organization_id, conversation_id, customer_message
+        )
+        reply = await self._ai.generate_reply(request)
+        return await self._persist_turn(conversation, conversation_id, services, reply)
+
+    async def send_message_stream(
+        self, organization_id: uuid.UUID, conversation_id: uuid.UUID, customer_message: str
+    ) -> AsyncIterator[ConversationStreamEvent]:
+        """Streaming twin of `send_message`.
+
+        Yields the caller-facing sentence in fragments as the model writes
+        it, then performs the *identical* persistence once the complete,
+        validated reply arrives — same messages, same outcome upsert, same
+        completion rule. Nothing is written from a partial response, so a
+        stream that dies halfway leaves no half-formed outcome behind."""
+        conversation, request, services = await self._prepare_turn(
+            organization_id, conversation_id, customer_message
+        )
+
+        reply: AIReply | None = None
+        async for event in self._ai.stream_reply(request):
+            if isinstance(event, AITextDelta):
+                yield ConversationTextDelta(event.text)
+            else:
+                reply = event.reply
+
+        if reply is None:
+            # A provider that ended its stream without the terminal event
+            # produced no authoritative result; treating that as success
+            # would persist nothing and silently end the caller's turn.
+            raise AIProviderUnavailableError("The AI Brain returned an incomplete response.")
+
+        yield ConversationTurnComplete(
+            await self._persist_turn(conversation, conversation_id, services, reply)
+        )
+
+    # --- shared turn lifecycle (identical for streaming and non-streaming) ---
+
+    async def _prepare_turn(
+        self, organization_id: uuid.UUID, conversation_id: uuid.UUID, customer_message: str
+    ) -> tuple[Conversation, AIRequest, list[Service]]:
         conversation = await self.get_conversation(organization_id, conversation_id)
         if conversation.status is ConversationStatus.COMPLETED:
             raise ConversationCompletedError()
@@ -162,14 +244,21 @@ class AIBrainService:
             )
             for m in history
         )
-        reply = await self._ai.generate_reply(
-            AIRequest(
-                system_prompt=system_prompt,
-                history=provider_history,
-                latest_customer_message=customer_message,
-            )
+        request = AIRequest(
+            system_prompt=system_prompt,
+            history=provider_history,
+            latest_customer_message=customer_message,
+            profile=_CHANNEL_PROFILES.get(conversation.channel, AIModelProfile.QUALITY),
         )
+        return conversation, request, services
 
+    async def _persist_turn(
+        self,
+        conversation: Conversation,
+        conversation_id: uuid.UUID,
+        services: list[Service],
+        reply: AIReply,
+    ) -> ConversationTurnResult:
         reply_message = await self._conversations.add_message(
             conversation_id, role=MessageRole.ASSISTANT, content=reply.message_to_customer
         )

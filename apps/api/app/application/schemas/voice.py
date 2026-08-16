@@ -85,3 +85,11 @@ class VapiChatCompletionRequest(BaseModel):
     # minor payload-shape difference doesn't hard-fail the webhook.
     assistantId: str | None = None
     phoneNumberId: str | None = None
+    # Vapi sends `stream: true` on live calls and then reads the response as
+    # an SSE token stream. Until this field existed it was silently dropped
+    # by `extra="ignore"`, so the endpoint always answered with a single
+    # non-streamed JSON body — which Vapi accepted with HTTP 200 but parsed
+    # zero tokens from, sending nothing to TTS and hanging up on
+    # `silence-timed-out`. Defaults to False so the text/simulation path and
+    # every existing caller keep the plain-JSON behaviour.
+    stream: bool = False

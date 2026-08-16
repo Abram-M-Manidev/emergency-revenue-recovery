@@ -26,6 +26,7 @@ from app.domain.ai.provider import AIProvider
 from app.domain.entities.user import User
 from app.domain.exceptions import AuthorizationError, InvalidTokenError
 from app.infrastructure.ai.openai_provider import OpenAIProvider
+from app.infrastructure.database.locks import PostgresAdvisoryCallLock
 from app.infrastructure.database.repositories import (
     SqlAlchemyAppointmentRepository,
     SqlAlchemyBusinessHoursRepository,
@@ -110,6 +111,10 @@ def get_voice_service(
         voice_call_repository=SqlAlchemyVoiceCallRepository(db),
         conversation_repository=SqlAlchemyConversationRepository(db),
         ai_brain_service=ai_brain_service,
+        # Bound to this request's session so the advisory lock lives and dies
+        # with the same transaction — and works across the four uvicorn
+        # workers production runs, which an in-process lock would not.
+        call_lock=PostgresAdvisoryCallLock(db),
     )
 
 

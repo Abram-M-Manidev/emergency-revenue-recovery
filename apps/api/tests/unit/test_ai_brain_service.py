@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from app.application.services.ai_brain_service import AIBrainService
+from app.domain.ai.provider import AIModelProfile
 from app.domain.entities.conversation import ConversationChannel, ConversationStatus
 from app.domain.entities.conversation_message import MessageRole
 from app.domain.entities.conversation_outcome import CallClassification, RecommendedAction
@@ -175,3 +176,60 @@ async def test_start_conversation_accepts_voice_channel():
 
     assert conversation.channel is ConversationChannel.VOICE
     assert conversation.caller_phone_number == "+15551234567"
+
+
+@pytest.mark.asyncio
+async def test_text_conversation_requests_the_quality_profile():
+    service, provider = _make_service()
+    conversation = await service.start_conversation(_ORG_ID)
+
+    await service.send_message(_ORG_ID, conversation.id, "What are your hours?")
+
+    assert provider.requests[-1].profile is AIModelProfile.QUALITY
+
+
+@pytest.mark.asyncio
+async def test_voice_conversation_requests_the_realtime_profile():
+    """A live phone call must not pay the text path's reasoning latency —
+    every second is silence the caller hears. The profile is derived from
+    the conversation's own channel, so `VoiceService` gets this for free."""
+    service, provider = _make_service()
+    conversation = await service.start_conversation(
+        _ORG_ID, caller_phone_number="+15551234567", channel=ConversationChannel.VOICE
+    )
+
+    await service.send_message(_ORG_ID, conversation.id, "My basement is flooding!")
+
+    assert provider.requests[-1].profile is AIModelProfile.REALTIME
+
+
+@pytest.mark.asyncio
+async def test_profile_choice_does_not_weaken_the_ai_brain_contract():
+    """Switching a voice call to the faster model must not change what the
+    AI Brain is asked for or what it persists — same grounded prompt, same
+    emergency classification, same recommended_action."""
+    service, provider = _make_service(
+        emergency_keywords=[
+            EmergencyKeyword(
+                id=uuid.uuid4(), organization_id=_ORG_ID, phrase="flooding", notes=None
+            )
+        ]
+    )
+    provider.queue_reply(
+        default_reply(
+            classification=CallClassification.EMERGENCY,
+            recommended_action=RecommendedAction.CREATE_EMERGENCY_TICKET,
+        )
+    )
+    conversation = await service.start_conversation(
+        _ORG_ID, channel=ConversationChannel.VOICE
+    )
+
+    result = await service.send_message(_ORG_ID, conversation.id, "There is flooding!")
+
+    request = provider.requests[-1]
+    assert request.profile is AIModelProfile.REALTIME
+    # Grounding and the emergency-keyword hint still reach the model.
+    assert "flooding" in request.system_prompt
+    assert result.outcome.classification is CallClassification.EMERGENCY
+    assert result.outcome.recommended_action is RecommendedAction.CREATE_EMERGENCY_TICKET
