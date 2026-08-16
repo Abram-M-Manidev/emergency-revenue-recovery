@@ -69,6 +69,35 @@ class CustomerRepository(ABC):
         caller having already verified ownership."""
         ...
 
+    @abstractmethod
+    async def backfill_contact_details(
+        self,
+        organization_id: uuid.UUID,
+        customer_id: uuid.UUID,
+        *,
+        full_name: str | None = None,
+        address: str | None = None,
+    ) -> Customer:
+        """Fills in caller details learned *after* the customer row was
+        created. A customer is created on the first turn an outcome carries
+        a phone number, which is routinely before the caller has given
+        their name or address — leaving the durable record permanently
+        blank even though later turns captured the value and put it on the
+        emergency ticket.
+
+        Deliberately narrower than `EmergencyTicketRepository`'s
+        equivalent: only `full_name` and `address` are writable here.
+        `phone_number` is the dedupe key `get_by_phone_number` matches on
+        and must never move; `email`/`notes` are staff-owned and have no
+        counterpart on a `ConversationOutcome`, so neither is reachable
+        from this method at all. Each argument is applied only when not
+        `None`; deciding *which* fields are safe to fill is
+        `CustomerService`'s job, not this layer's.
+
+        `organization_id` scopes the lookup, so a mismatched tenant finds
+        nothing and raises `EntityNotFoundError` rather than writing."""
+        ...
+
     # --- Analytics (Milestone 8) aggregate queries ---
 
     @abstractmethod

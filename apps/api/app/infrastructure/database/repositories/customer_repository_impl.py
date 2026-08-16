@@ -8,7 +8,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.entities.customer import Customer
-from app.domain.exceptions import EntityAlreadyExistsError
+from app.domain.exceptions import EntityAlreadyExistsError, EntityNotFoundError
 from app.domain.repositories.customer_repository import CustomerRepository
 from app.infrastructure.database.models.customer import CustomerModel
 
@@ -62,6 +62,41 @@ class SqlAlchemyCustomerRepository(CustomerRepository):
                 await self._session.flush()
         except IntegrityError as exc:
             raise EntityAlreadyExistsError("Customer", "phone_number", phone_number) from exc
+        await self._session.refresh(model)
+        return _to_entity(model)
+
+    async def backfill_contact_details(
+        self,
+        organization_id: uuid.UUID,
+        customer_id: uuid.UUID,
+        *,
+        full_name: str | None = None,
+        address: str | None = None,
+    ) -> Customer:
+        result = await self._session.execute(
+            select(CustomerModel).where(
+                CustomerModel.id == customer_id,
+                CustomerModel.organization_id == organization_id,
+            )
+        )
+        model = result.scalar_one_or_none()
+        if model is None:
+            # Cross-tenant id (or a deleted customer): surfaced as a domain
+            # error rather than a raw NoResultFound, so the API layer's
+            # existing `except DomainError` around the sync calls logs and
+            # continues instead of failing a live call turn.
+            raise EntityNotFoundError("Customer", str(customer_id))
+
+        if full_name is not None:
+            model.full_name = full_name
+        if address is not None:
+            model.address = address
+
+        # No `begin_nested()`/`IntegrityError` guard here, unlike `create`
+        # and `update`: neither writable column carries a unique
+        # constraint, and `phone_number` — the only one that does — is
+        # unreachable from this method.
+        await self._session.flush()
         await self._session.refresh(model)
         return _to_entity(model)
 

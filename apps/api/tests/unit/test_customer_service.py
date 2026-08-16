@@ -125,6 +125,172 @@ async def test_sync_matches_existing_customer_by_phone_and_does_not_overwrite():
     assert len(await customers.list_for_organization(_ORG_ID, limit=10, offset=0)) == 1
 
 
+# --- C1: strictly-additive blank-field backfill ---
+
+
+async def _sync_twice(outcomes, service, *, first: dict, second: dict):
+    """Creates a customer from one outcome, then syncs a second outcome for
+    the same phone number — the shape every backfill case needs."""
+    first_conversation = uuid.uuid4()
+    await _seed_outcome(outcomes, first_conversation, **first)
+    created = await service.sync_customer_from_outcome(_ORG_ID, first_conversation)
+
+    second_conversation = uuid.uuid4()
+    await _seed_outcome(outcomes, second_conversation, **second)
+    return created, await service.sync_customer_from_outcome(_ORG_ID, second_conversation)
+
+
+@pytest.mark.asyncio
+async def test_backfill_fills_a_blank_address_from_a_later_turn():
+    service, _, outcomes, _, _ = _make_service()
+    created, updated = await _sync_twice(
+        outcomes,
+        service,
+        first={"customer_address": None},
+        second={"customer_address": "16th Street, California"},
+    )
+
+    assert created.address is None
+    assert updated.id == created.id
+    assert updated.address == "16th Street, California"
+
+
+@pytest.mark.asyncio
+async def test_backfill_fills_a_blank_full_name_from_a_later_turn():
+    service, _, outcomes, _, _ = _make_service()
+    created, updated = await _sync_twice(
+        outcomes,
+        service,
+        first={"customer_name": None},
+        second={"customer_name": "Lucky"},
+    )
+
+    assert created.full_name is None
+    assert updated.full_name == "Lucky"
+
+
+@pytest.mark.asyncio
+async def test_backfill_fills_only_the_blank_field_and_never_the_populated_one():
+    service, _, outcomes, _, _ = _make_service()
+    _, updated = await _sync_twice(
+        outcomes,
+        service,
+        first={"customer_name": "Jane Doe", "customer_address": None},
+        second={"customer_name": "Jane D. (typo)", "customer_address": "123 Main St"},
+    )
+
+    # The populated name is preserved; only the blank address is filled.
+    assert updated.full_name == "Jane Doe"
+    assert updated.address == "123 Main St"
+
+
+@pytest.mark.asyncio
+async def test_empty_string_is_treated_as_blank_and_backfilled():
+    service, _, outcomes, _, _ = _make_service()
+    _, updated = await _sync_twice(
+        outcomes,
+        service,
+        first={"customer_address": ""},
+        second={"customer_address": "16th Street, California"},
+    )
+
+    assert updated.address == "16th Street, California"
+
+
+@pytest.mark.asyncio
+async def test_whitespace_only_is_treated_as_blank_and_backfilled():
+    service, _, outcomes, _, _ = _make_service()
+    _, updated = await _sync_twice(
+        outcomes,
+        service,
+        first={"customer_name": "   "},
+        second={"customer_name": "Lucky"},
+    )
+
+    assert updated.full_name == "Lucky"
+
+
+@pytest.mark.asyncio
+async def test_blank_outcome_values_never_blank_out_a_populated_record():
+    service, customers, outcomes, _, _ = _make_service()
+    _, updated = await _sync_twice(
+        outcomes,
+        service,
+        first={"customer_name": "Jane Doe", "customer_address": "123 Main St"},
+        second={"customer_name": "   ", "customer_address": ""},
+    )
+
+    assert updated.full_name == "Jane Doe"
+    assert updated.address == "123 Main St"
+    assert customers.backfill_calls == []
+
+
+@pytest.mark.asyncio
+async def test_customer_with_nothing_missing_performs_zero_repository_writes():
+    service, customers, outcomes, _, _ = _make_service()
+    _, updated = await _sync_twice(
+        outcomes,
+        service,
+        first={"customer_name": "Jane Doe", "customer_address": "123 Main St"},
+        second={"customer_name": "Jane Doe", "customer_address": "123 Main St"},
+    )
+
+    assert updated.full_name == "Jane Doe"
+    # Not merely a no-op update — the repository is never asked to write.
+    assert customers.backfill_calls == []
+
+
+@pytest.mark.asyncio
+async def test_backfill_never_modifies_phone_email_or_notes():
+    service, customers, outcomes, _, _ = _make_service()
+    existing = await service.create_customer(
+        _ORG_ID,
+        full_name=None,
+        phone_number="+15551234567",
+        email="jane@example.com",
+        address=None,
+        notes="VIP account - do not auto-edit",
+    )
+
+    conversation_id = uuid.uuid4()
+    await _seed_outcome(
+        outcomes,
+        conversation_id,
+        customer_phone="+15551234567",
+        customer_name="Lucky",
+        customer_address="16th Street, California",
+    )
+    updated = await service.sync_customer_from_outcome(_ORG_ID, conversation_id)
+
+    assert updated.id == existing.id
+    # Blank fields filled...
+    assert updated.full_name == "Lucky"
+    assert updated.address == "16th Street, California"
+    # ...while the three excluded fields are untouched.
+    assert updated.phone_number == "+15551234567"
+    assert updated.email == "jane@example.com"
+    assert updated.notes == "VIP account - do not auto-edit"
+    # The repository is never even offered the excluded fields.
+    assert set(customers.backfill_calls[0][1]) == {"full_name", "address"}
+
+
+@pytest.mark.asyncio
+async def test_backfill_cannot_touch_another_organizations_customer():
+    service, customers, outcomes, _, _ = _make_service()
+    conversation_id = uuid.uuid4()
+    await _seed_outcome(outcomes, conversation_id, customer_address=None)
+    customer = await service.sync_customer_from_outcome(_ORG_ID, conversation_id)
+
+    with pytest.raises(EntityNotFoundError):
+        await customers.backfill_contact_details(
+            uuid.uuid4(), customer.id, address="Someone else's street"
+        )
+
+    unchanged = await customers.get_by_id(_ORG_ID, customer.id)
+    assert unchanged is not None
+    assert unchanged.address is None
+
+
 @pytest.mark.asyncio
 async def test_sync_links_existing_ticket_and_appointment_for_the_conversation():
     service, customers, outcomes, tickets, appointments = _make_service()

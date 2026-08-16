@@ -683,6 +683,7 @@ class FakeTechnicianProfileRepository(TechnicianProfileRepository):
 class FakeCustomerRepository(CustomerRepository):
     def __init__(self) -> None:
         self._customers: dict[uuid.UUID, Customer] = {}
+        self.backfill_calls: list[tuple[uuid.UUID, dict[str, str | None]]] = []
 
     async def create(
         self, *, organization_id, full_name, phone_number, email=None, address=None, notes=None
@@ -747,6 +748,25 @@ class FakeCustomerRepository(CustomerRepository):
             address=address,
             notes=notes,
         )
+        self._customers[customer_id] = updated
+        return updated
+
+    async def backfill_contact_details(
+        self, organization_id, customer_id, *, full_name=None, address=None
+    ):
+        # `backfill_calls` lets a test assert that a customer with nothing
+        # missing produced *no write at all*, which an equality check on
+        # the returned record cannot distinguish from a no-op update.
+        self.backfill_calls.append((customer_id, {"full_name": full_name, "address": address}))
+        customer = self._customers.get(customer_id)
+        if customer is None or customer.organization_id != organization_id:
+            raise EntityNotFoundError("Customer", str(customer_id))
+        changes = {}
+        if full_name is not None:
+            changes["full_name"] = full_name
+        if address is not None:
+            changes["address"] = address
+        updated = replace(customer, **changes)
         self._customers[customer_id] = updated
         return updated
 

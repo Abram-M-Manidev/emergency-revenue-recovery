@@ -205,6 +205,45 @@ async def test_repeat_caller_matches_existing_customer(
 
 
 @pytest.mark.asyncio(loop_scope="session")
+async def test_later_turn_backfills_details_missing_when_the_customer_was_created(
+    client: AsyncClient, fake_ai_provider: FakeAIProvider
+):
+    """The real-world shape of the bug C1 fixes: a customer is created on
+    the first outcome carrying a phone number — before the caller has given
+    their name or address — and a later conversation supplies both."""
+    owner_token, _ = await _register(client, "Customer Flow Org G", "owner-cust-g@example.com")
+
+    fake_ai_provider.queue_reply(_reply_with_phone(customer_name=None, customer_address=None))
+    await _send_message(client, owner_token, "There's no heat in my house.")
+
+    customers = (
+        await client.get("/api/v1/customers", headers=_auth_headers(owner_token))
+    ).json()
+    assert len(customers) == 1
+    customer_id = customers[0]["id"]
+    assert customers[0]["full_name"] is None
+
+    fake_ai_provider.queue_reply(
+        _reply_with_phone(customer_name="Lucky", customer_address="16th Street, California")
+    )
+    await _send_message(client, owner_token, "I'm Lucky, my address is 16th Street, California.")
+
+    history = (
+        await client.get(
+            f"/api/v1/customers/{customer_id}", headers=_auth_headers(owner_token)
+        )
+    ).json()
+    # Same record, now complete — not a second customer.
+    assert len(
+        (await client.get("/api/v1/customers", headers=_auth_headers(owner_token))).json()
+    ) == 1
+    assert history["customer"]["id"] == customer_id
+    assert history["customer"]["full_name"] == "Lucky"
+    assert history["customer"]["address"] == "16th Street, California"
+    assert history["customer"]["phone_number"] == "+15551234567"
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_manual_customer_create_requires_customers_manage(
     client: AsyncClient, fake_ai_provider: FakeAIProvider
 ):

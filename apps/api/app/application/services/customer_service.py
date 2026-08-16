@@ -26,6 +26,7 @@ import uuid
 from dataclasses import dataclass
 
 from app.domain.entities.appointment import Appointment
+from app.domain.entities.conversation_outcome import ConversationOutcome
 from app.domain.entities.customer import Customer
 from app.domain.entities.emergency_ticket import EmergencyTicket
 from app.domain.exceptions import EntityAlreadyExistsError, EntityNotFoundError
@@ -33,6 +34,19 @@ from app.domain.repositories.appointment_repository import AppointmentRepository
 from app.domain.repositories.conversation_outcome_repository import ConversationOutcomeRepository
 from app.domain.repositories.customer_repository import CustomerRepository
 from app.domain.repositories.emergency_ticket_repository import EmergencyTicketRepository
+
+
+def _is_blank(value: str | None) -> bool:
+    """Treats `None`, `""`, and whitespace-only alike. The AI can emit an
+    empty string for a detail it hasn't heard yet, which is the same thing
+    as not knowing it.
+
+    Deliberately a private copy of `DispatchService`'s identical helper
+    rather than a shared import: the two services are peers that know
+    nothing about each other (see this module's docstring), and coupling
+    them through a utility would be a wider change than the behaviour it
+    supports."""
+    return value is None or not value.strip()
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,14 +104,44 @@ class CustomerService:
                 )
                 if customer is None:
                     raise
-        # Existing customer: intentionally left untouched. Later AI Brain
-        # turns must not overwrite a record that may already be
-        # staff-edited — same reasoning DispatchService/AppointmentService
-        # use for not re-copying stale fields onto an existing ticket/
-        # appointment.
+        else:
+            customer = await self._backfill_contact_details(
+                organization_id, customer, outcome
+            )
 
         await self._link_existing_activity(organization_id, conversation_id, customer.id)
         return customer
+
+    async def _backfill_contact_details(
+        self, organization_id: uuid.UUID, customer: Customer, outcome: ConversationOutcome
+    ) -> Customer:
+        """Copies caller details the AI has since learned onto a customer
+        created without them.
+
+        Strictly additive, mirroring `DispatchService._backfill_contact_details`:
+        a field is written only when the customer's own value is blank AND
+        the outcome has something to put there. A staff correction
+        therefore always wins over the AI, and a later turn that *loses* a
+        detail (the model omitting a field it reported earlier) can never
+        blank out a value already on the record. When nothing is missing
+        this performs no write at all.
+
+        Only the two fields a `ConversationOutcome` can actually source are
+        considered. `phone_number` is excluded because it is the key this
+        customer was just matched on; `email`/`notes` are excluded because
+        they are staff-owned and the outcome has no counterpart for either
+        — the repository method cannot write any of the three."""
+        updates = {
+            field: getattr(outcome, source)
+            for field, source in (("full_name", "customer_name"), ("address", "customer_address"))
+            if _is_blank(getattr(customer, field)) and not _is_blank(getattr(outcome, source))
+        }
+        if not updates:
+            return customer
+
+        return await self._customers.backfill_contact_details(
+            organization_id, customer.id, **updates
+        )
 
     async def _link_existing_activity(
         self, organization_id: uuid.UUID, conversation_id: uuid.UUID, customer_id: uuid.UUID
