@@ -18,15 +18,19 @@ framing differs."""
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator, AsyncIterator
+from dataclasses import dataclass
 from typing import Any
 
 import structlog
 from fastapi import APIRouter, Body, Depends, Response
 from fastapi.responses import JSONResponse, StreamingResponse
+from structlog.contextvars import bind_contextvars
 
 from app.api.deps import (
     get_appointment_service,
@@ -45,6 +49,7 @@ from app.application.services.voice_service import (
     VoiceTextDelta,
 )
 from app.domain.exceptions import DomainError
+from app.shared.logging.timing import elapsed_ms, now
 
 router = APIRouter(
     prefix="/voice/vapi", tags=["voice-vapi-webhooks"], dependencies=[Depends(verify_vapi_secret)]
@@ -71,6 +76,18 @@ async def vapi_chat_completions(
     appointment_service: AppointmentService = Depends(get_appointment_service),
     customer_service: CustomerService = Depends(get_customer_service),
 ) -> Response:
+    # Bound before anything else so every later event in this turn — across
+    # every layer — carries the call id without it being threaded through.
+    # `turn_id` distinguishes the several requests Vapi can send for one
+    # spoken utterance, which `vapi_call_id` alone cannot.
+    bind_contextvars(vapi_call_id=payload.call.id, turn_id=uuid.uuid4().hex[:12])
+    logger.info(
+        "voice_request_received",
+        streaming=payload.stream,
+        message_count=len(payload.messages),
+        has_customer_number=bool(payload.call.customer and payload.call.customer.number),
+    )
+
     customer_utterance = _latest_customer_utterance(payload)
     if customer_utterance is None:
         logger.warning("vapi_chat_completion_no_user_message", vapi_call_id=payload.call.id)
@@ -85,14 +102,19 @@ async def vapi_chat_completions(
         # because FastAPI >= 0.118 keeps `yield` dependencies (the DB
         # session, and with it P1's transaction-scoped advisory lock) alive
         # until the response body is finished.
+        stats = _StreamStats()
         return StreamingResponse(
-            _streamed_completion(
-                payload=payload,
-                customer_utterance=customer_utterance,
-                service=service,
-                dispatch_service=dispatch_service,
-                appointment_service=appointment_service,
-                customer_service=customer_service,
+            _instrumented_stream(
+                stats,
+                _streamed_completion(
+                    stats=stats,
+                    payload=payload,
+                    customer_utterance=customer_utterance,
+                    service=service,
+                    dispatch_service=dispatch_service,
+                    appointment_service=appointment_service,
+                    customer_service=customer_service,
+                ),
             ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -172,15 +194,76 @@ async def vapi_chat_completions(
     )
 
 
+@dataclass
+class _StreamStats:
+    """Shared between the turn generator, which fills it in, and
+    `_instrumented_stream`, which reports it. Separated because the
+    completion/abort event has to be emitted from a wrapper that survives
+    a `GeneratorExit` raised at *any* of this generator's yield points —
+    and wrapping was preferable to re-indenting the P2 turn logic inside
+    an outer `try`."""
+
+    started_at: float = 0.0
+    first_content_at: float | None = None
+    content_frames: int = 0
+    end_call_emitted: bool = False
+
+
+async def _instrumented_stream(
+    stats: _StreamStats, inner: AsyncGenerator[str, None]
+) -> AsyncIterator[str]:
+    """Passes frames through untouched, and records how the stream ended.
+
+    Deliberately not buffering: each frame is forwarded as it arrives, so
+    SSE framing, ordering, and back-pressure are exactly what `inner`
+    produced. The only additions are two terminal log events.
+
+    `aclosing` is load-bearing, not tidiness. Without it, a `GeneratorExit`
+    raised here on client disconnect unwinds this wrapper but leaves
+    `inner` to be finalised whenever the event loop next sweeps its async
+    generators — so `_streamed_completion`'s `finally` work, and with it
+    the exit of P1's `call_lock.hold(...)` and the request's transaction,
+    would happen late instead of immediately. Before this wrapper existed
+    Starlette closed the turn generator directly; `aclosing` restores
+    exactly that timing."""
+    try:
+        async with contextlib.aclosing(inner) as stream:
+            async for frame in stream:
+                yield frame
+    except (GeneratorExit, asyncio.CancelledError):
+        # Vapi hung up on the turn — the case that produced the orphaned
+        # customer messages before P4. Re-raised untouched; this only
+        # observes it (fixing it is H3, deliberately out of scope here).
+        logger.info(
+            "voice_stream_aborted",
+            elapsed_ms=elapsed_ms(stats.started_at),
+            content_frames=stats.content_frames,
+            reached_first_content=stats.first_content_at is not None,
+        )
+        raise
+    logger.info(
+        "voice_stream_completed",
+        elapsed_ms=elapsed_ms(stats.started_at),
+        first_content_ms=(
+            None
+            if stats.first_content_at is None
+            else elapsed_ms(stats.started_at, stats.first_content_at)
+        ),
+        content_frames=stats.content_frames,
+        end_call_emitted=stats.end_call_emitted,
+    )
+
+
 async def _streamed_completion(
     *,
+    stats: _StreamStats,
     payload: VapiChatCompletionRequest,
     customer_utterance: str,
     service: VoiceService,
     dispatch_service: DispatchService,
     appointment_service: AppointmentService,
     customer_service: CustomerService,
-) -> AsyncIterator[str]:
+) -> AsyncGenerator[str, None]:
     """Emits the turn as OpenAI-compatible SSE while it is still being
     generated.
 
@@ -195,6 +278,14 @@ async def _streamed_completion(
     complete, so this is explicitly NOT the detached fire-and-forget
     behaviour of P3."""
     frames = _SseFrameWriter()
+
+    # Generator entry, NOT handler entry: the handler returned its
+    # StreamingResponse object before this line ran. `voice_request_received`
+    # marks the handler; the gap between the two is Starlette beginning to
+    # consume the body. Every duration below is measured from here.
+    stats.started_at = now()
+    logger.info("voice_stream_started")
+
     yield frames.role()
 
     result = None
@@ -210,6 +301,17 @@ async def _streamed_completion(
             if isinstance(event, VoiceTextDelta):
                 if event.text:
                     spoke = True
+                    stats.content_frames += 1
+                    if stats.first_content_at is None:
+                        # The first frame Vapi can hand to TTS. This is the
+                        # closest thing we can observe to "the caller is
+                        # about to hear something" — it is NOT audio start,
+                        # which only Vapi sees.
+                        stats.first_content_at = now()
+                        logger.info(
+                            "voice_stream_first_content",
+                            elapsed_ms=elapsed_ms(stats.started_at, stats.first_content_at),
+                        )
                     yield frames.content(event.text)
             else:
                 result = event.result
@@ -238,6 +340,7 @@ async def _streamed_completion(
         yield frames.done()
         return
 
+    syncs_started_at = now()
     await _run_outcome_syncs(
         result=result,
         vapi_call_id=payload.call.id,
@@ -245,9 +348,15 @@ async def _streamed_completion(
         appointment_service=appointment_service,
         customer_service=customer_service,
     )
+    # Runs after the caller is already hearing the reply, so this is not
+    # latency they perceive — but it does delay `[DONE]`, and on a final
+    # turn therefore the hang-up. Worth being able to see.
+    logger.info("voice_outcome_syncs_completed", elapsed_ms=elapsed_ms(syncs_started_at))
 
     finish_reason = "stop"
     if result.should_end_call:
+        stats.end_call_emitted = True
+        logger.info("voice_end_call_emitted")
         yield frames.tool_call(_end_call_tool_call())
         finish_reason = "tool_calls"
     yield frames.finish(finish_reason)

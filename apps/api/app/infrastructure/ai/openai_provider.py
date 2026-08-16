@@ -10,11 +10,13 @@ dataclass, instead of the service layer parsing free-form text.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
+import structlog
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
 from pydantic import BaseModel
 
@@ -31,6 +33,9 @@ from app.domain.ai.provider import (
 from app.domain.entities.conversation_outcome import CallClassification, RecommendedAction
 from app.domain.exceptions import AIProviderUnavailableError
 from app.infrastructure.ai.streaming_json import StreamingStringFieldExtractor
+from app.shared.logging.timing import elapsed_ms, now
+
+logger = structlog.get_logger("app.ai.openai")
 
 _JSON_SCHEMA: dict = {
     "name": "ai_brain_reply",
@@ -203,40 +208,88 @@ class OpenAIProvider(AIProvider):
         extractor = StreamingStringFieldExtractor("message_to_customer")
         raw: list[str] = []
 
+        # Monotonic, so a clock adjustment mid-call cannot produce a
+        # negative duration. All `*_ms` fields below are measured from
+        # `started_at` and describe *this process's* view only — nothing
+        # here observes the caller's speech, Vapi's endpointing, or TTS.
+        started_at = now()
+        first_output_at: float | None = None
+        logger.info(
+            "ai_stream_started",
+            model=config.model,
+            profile=request.profile.value,
+            history_turns=len(request.history),
+        )
+
         try:
-            stream = await client.chat.completions.create(
-                model=config.model,
-                messages=self._messages_for(request),  # type: ignore[call-overload]
-                response_format={"type": "json_schema", "json_schema": _JSON_SCHEMA},
-                extra_body=self._extra_body_for(config),
-                stream=True,
+            try:
+                stream = await client.chat.completions.create(
+                    model=config.model,
+                    messages=self._messages_for(request),  # type: ignore[call-overload]
+                    response_format={"type": "json_schema", "json_schema": _JSON_SCHEMA},
+                    extra_body=self._extra_body_for(config),
+                    stream=True,
+                )
+                async for chunk in stream:
+                    if not chunk.choices:
+                        continue
+                    piece = chunk.choices[0].delta.content
+                    if not piece:
+                        continue
+                    raw.append(piece)
+                    text = extractor.feed(piece)
+                    if text:
+                        if first_output_at is None:
+                            # Time to the first *speakable* character, which
+                            # is the number P2 exists to reduce — not the
+                            # first JSON token, which the caller never hears.
+                            first_output_at = now()
+                            logger.info(
+                                "ai_stream_first_output",
+                                elapsed_ms=elapsed_ms(started_at, first_output_at),
+                            )
+                        yield AITextDelta(text)
+            except APITimeoutError as exc:
+                raise AIProviderUnavailableError(
+                    "The AI Brain timed out. Please try again."
+                ) from exc
+            except APIConnectionError as exc:
+                raise AIProviderUnavailableError(
+                    "Could not reach the AI Brain. Please try again shortly."
+                ) from exc
+            except APIStatusError as exc:
+                raise AIProviderUnavailableError(
+                    "The AI Brain is temporarily unavailable. Please try again shortly."
+                ) from exc
+
+            content = "".join(raw)
+            if not content:
+                raise AIProviderUnavailableError("OpenAI returned an empty response.")
+
+            reply = _assemble_reply(content)
+            logger.info(
+                "ai_stream_completed",
+                elapsed_ms=elapsed_ms(started_at),
+                first_output_ms=(
+                    None if first_output_at is None else elapsed_ms(started_at, first_output_at)
+                ),
+                chunks=len(raw),
+                reply_chars=len(reply.message_to_customer),
             )
-            async for chunk in stream:
-                if not chunk.choices:
-                    continue
-                piece = chunk.choices[0].delta.content
-                if not piece:
-                    continue
-                raw.append(piece)
-                text = extractor.feed(piece)
-                if text:
-                    yield AITextDelta(text)
-        except APITimeoutError as exc:
-            raise AIProviderUnavailableError("The AI Brain timed out. Please try again.") from exc
-        except APIConnectionError as exc:
-            raise AIProviderUnavailableError(
-                "Could not reach the AI Brain. Please try again shortly."
-            ) from exc
-        except APIStatusError as exc:
-            raise AIProviderUnavailableError(
-                "The AI Brain is temporarily unavailable. Please try again shortly."
-            ) from exc
-
-        content = "".join(raw)
-        if not content:
-            raise AIProviderUnavailableError("OpenAI returned an empty response.")
-
-        yield AIReplyComplete(_assemble_reply(content))
+            yield AIReplyComplete(reply)
+        except (GeneratorExit, asyncio.CancelledError):
+            # The consumer stopped iterating — on a live call this is Vapi
+            # abandoning the turn. Distinguished from a provider failure,
+            # which raises `AIProviderUnavailableError` and is logged by
+            # whoever handles it. Re-raised untouched: swallowing either of
+            # these would corrupt generator/task shutdown.
+            logger.info(
+                "ai_stream_aborted",
+                elapsed_ms=elapsed_ms(started_at),
+                chunks=len(raw),
+                produced_output=first_output_at is not None,
+            )
+            raise
 
     # --- shared request construction (identical for both paths) ---
 

@@ -45,7 +45,15 @@ def configure_logging(settings: Settings) -> None:
         wrapper_class=structlog.make_filtering_bound_logger(log_level),
         context_class=dict,
         logger_factory=structlog.stdlib.LoggerFactory(),
-        cache_logger_on_first_use=True,
+        # Caching is purely a performance optimisation, and structlog
+        # documents it as a one-way door: once a logger has been used, a
+        # later `configure()` no longer reaches it. Tests that assert on
+        # emitted events have to swap the processor chain at runtime, and
+        # with caching on they would capture nothing as soon as any earlier
+        # test had already logged through the same logger. Same
+        # `is_testing` special-casing, and the same reasoning, as
+        # `database/session.py`'s engine and `RateLimitMiddleware`.
+        cache_logger_on_first_use=not settings.is_testing,
     )
 
 

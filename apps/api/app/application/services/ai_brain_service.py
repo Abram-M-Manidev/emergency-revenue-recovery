@@ -15,6 +15,8 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import date
 
+import structlog
+
 from app.core.config import Settings
 from app.domain.ai.provider import (
     AIModelProfile,
@@ -47,8 +49,11 @@ from app.domain.repositories.emergency_keyword_repository import EmergencyKeywor
 from app.domain.repositories.faq_repository import FAQRepository
 from app.domain.repositories.service_area_repository import ServiceAreaRepository
 from app.domain.repositories.service_repository import ServiceRepository
+from app.shared.logging.timing import elapsed_ms, now
 
 from .prompt_builder import build_system_prompt
+
+logger = structlog.get_logger("app.ai_brain")
 
 
 @dataclass(frozen=True, slots=True)
@@ -259,6 +264,13 @@ class AIBrainService:
         services: list[Service],
         reply: AIReply,
     ) -> ConversationTurnResult:
+        # Wraps the assistant message + outcome upsert + completion flag.
+        # Bracketed rather than timed as a whole from outside because this
+        # is the work that happens *after* the caller has already started
+        # hearing the reply — the streamed turn is not finished until it
+        # ends, so a slow write here delays `[DONE]` and, on a final turn,
+        # the hang-up.
+        persistence_started_at = now()
         reply_message = await self._conversations.add_message(
             conversation_id, role=MessageRole.ASSISTANT, content=reply.message_to_customer
         )
@@ -280,6 +292,20 @@ class AIBrainService:
 
         if reply.is_conversation_complete:
             conversation = await self._conversations.complete(conversation_id)
+
+        # Classification/action/confidence are the AI's decision, not caller
+        # data — they are what an incident review needs and carry no PII.
+        # The reply text, summary, and extracted contact fields are not
+        # logged; `matched_service` is org-owned catalogue data.
+        logger.info(
+            "conversation_turn_persisted",
+            elapsed_ms=elapsed_ms(persistence_started_at),
+            classification=outcome.classification.value,
+            recommended_action=outcome.recommended_action.value,
+            confidence=outcome.confidence,
+            matched_service=reply.matched_service_name,
+            conversation_complete=reply.is_conversation_complete,
+        )
 
         return ConversationTurnResult(
             conversation=conversation, reply_message=reply_message, outcome=outcome

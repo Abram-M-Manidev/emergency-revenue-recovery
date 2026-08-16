@@ -37,6 +37,7 @@ from tests.fakes import (
     FakeServiceRepository,
     default_reply,
 )
+from tests.log_capture import capture_events, names
 
 _ORG_ID = uuid.uuid4()
 _ASSISTANT_ID = "asst_test_1"
@@ -691,3 +692,59 @@ async def test_superseded_burst_preserves_emergency_outcome():
     assert outcome is not None
     assert outcome.classification is CallClassification.EMERGENCY
     assert outcome.recommended_action is RecommendedAction.CREATE_EMERGENCY_TICKET
+
+
+@pytest.mark.asyncio
+async def test_supersession_and_turn_start_are_observable():
+    """H2: P1's suppression decision has to be visible. Without it, the only
+    evidence a request was dropped is the *absence* of a turn in the
+    database — which is exactly the archaeology H2 exists to remove."""
+    provider = BlockingAIProvider()
+    service, _, _, _, _ = _make_voice_service(
+        ai_provider=provider, voice_lines=[_voice_line()]
+    )
+
+    # A first, uncontended turn so a cached reply exists to fall back on —
+    # the superseded branch requires one.
+    provider.release()
+    await service.handle_chat_completion(
+        vapi_call_id="call_obs",
+        assistant_id=_ASSISTANT_ID,
+        phone_number_id=None,
+        customer_number=None,
+        customer_utterance="Hello?",
+    )
+    provider.gate.clear()
+    provider.entered.clear()
+    for _ in range(3):
+        provider.queue_reply(default_reply(message_to_customer="Help is on the way."))
+
+    with capture_events() as entries:
+        # Three, not two. With two, the first is already inside the model
+        # (its `is_current` check having passed) and the second is current
+        # by the time it takes the lock — neither is ever superseded. The
+        # third is what makes the middle request stale while it waits.
+        tasks = [
+            await _start(service, call_id="call_obs", utterance=utterance)
+            for utterance in (
+                "My basement",
+                "My basement is",
+                "My basement is flooding!",
+            )
+        ]
+        await provider.entered.wait()
+        provider.release()
+        await asyncio.gather(*tasks)
+
+    emitted = names(entries)
+    assert "vapi_chat_completion_superseded" in emitted
+    assert "voice_turn_started" in emitted
+    assert "voice_line_resolved" in emitted
+
+    superseded = [e for e in entries if e.get("event") == "vapi_chat_completion_superseded"]
+    assert superseded[0]["vapi_call_id"] == "call_obs"
+    # The sequence number is what makes "which request lost" answerable.
+    assert superseded[0]["sequence"] >= 1
+
+    resolved = [e for e in entries if e.get("event") == "voice_line_resolved"]
+    assert resolved[0]["matched_on"] == "assistant_id"

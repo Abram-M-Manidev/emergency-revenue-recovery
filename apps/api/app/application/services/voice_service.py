@@ -19,6 +19,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 
 import structlog
+from structlog.contextvars import bind_contextvars
 
 from app.application.services.ai_brain_service import AIBrainService, ConversationTextDelta
 from app.domain.entities.conversation import ConversationChannel, ConversationStatus
@@ -204,6 +205,9 @@ class VoiceService:
         coroutine returning a generator, the lock would have released the
         moment the function returned — before a single token arrived — and
         two overlapping requests for one call could both generate."""
+        # Still the first statement in the coroutine: the claim must record
+        # arrival order, so nothing — including telemetry — may await before
+        # it. `claim` and the binding below are both synchronous.
         sequence = self._supersession.claim(vapi_call_id)
 
         async with self._call_lock.hold(vapi_call_id):
@@ -212,6 +216,16 @@ class VoiceService:
             conversation_id = await self._conversation_id_for(
                 organization_id, vapi_call_id, customer_number
             )
+            # Bound here, inside the generator, rather than relying on the
+            # request-scoped context propagating into a StreamingResponse
+            # body that Starlette iterates after the handler has returned.
+            # Everything downstream — provider, persistence — inherits it.
+            bind_contextvars(
+                conversation_id=str(conversation_id),
+                organization_id=str(organization_id),
+                turn_sequence=sequence,
+            )
+            logger.info("voice_turn_started", streaming=True)
 
             history = await self._conversations.list_messages(conversation_id)
             cached_reply = _last_answered_turn(history)
@@ -298,6 +312,12 @@ class VoiceService:
                 caller_number=customer_number,
             )
         conversation_id = voice_call.conversation_id
+        bind_contextvars(
+            conversation_id=str(conversation_id),
+            organization_id=str(organization_id),
+            turn_sequence=sequence,
+        )
+        logger.info("voice_turn_started", streaming=False)
 
         history = await self._conversations.list_messages(conversation_id)
         cached_reply = _last_answered_turn(history)
@@ -382,6 +402,19 @@ class VoiceService:
             logger.warning("voice_call_not_found_for_end_of_call_report", vapi_call_id=vapi_call_id)
             return
 
+        # `ended_reason` is Vapi's own enum string (`assistant-ended-call`,
+        # `silence-timed-out`, ...), not caller data, and is the single most
+        # useful field for telling a healthy hang-up from a failed turn.
+        # `recording_url` is deliberately not logged: it dereferences to
+        # caller audio.
+        logger.info(
+            "voice_end_of_call_report",
+            conversation_id=str(voice_call.conversation_id),
+            organization_id=str(voice_call.organization_id),
+            ended_reason=ended_reason,
+            duration_seconds=duration_seconds,
+            has_recording=recording_url is not None,
+        )
         await self._voice_calls.mark_ended(
             vapi_call_id,
             ended_reason=ended_reason,
@@ -412,4 +445,14 @@ class VoiceService:
                 phone_number_id=phone_number_id,
             )
             raise VoiceLineNotFoundError()
+        # Logged here rather than at each call site so the streaming and
+        # non-streaming paths cannot report tenant resolution differently.
+        # `matched_on` is what a PSTN investigation will actually need:
+        # `phone_number_id` resolution has never been exercised live, and a
+        # failure there is invisible in the request itself.
+        logger.info(
+            "voice_line_resolved",
+            organization_id=str(voice_line.organization_id),
+            matched_on="assistant_id" if assistant_id else "phone_number_id",
+        )
         return voice_line
