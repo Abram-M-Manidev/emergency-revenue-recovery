@@ -167,7 +167,9 @@ class AIBrainService:
             organization_id, conversation_id, customer_message
         )
         reply = await self._ai.generate_reply(request)
-        return await self._persist_turn(conversation, conversation_id, services, reply)
+        return await self._persist_turn(
+            conversation, conversation_id, services, reply, customer_message
+        )
 
     async def send_message_stream(
         self, organization_id: uuid.UUID, conversation_id: uuid.UUID, customer_message: str
@@ -197,7 +199,9 @@ class AIBrainService:
             raise AIProviderUnavailableError("The AI Brain returned an incomplete response.")
 
         yield ConversationTurnComplete(
-            await self._persist_turn(conversation, conversation_id, services, reply)
+            await self._persist_turn(
+                conversation, conversation_id, services, reply, customer_message
+            )
         )
 
     # --- shared turn lifecycle (identical for streaming and non-streaming) ---
@@ -213,9 +217,22 @@ class AIBrainService:
         if len(history) >= self._settings.AI_MAX_CONVERSATION_TURNS * 2:
             raise ConversationLimitExceededError()
 
-        await self._conversations.add_message(
-            conversation_id, role=MessageRole.CUSTOMER, content=customer_message
-        )
+        # The customer message is deliberately NOT written here. It used to
+        # be, and that was the H3 defect: a streamed turn that died between
+        # this point and `_persist_turn` left the message flushed into a
+        # transaction that FastAPI then committed anyway — because the exit
+        # stack closes *cleanly* on a client disconnect, so `get_db` resumes
+        # past its `yield` and commits. `GeneratorExit`/`CancelledError`
+        # never reach `get_db`'s `except Exception`, so nothing rolled it
+        # back. The result was a customer-only turn in the history, which
+        # then replayed into every later prompt of that call.
+        #
+        # Nothing between here and `_persist_turn` needs it persisted:
+        # `provider_history` below is built from `history`, which was read
+        # *before* this point, and the new utterance travels separately as
+        # `latest_customer_message`. Writing both messages together in
+        # `_persist_turn` makes "customer message only" unrepresentable
+        # rather than merely unlikely — see its docstring.
 
         (
             profile,
@@ -263,6 +280,7 @@ class AIBrainService:
         conversation_id: uuid.UUID,
         services: list[Service],
         reply: AIReply,
+        customer_message: str,
     ) -> ConversationTurnResult:
         # Wraps the assistant message + outcome upsert + completion flag.
         # Bracketed rather than timed as a whole from outside because this
@@ -271,6 +289,16 @@ class AIBrainService:
         # ends, so a slow write here delays `[DONE]` and, on a final turn,
         # the hang-up.
         persistence_started_at = now()
+        # Both halves of the turn are written here, in this order, so the
+        # pair is only ever created together. The customer message is
+        # written first purely to preserve read order: `list_messages`
+        # sorts by `created_at`, and both rows take the transaction
+        # timestamp (`server_default=func.now()`), so insertion order is
+        # what actually separates them — as it already did before H3, when
+        # the two writes were in the same transaction but further apart.
+        await self._conversations.add_message(
+            conversation_id, role=MessageRole.CUSTOMER, content=customer_message
+        )
         reply_message = await self._conversations.add_message(
             conversation_id, role=MessageRole.ASSISTANT, content=reply.message_to_customer
         )
