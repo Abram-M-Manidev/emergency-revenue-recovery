@@ -4,7 +4,6 @@ authentication/authorization chain used by every protected route.
 
 from __future__ import annotations
 
-import hmac
 from collections.abc import Callable
 
 from fastapi import Depends, Header
@@ -49,6 +48,7 @@ from app.infrastructure.database.repositories import (
 )
 from app.infrastructure.database.session import get_db
 from app.infrastructure.security.jwt import decode_access_token
+from app.infrastructure.security.vapi_secret import is_valid_vapi_secret
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -194,8 +194,7 @@ def verify_vapi_secret(
     — that is always resolved separately via `VoiceLineRepository` inside
     `VoiceService`, the same way a valid JWT proves "a real user" while
     RBAC/org-scoping separately proves "which org's data.\""""
-    expected = settings.VAPI_SERVER_SECRET
-    if not expected or not x_vapi_secret or not hmac.compare_digest(x_vapi_secret, expected):
+    if not is_valid_vapi_secret(x_vapi_secret, settings.VAPI_SERVER_SECRET):
         raise InvalidTokenError("Missing or invalid Vapi webhook secret.")
 
 

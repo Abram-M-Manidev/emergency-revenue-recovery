@@ -31,6 +31,7 @@ from app.core.errors import error_response
 from app.domain.exceptions import InvalidTokenError
 from app.infrastructure.security.jwt import decode_access_token
 from app.infrastructure.security.rate_limiter import InMemoryRateLimiter
+from app.infrastructure.security.vapi_secret import is_valid_vapi_secret
 
 REQUEST_ID_HEADER = "X-Request-ID"
 _RATE_LIMIT_WINDOW_SECONDS = 60.0
@@ -132,6 +133,30 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
     default tier (abuse/cost-runaway safety net). Health-check routes are
     exempt so orchestrator liveness/readiness probes are never throttled.
 
+    Vapi's webhook routes are exempt too, but only once the request proves
+    it carries our `x-vapi-secret`. They have to be: Vapi never sends an
+    `Authorization` header, so `_identify` falls through to the client IP
+    — and every live call arrives from Vapi's own egress, so all callers
+    would share a single 100/min bucket. That bucket empties exactly when
+    the product matters most (many simultaneous emergencies), and the
+    failure is severe rather than graceful: a 429 is a JSON envelope, so a
+    `stream: true` webhook receives JSON where it expects
+    `text/event-stream`, parses zero tokens, and the caller hears silence
+    until Vapi hangs up on `silence-timed-out` — the same failure the
+    `stream` field in `application/schemas/voice.py` was added to fix.
+
+    Authentication is checked *before* the exemption, not after, so an
+    unauthenticated request to the same path is throttled exactly as it is
+    today. Anyone holding the secret already has full webhook access, so
+    the IP bucket was never the control protecting it — secret rotation
+    is. Per-conversation cost stays bounded by `AI_MAX_CONVERSATION_TURNS`
+    and by P1's supersession/advisory lock, neither of which this changes.
+
+    Keying by `call.id` instead would be the narrower exemption, but that
+    id is in the request *body*: reading it here would drain the receive
+    stream `call_next` needs and defeat `MaxBodySizeMiddleware`'s
+    guarantee of rejecting oversized bodies before reading them.
+
     Bypassed entirely in the test environment (`settings.is_testing`) —
     the same special-casing `app/infrastructure/database/session.py`'s
     `create_engine()` already applies for a different reason. Without
@@ -156,6 +181,11 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
 
         path = request.url.path
         if path.startswith(f"{settings.API_V1_PREFIX}/health"):
+            return await call_next(request)
+
+        if path.startswith(f"{settings.API_V1_PREFIX}/voice/vapi") and is_valid_vapi_secret(
+            request.headers.get("x-vapi-secret"), settings.VAPI_SERVER_SECRET
+        ):
             return await call_next(request)
 
         is_auth_path = path.startswith(f"{settings.API_V1_PREFIX}/auth")
