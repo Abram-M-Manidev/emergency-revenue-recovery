@@ -179,6 +179,175 @@ async def test_sync_is_idempotent_across_repeated_turns():
     assert len(await tickets.list_for_organization(_ORG_ID, limit=10, offset=0)) == 1
 
 
+# --- contact-detail backfill ---
+#
+# A ticket is opened on the first turn the AI classifies an emergency,
+# which is normally before the caller has given their name, number, or
+# address. A live web call produced exactly that: correct details in
+# `conversation_outcomes`, blank contact columns on the ticket, and a
+# dispatcher with nobody to call back.
+
+
+async def _seed_outcome(outcomes, conversation_id, **overrides):
+    fields = dict(
+        classification=CallClassification.EMERGENCY,
+        confidence=0.95,
+        recommended_action=RecommendedAction.CREATE_EMERGENCY_TICKET,
+        matched_service_id=None,
+        customer_name=None,
+        customer_phone=None,
+        customer_address=None,
+        summary="Furnace failure, no heat.",
+    )
+    fields.update(overrides)
+    await outcomes.upsert(conversation_id, **fields)
+
+
+@pytest.mark.asyncio
+async def test_later_turn_backfills_contact_details_missing_at_ticket_creation():
+    service, tickets, _, outcomes = _make_service()
+    conversation_id = uuid.uuid4()
+
+    # Turn 1: emergency recognised, caller hasn't identified themselves yet.
+    await _seed_outcome(outcomes, conversation_id)
+    created = await service.sync_ticket_from_outcome(_ORG_ID, conversation_id)
+    assert created.customer_name is None
+    assert created.customer_phone is None
+    assert created.customer_address is None
+
+    # Turn 2: caller gives name, number, and address.
+    await _seed_outcome(
+        outcomes,
+        conversation_id,
+        customer_name="Lucky",
+        customer_phone="123456789",
+        customer_address="1600 Street, California",
+    )
+    updated = await service.sync_ticket_from_outcome(_ORG_ID, conversation_id)
+
+    assert updated.id == created.id, "must update in place, not open a second ticket"
+    assert updated.customer_name == "Lucky"
+    assert updated.customer_phone == "123456789"
+    assert updated.customer_address == "1600 Street, California"
+    assert len(await tickets.list_for_organization(_ORG_ID, limit=10, offset=0)) == 1
+
+
+@pytest.mark.asyncio
+async def test_backfill_treats_empty_strings_as_missing():
+    """The AI emits "" for a detail it hasn't heard, which is what the live
+    call actually stored — indistinguishable from not knowing it."""
+    service, _, _, outcomes = _make_service()
+    conversation_id = uuid.uuid4()
+    await _seed_outcome(outcomes, conversation_id, customer_name="", customer_phone="   ")
+    await service.sync_ticket_from_outcome(_ORG_ID, conversation_id)
+
+    await _seed_outcome(
+        outcomes, conversation_id, customer_name="Lucky", customer_phone="123456789"
+    )
+    updated = await service.sync_ticket_from_outcome(_ORG_ID, conversation_id)
+
+    assert updated.customer_name == "Lucky"
+    assert updated.customer_phone == "123456789"
+
+
+@pytest.mark.asyncio
+async def test_backfill_never_overwrites_a_value_already_on_the_ticket():
+    """An operator correction, or an earlier better transcription, must win
+    over whatever the model reports on a later turn."""
+    service, _, _, outcomes = _make_service()
+    conversation_id = uuid.uuid4()
+    await _seed_outcome(
+        outcomes,
+        conversation_id,
+        customer_name="Jane Doe",
+        customer_phone="+15551234567",
+        customer_address="123 Main St",
+    )
+    created = await service.sync_ticket_from_outcome(_ORG_ID, conversation_id)
+
+    # Later turn reports different (and partially lost) details.
+    await _seed_outcome(
+        outcomes,
+        conversation_id,
+        customer_name="Jane",
+        customer_phone=None,
+        customer_address="somewhere else",
+    )
+    updated = await service.sync_ticket_from_outcome(_ORG_ID, conversation_id)
+
+    assert updated.customer_name == "Jane Doe"
+    assert updated.customer_phone == "+15551234567"
+    assert updated.customer_address == "123 Main St"
+    assert updated.id == created.id
+
+
+@pytest.mark.asyncio
+async def test_backfill_leaves_dispatch_state_untouched():
+    """The whole reason the idempotency guard exists: real dispatch
+    progress must survive a later AI turn."""
+    service, tickets, technicians, outcomes = _make_service()
+    conversation_id = uuid.uuid4()
+    await _seed_outcome(outcomes, conversation_id)
+    ticket = await service.sync_ticket_from_outcome(_ORG_ID, conversation_id)
+
+    tech = _technician_user()
+    await technicians.create(organization_id=_ORG_ID, user_id=tech.id, phone_number="+15005550006")
+    assigned = await service.assign_ticket(_ORG_ID, ticket.id, tech.id)
+    en_route = await service.update_ticket_status(
+        _ORG_ID, ticket.id, TicketStatus.EN_ROUTE, acting_user=_owner_user()
+    )
+    assert en_route.status is TicketStatus.EN_ROUTE
+
+    await _seed_outcome(
+        outcomes, conversation_id, customer_name="Lucky", customer_phone="123456789"
+    )
+    after = await service.sync_ticket_from_outcome(_ORG_ID, conversation_id)
+
+    # Contact details filled in...
+    assert after.customer_name == "Lucky"
+    assert after.customer_phone == "123456789"
+    # ...while every operational field is exactly as dispatch left it.
+    assert after.status is TicketStatus.EN_ROUTE
+    assert after.assigned_technician_user_id == tech.id
+    assert after.assigned_at == assigned.assigned_at
+    assert after.closed_at is None
+    assert after.actual_value is None
+    assert after.summary == ticket.summary
+
+
+@pytest.mark.asyncio
+async def test_backfill_is_a_noop_when_nothing_is_missing():
+    service, tickets, _, outcomes = _make_service()
+    conversation_id = uuid.uuid4()
+    await _seed_emergency_outcome(outcomes, conversation_id)
+    created = await service.sync_ticket_from_outcome(_ORG_ID, conversation_id)
+
+    unchanged = await service.sync_ticket_from_outcome(_ORG_ID, conversation_id)
+
+    assert unchanged == created
+    assert len(await tickets.list_for_organization(_ORG_ID, limit=10, offset=0)) == 1
+
+
+@pytest.mark.asyncio
+async def test_backfill_cannot_reach_another_organizations_ticket():
+    service, tickets, _, outcomes = _make_service()
+    other_org = uuid.uuid4()
+    conversation_id = uuid.uuid4()
+    await _seed_outcome(outcomes, conversation_id)
+    ticket = await service.sync_ticket_from_outcome(_ORG_ID, conversation_id)
+
+    await _seed_outcome(
+        outcomes, conversation_id, customer_name="Lucky", customer_phone="123456789"
+    )
+
+    with pytest.raises(EntityNotFoundError):
+        await service.sync_ticket_from_outcome(other_org, conversation_id)
+
+    still_blank = await tickets.get_by_id(_ORG_ID, ticket.id)
+    assert still_blank.customer_name is None
+    assert still_blank.customer_phone is None
+
+
 # --- status transitions ---
 
 

@@ -19,7 +19,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from app.domain.entities.conversation_outcome import CallClassification, RecommendedAction
+from app.domain.entities.conversation_outcome import (
+    CallClassification,
+    ConversationOutcome,
+    RecommendedAction,
+)
 from app.domain.entities.emergency_ticket import EmergencyTicket, TicketStatus
 from app.domain.entities.rbac import DEFAULT_ROLES, TECHNICIAN_ROLE_NAME, Permissions
 from app.domain.entities.technician_profile import TechnicianProfile
@@ -49,6 +53,15 @@ _ALLOWED_TRANSITIONS: dict[TicketStatus, frozenset[TicketStatus]] = {
     TicketStatus.CANCELED: frozenset(),
 }
 _CLOSED_STATUSES = frozenset({TicketStatus.RESOLVED, TicketStatus.CANCELED})
+
+
+def _is_blank(value: str | None) -> bool:
+    """Treats `None`, `""`, and whitespace-only alike. The AI can emit an
+    empty string for a detail it hasn't heard yet, which is the same thing
+    as not knowing it — the second live web call produced exactly that,
+    leaving a ticket whose contact columns were empty strings rather than
+    NULL."""
+    return value is None or not value.strip()
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,10 +111,13 @@ class DispatchService:
 
         existing = await self._tickets.get_by_conversation_id(conversation_id)
         if existing is not None:
-            # Already ticketed on an earlier turn — later turns of the same
-            # conversation must not re-copy (possibly stale) AI fields onto
-            # a ticket that may already have real dispatch progress on it.
-            return existing
+            # Already ticketed on an earlier turn. Later turns must not
+            # re-copy (possibly stale) AI fields onto a ticket that may
+            # already carry real dispatch progress — but a ticket opened
+            # before the caller gave their name, number, or address would
+            # otherwise keep those blanks forever, leaving the dispatcher
+            # with nobody to call back. Fill in only what is still missing.
+            return await self._backfill_contact_details(organization_id, existing, outcome)
 
         return await self._tickets.create(
             organization_id=organization_id,
@@ -111,6 +127,33 @@ class DispatchService:
             customer_phone=outcome.customer_phone,
             customer_address=outcome.customer_address,
             summary=outcome.summary,
+        )
+
+    async def _backfill_contact_details(
+        self,
+        organization_id: uuid.UUID,
+        ticket: EmergencyTicket,
+        outcome: ConversationOutcome,
+    ) -> EmergencyTicket:
+        """Copies contact details the AI has since learned onto a ticket
+        that was opened without them.
+
+        Strictly additive: a field is written only when the ticket's own
+        value is blank AND the outcome has something to put there. An
+        operator's correction therefore always wins over the AI, and a
+        later turn that *loses* a detail (the model omitting a field it
+        reported earlier) can never blank out a value already on the
+        ticket. When nothing is missing this performs no write at all."""
+        updates = {
+            field: getattr(outcome, field)
+            for field in ("customer_name", "customer_phone", "customer_address")
+            if _is_blank(getattr(ticket, field)) and not _is_blank(getattr(outcome, field))
+        }
+        if not updates:
+            return ticket
+
+        return await self._tickets.backfill_contact_details(
+            organization_id, ticket.id, **updates
         )
 
     # --- Tickets ---

@@ -34,7 +34,7 @@ from app.domain.entities.service import Service
 from app.domain.entities.service_area import ServiceArea
 from app.domain.entities.technician_profile import TechnicianProfile
 from app.domain.entities.user import User
-from app.domain.exceptions import EntityAlreadyExistsError
+from app.domain.exceptions import EntityAlreadyExistsError, EntityNotFoundError
 from app.domain.repositories.appointment_repository import AppointmentRepository
 from app.domain.repositories.business_hours_repository import BusinessHoursRepository
 from app.domain.repositories.business_profile_repository import BusinessProfileRepository
@@ -396,6 +396,33 @@ class FakeEmergencyTicketRepository(EmergencyTicketRepository):
     async def set_customer(self, organization_id, ticket_id, *, customer_id):
         ticket = self._tickets[ticket_id]
         updated = replace(ticket, customer_id=customer_id)
+        self._tickets[ticket_id] = updated
+        return updated
+
+    async def backfill_contact_details(
+        self,
+        organization_id,
+        ticket_id,
+        *,
+        customer_name=None,
+        customer_phone=None,
+        customer_address=None,
+    ):
+        # Mirrors the real repository: the lookup is org-scoped, so a
+        # mismatched tenant finds nothing and raises rather than writing.
+        ticket = self._tickets.get(ticket_id)
+        if ticket is None or ticket.organization_id != organization_id:
+            raise EntityNotFoundError("EmergencyTicket", str(ticket_id))
+        updates = {
+            field: value
+            for field, value in (
+                ("customer_name", customer_name),
+                ("customer_phone", customer_phone),
+                ("customer_address", customer_address),
+            )
+            if value is not None
+        }
+        updated = replace(ticket, **updates)
         self._tickets[ticket_id] = updated
         return updated
 

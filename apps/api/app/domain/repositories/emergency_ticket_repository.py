@@ -85,6 +85,33 @@ class EmergencyTicketRepository(ABC):
         ...
 
     @abstractmethod
+    async def backfill_contact_details(
+        self,
+        organization_id: uuid.UUID,
+        ticket_id: uuid.UUID,
+        *,
+        customer_name: str | None = None,
+        customer_phone: str | None = None,
+        customer_address: str | None = None,
+    ) -> EmergencyTicket:
+        """Fills in caller contact details learned *after* the ticket was
+        created. A ticket is opened on the first turn the AI classifies an
+        emergency, which is typically before the caller has given their
+        name, number, or address — leaving a dispatcher with a ticket they
+        cannot act on.
+
+        Deliberately narrow: only the three contact columns are writable
+        here, so no dispatch state (status, assignment, `closed_at`,
+        `actual_value`, `customer_id`) can be disturbed. Each argument is
+        applied only when not `None`, matching `update_status`'s
+        convention; deciding *which* fields are safe to fill is
+        `DispatchService`'s job, not this layer's.
+
+        `organization_id` scopes the lookup, so a mismatched tenant finds
+        nothing and raises `EntityNotFoundError` rather than writing."""
+        ...
+
+    @abstractmethod
     async def list_by_customer_id(
         self, organization_id: uuid.UUID, customer_id: uuid.UUID
     ) -> list[EmergencyTicket]: ...

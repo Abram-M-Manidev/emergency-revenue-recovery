@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.entities.analytics import DailyRevenue
 from app.domain.entities.emergency_ticket import EmergencyTicket, TicketStatus
+from app.domain.exceptions import EntityNotFoundError
 from app.domain.repositories.emergency_ticket_repository import EmergencyTicketRepository
 from app.infrastructure.database.models.emergency_ticket import EmergencyTicketModel
 
@@ -170,6 +171,40 @@ class SqlAlchemyEmergencyTicketRepository(EmergencyTicketRepository):
         )
         model = result.scalar_one()
         model.customer_id = customer_id
+        await self._session.flush()
+        await self._session.refresh(model)
+        return _to_entity(model)
+
+    async def backfill_contact_details(
+        self,
+        organization_id: uuid.UUID,
+        ticket_id: uuid.UUID,
+        *,
+        customer_name: str | None = None,
+        customer_phone: str | None = None,
+        customer_address: str | None = None,
+    ) -> EmergencyTicket:
+        result = await self._session.execute(
+            select(EmergencyTicketModel).where(
+                EmergencyTicketModel.id == ticket_id,
+                EmergencyTicketModel.organization_id == organization_id,
+            )
+        )
+        model = result.scalar_one_or_none()
+        if model is None:
+            # Cross-tenant id (or a deleted ticket): surfaced as a domain
+            # error rather than a raw NoResultFound, so the API layer's
+            # existing `except DomainError` around the sync calls logs and
+            # continues instead of failing a live call turn.
+            raise EntityNotFoundError("EmergencyTicket", str(ticket_id))
+
+        if customer_name is not None:
+            model.customer_name = customer_name
+        if customer_phone is not None:
+            model.customer_phone = customer_phone
+        if customer_address is not None:
+            model.customer_address = customer_address
+
         await self._session.flush()
         await self._session.refresh(model)
         return _to_entity(model)
