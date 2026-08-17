@@ -33,6 +33,7 @@ from app.domain.entities.conversation_message import ConversationMessage, Messag
 from app.domain.entities.conversation_outcome import ConversationOutcome
 from app.domain.entities.emergency_keyword import EmergencyKeyword
 from app.domain.entities.faq_entry import FAQEntry
+from app.domain.entities.known_caller import KnownCaller
 from app.domain.entities.service import Service
 from app.domain.entities.service_area import ServiceArea
 from app.domain.exceptions import (
@@ -43,6 +44,7 @@ from app.domain.exceptions import (
 )
 from app.domain.repositories.business_hours_repository import BusinessHoursRepository
 from app.domain.repositories.business_profile_repository import BusinessProfileRepository
+from app.domain.repositories.caller_identity_repository import CallerIdentityRepository
 from app.domain.repositories.conversation_outcome_repository import ConversationOutcomeRepository
 from app.domain.repositories.conversation_repository import ConversationRepository
 from app.domain.repositories.emergency_keyword_repository import EmergencyKeywordRepository
@@ -108,6 +110,10 @@ class AIBrainService:
         faq_repository: FAQRepository,
         emergency_keyword_repository: EmergencyKeywordRepository,
         settings: Settings,
+        # Optional so the text/simulation path, and every existing
+        # construction site, are unaffected: without it P5 grounding is
+        # simply never attempted.
+        caller_identity_repository: CallerIdentityRepository | None = None,
     ) -> None:
         self._conversations = conversation_repository
         self._outcomes = conversation_outcome_repository
@@ -119,6 +125,7 @@ class AIBrainService:
         self._faqs = faq_repository
         self._emergency_keywords = emergency_keyword_repository
         self._settings = settings
+        self._caller_identities = caller_identity_repository
 
     async def start_conversation(
         self,
@@ -247,6 +254,7 @@ class AIBrainService:
         keyword_hint = any(
             keyword.phrase.lower() in customer_message.lower() for keyword in emergency_keywords
         )
+        known_caller = await self._resolve_known_caller(conversation)
         system_prompt = build_system_prompt(
             profile=profile,
             weekly_hours=weekly_hours,
@@ -257,6 +265,7 @@ class AIBrainService:
             emergency_keywords=emergency_keywords,
             today=date.today(),
             emergency_keyword_hint=keyword_hint,
+            known_caller=known_caller,
         )
 
         provider_history = tuple(
@@ -273,6 +282,47 @@ class AIBrainService:
             profile=_CHANNEL_PROFILES.get(conversation.channel, AIModelProfile.QUALITY),
         )
         return conversation, request, services
+
+    async def _resolve_known_caller(self, conversation: Conversation) -> KnownCaller | None:
+        """Known-caller grounding (P5). Strictly read-only and strictly
+        best-effort.
+
+        Returns None — leaving the prompt byte-identical to the pre-P5 one
+        — for every case except a caller ID that resolves to exactly one
+        customer: no repository wired, no caller ID (the whole text path),
+        a blank or malformed number, no association, or an ambiguous one.
+
+        Ambiguity is a deliberate refusal, not a gap. A shared household or
+        office line maps to several customers, and there is no honest way
+        to pick between them: the caller is whoever picked up the phone.
+        Guessing would greet the wrong person by name, so nothing is
+        grounded and the ordinary flow collects the details instead.
+
+        A repository failure must never cost the caller their emergency, so
+        it is swallowed after logging: classification, ticket creation, C1
+        persistence, and `endCall` all continue exactly as they would for
+        an unrecognised caller."""
+        if self._caller_identities is None or not conversation.caller_phone_number:
+            return None
+
+        try:
+            customers = await self._caller_identities.find_customers_by_caller_number(
+                conversation.organization_id, conversation.caller_phone_number
+            )
+        except Exception:
+            # Deliberately broad: any storage-layer failure degrades to an
+            # unknown caller rather than failing a live emergency turn.
+            logger.warning("known_caller_lookup_failed", exc_info=True)
+            return None
+
+        if len(customers) != 1:
+            # No PII in either branch — a count, never a name.
+            logger.info("known_caller_not_grounded", matches=len(customers))
+            return None
+
+        customer = customers[0]
+        logger.info("known_caller_grounded", has_address_on_file=bool(customer.address))
+        return KnownCaller(name=customer.full_name, address=customer.address)
 
     async def _persist_turn(
         self,

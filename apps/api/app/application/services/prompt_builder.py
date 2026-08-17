@@ -16,6 +16,7 @@ from app.domain.entities.business_hours import HoursException, WeeklyHours
 from app.domain.entities.business_profile import BusinessProfile
 from app.domain.entities.emergency_keyword import EmergencyKeyword
 from app.domain.entities.faq_entry import FAQEntry
+from app.domain.entities.known_caller import KnownCaller
 from app.domain.entities.service import Service
 from app.domain.entities.service_area import ServiceArea
 
@@ -40,6 +41,54 @@ are not sure and offer to have a human follow up.
 """
 
 
+def _known_caller_section(known_caller: KnownCaller | None) -> str | None:
+    """The P5 grounding section, or None when the prompt must stay exactly
+    as it was before P5.
+
+    Caller ID is a lookup hint, not authentication — it is trivially
+    spoofable — so every line here is written to stop the model treating a
+    match as proof of identity, and to stop it reading stored details
+    aloud. In particular the address is never placed in the prompt: the
+    model is told only that one exists, so the worst a spoofed caller ID
+    can obtain is the knowledge that this business has *an* address on
+    file, which they already implied by calling."""
+    if known_caller is None or known_caller.is_empty:
+        return None
+
+    lines = [
+        "Caller records (internal context — NOT proof of identity):",
+        "- This call arrived from a phone number our records associate "
+        "with a previous customer. A phone number can be spoofed or "
+        "shared, so treat everything below as what our records indicate, "
+        "never as established fact about who is speaking.",
+    ]
+    if known_caller.has_name:
+        lines.append(f'- Our records for this number show the name: "{known_caller.name}".')
+    if known_caller.address_on_file:
+        lines.append(
+            "- We have a service address on file for this number. You are "
+            "NOT told what it is and must NOT guess or state it. If the "
+            "address matters for this call, ask the caller to confirm "
+            "whether the address we already have is still the right one "
+            "for this visit (for example: \"I have an address on file — is "
+            "that still the right service address?\"). If they say it has "
+            "changed, or give a different one, ask for the new address."
+        )
+    lines.extend(
+        [
+            "- Anything the caller says in this conversation always takes "
+            "precedence over the records above. Never argue with them "
+            "about their own details.",
+            "- Do not read these records back unprompted, and do not "
+            "mention that a lookup happened. Use them only to avoid asking "
+            "for something we already have.",
+            "- Ask only for details missing from both these records and "
+            "this conversation.",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def build_system_prompt(
     *,
     profile: BusinessProfile | None,
@@ -51,6 +100,7 @@ def build_system_prompt(
     emergency_keywords: list[EmergencyKeyword],
     today: date,
     emergency_keyword_hint: bool,
+    known_caller: KnownCaller | None = None,
 ) -> str:
     sections: list[str] = []
 
@@ -121,6 +171,10 @@ def build_system_prompt(
             "with the actual situation described before classifying as an "
             "emergency."
         )
+
+    known_caller_section = _known_caller_section(known_caller)
+    if known_caller_section:
+        sections.append(known_caller_section)
 
     sections.append(_RESPONSE_CONTRACT.strip())
 

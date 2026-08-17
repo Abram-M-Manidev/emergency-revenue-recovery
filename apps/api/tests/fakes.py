@@ -42,6 +42,7 @@ from app.domain.locks import CallLock
 from app.domain.repositories.appointment_repository import AppointmentRepository
 from app.domain.repositories.business_hours_repository import BusinessHoursRepository
 from app.domain.repositories.business_profile_repository import BusinessProfileRepository
+from app.domain.repositories.caller_identity_repository import CallerIdentityRepository
 from app.domain.repositories.conversation_outcome_repository import ConversationOutcomeRepository
 from app.domain.repositories.conversation_repository import ConversationRepository
 from app.domain.repositories.customer_repository import CustomerRepository
@@ -1005,3 +1006,50 @@ class FakeCallLock(CallLock):
                 yield
             finally:
                 self._active -= 1
+
+
+class FakeCallerIdentityRepository(CallerIdentityRepository):
+    """In-memory caller-ID associations, org-scoped like the real one.
+
+    `associations` is exposed so a test can assert that P5 wrote *only* an
+    association and never touched a customer field, and `fail_with` lets a
+    test drive the best-effort degradation path without a real database
+    failure."""
+
+    def __init__(self, customers: FakeCustomerRepository | None = None) -> None:
+        self._customers = customers
+        # (organization_id, caller_number, customer_id) -> call count
+        self.associations: dict[tuple[uuid.UUID, str, uuid.UUID], int] = {}
+        self.fail_with: Exception | None = None
+        # Separate from `fail_with` so a test can fail the *write* while
+        # leaving the read path working, which is the P5 blocker case.
+        self.fail_associate_with: Exception | None = None
+
+    async def find_customers_by_caller_number(self, organization_id, caller_number):
+        if self.fail_with is not None:
+            raise self.fail_with
+        if not caller_number or not caller_number.strip():
+            return []
+        needle = caller_number.strip()
+        matches = [
+            customer_id
+            for (org, number, customer_id) in self.associations
+            if org == organization_id and number == needle
+        ]
+        if self._customers is None:
+            return []
+        found = []
+        for customer_id in matches:
+            customer = await self._customers.get_by_id(organization_id, customer_id)
+            if customer is not None:
+                found.append(customer)
+        return found
+
+    async def associate(self, organization_id, *, customer_id, caller_number):
+        if self.fail_associate_with is not None:
+            raise self.fail_associate_with
+        if not caller_number or not caller_number.strip():
+            return
+        key = (organization_id, caller_number.strip(), customer_id)
+        # Counts rather than overwrites, so idempotency is observable.
+        self.associations[key] = self.associations.get(key, 0) + 1

@@ -30,6 +30,7 @@ from app.infrastructure.database.repositories import (
     SqlAlchemyAppointmentRepository,
     SqlAlchemyBusinessHoursRepository,
     SqlAlchemyBusinessProfileRepository,
+    SqlAlchemyCallerIdentityRepository,
     SqlAlchemyConversationOutcomeRepository,
     SqlAlchemyConversationRepository,
     SqlAlchemyCustomerRepository,
@@ -99,6 +100,9 @@ def get_ai_brain_service(
         faq_repository=SqlAlchemyFAQRepository(db),
         emergency_keyword_repository=SqlAlchemyEmergencyKeywordRepository(db),
         settings=settings,
+        # P5: known-caller grounding. Read-only; a lookup failure degrades
+        # to an unrecognised caller rather than failing the turn.
+        caller_identity_repository=SqlAlchemyCallerIdentityRepository(db),
     )
 
 
@@ -152,6 +156,8 @@ def get_customer_service(
         conversation_outcome_repository=SqlAlchemyConversationOutcomeRepository(db),
         emergency_ticket_repository=SqlAlchemyEmergencyTicketRepository(db),
         appointment_repository=SqlAlchemyAppointmentRepository(db),
+        # P5: association capture only — C1's field rules are untouched.
+        caller_identity_repository=SqlAlchemyCallerIdentityRepository(db),
     )
 
 

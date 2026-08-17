@@ -7,6 +7,9 @@ from app.infrastructure.database.repositories.business_hours_repository_impl imp
 from app.infrastructure.database.repositories.business_profile_repository_impl import (
     SqlAlchemyBusinessProfileRepository,
 )
+from app.infrastructure.database.repositories.caller_identity_repository_impl import (
+    SqlAlchemyCallerIdentityRepository,
+)
 from app.infrastructure.database.repositories.conversation_outcome_repository_impl import (
     SqlAlchemyConversationOutcomeRepository,
 )
@@ -53,6 +56,7 @@ __all__ = [
     "SqlAlchemyBusinessProfileRepository",
     "SqlAlchemyConversationOutcomeRepository",
     "SqlAlchemyConversationRepository",
+    "SqlAlchemyCallerIdentityRepository",
     "SqlAlchemyCustomerRepository",
     "SqlAlchemyEmergencyKeywordRepository",
     "SqlAlchemyEmergencyTicketRepository",

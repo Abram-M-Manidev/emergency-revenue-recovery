@@ -25,15 +25,20 @@ from __future__ import annotations
 import uuid
 from dataclasses import dataclass
 
+import structlog
+
 from app.domain.entities.appointment import Appointment
 from app.domain.entities.conversation_outcome import ConversationOutcome
 from app.domain.entities.customer import Customer
 from app.domain.entities.emergency_ticket import EmergencyTicket
 from app.domain.exceptions import EntityAlreadyExistsError, EntityNotFoundError
 from app.domain.repositories.appointment_repository import AppointmentRepository
+from app.domain.repositories.caller_identity_repository import CallerIdentityRepository
 from app.domain.repositories.conversation_outcome_repository import ConversationOutcomeRepository
 from app.domain.repositories.customer_repository import CustomerRepository
 from app.domain.repositories.emergency_ticket_repository import EmergencyTicketRepository
+
+logger = structlog.get_logger("app.customers")
 
 
 def _is_blank(value: str | None) -> bool:
@@ -68,16 +73,24 @@ class CustomerService:
         conversation_outcome_repository: ConversationOutcomeRepository,
         emergency_ticket_repository: EmergencyTicketRepository,
         appointment_repository: AppointmentRepository,
+        # Optional: without it, P5 association capture is skipped and
+        # C1 behaves exactly as before.
+        caller_identity_repository: CallerIdentityRepository | None = None,
     ) -> None:
         self._customers = customer_repository
         self._outcomes = conversation_outcome_repository
         self._tickets = emergency_ticket_repository
         self._appointments = appointment_repository
+        self._caller_identities = caller_identity_repository
 
     # --- Automatic customer sync (the AI Brain -> Customers seam) ---
 
     async def sync_customer_from_outcome(
-        self, organization_id: uuid.UUID, conversation_id: uuid.UUID
+        self,
+        organization_id: uuid.UUID,
+        conversation_id: uuid.UUID,
+        *,
+        caller_number: str | None = None,
     ) -> Customer | None:
         outcome = await self._outcomes.get_by_conversation_id(conversation_id)
         if outcome is None or outcome.customer_phone is None:
@@ -110,7 +123,54 @@ class CustomerService:
             )
 
         await self._link_existing_activity(organization_id, conversation_id, customer.id)
+        await self._associate_caller_number(organization_id, customer.id, caller_number)
         return customer
+
+    async def _associate_caller_number(
+        self, organization_id: uuid.UUID, customer_id: uuid.UUID, caller_number: str | None
+    ) -> None:
+        """Records that this telephony line has been used by this customer
+        (P5), so a later call from the same number can be recognised.
+
+        Strictly additive bookkeeping, and strictly separate from C1: it
+        writes only the association row and never touches `phone_number`,
+        `full_name`, `address`, `email`, or `notes`. In particular it does
+        NOT make the caller ID a second deduplication key — customers are
+        still matched solely by the callback number the caller stated.
+
+        Silent when there is no caller ID (the whole text path) or no
+        repository wired. Idempotent, because it runs on every turn of a
+        call, not once.
+
+        Best-effort, mirroring `AIBrainService._resolve_known_caller`. This
+        is the *last* statement of the outcome sync, after C1 and after the
+        ticket/appointment links have already succeeded, so an exception
+        escaping here would turn a fully successful turn into a broken one:
+        `_run_outcome_syncs` only catches `DomainError`, so a storage error
+        would propagate out of the streaming generator and the turn would
+        never emit `[DONE]` or the `endCall` tool call — on a live
+        emergency call, a hang-up that never happens and a transaction that
+        may take the new ticket down with it. Recognising a repeat caller
+        is a convenience; none of that is worth losing for it.
+
+        `Exception`, never `BaseException`: `GeneratorExit` and
+        `CancelledError` must still propagate so P1's lock and the request
+        transaction unwind on a disconnect exactly as H3 established."""
+        if self._caller_identities is None or not caller_number:
+            return
+        try:
+            await self._caller_identities.associate(
+                organization_id, customer_id=customer_id, caller_number=caller_number
+            )
+        except Exception:
+            # `caller_number` is deliberately absent from the log — it is a
+            # phone number. The internal ids are enough to reconcile.
+            logger.warning(
+                "caller_identity_association_failed",
+                organization_id=str(organization_id),
+                customer_id=str(customer_id),
+                exc_info=True,
+            )
 
     async def _backfill_contact_details(
         self, organization_id: uuid.UUID, customer: Customer, outcome: ConversationOutcome

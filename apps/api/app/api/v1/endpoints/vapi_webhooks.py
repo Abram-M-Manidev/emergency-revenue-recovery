@@ -177,8 +177,14 @@ async def vapi_chat_completions(
         # Runs last, after dispatch/appointment sync, so it can link
         # whichever ticket/appointment those two calls just created — see
         # `CustomerService.sync_customer_from_outcome`'s docstring.
+        #
+        # `caller_number` (P5) records which telephony line this customer
+        # called from, so a later call is recognised. Association
+        # bookkeeping only — C1's field-level rules are untouched.
         await customer_service.sync_customer_from_outcome(
-            result.organization_id, result.conversation_id
+            result.organization_id,
+            result.conversation_id,
+            caller_number=payload.call.customer.number if payload.call.customer else None,
         )
     except DomainError as exc:
         # Same reasoning as the dispatch/appointment syncs above.
@@ -344,6 +350,7 @@ async def _streamed_completion(
     await _run_outcome_syncs(
         result=result,
         vapi_call_id=payload.call.id,
+        caller_number=payload.call.customer.number if payload.call.customer else None,
         dispatch_service=dispatch_service,
         appointment_service=appointment_service,
         customer_service=customer_service,
@@ -367,6 +374,7 @@ async def _run_outcome_syncs(
     *,
     result: ChatCompletionResult,
     vapi_call_id: str,
+    caller_number: str | None,
     dispatch_service: DispatchService,
     appointment_service: AppointmentService,
     customer_service: CustomerService,
@@ -399,9 +407,9 @@ async def _run_outcome_syncs(
 
     try:
         # Last, so it can link whichever ticket/appointment the two calls
-        # above just created.
+        # above just created. `caller_number` is P5 association capture.
         await customer_service.sync_customer_from_outcome(
-            result.organization_id, result.conversation_id
+            result.organization_id, result.conversation_id, caller_number=caller_number
         )
     except DomainError as exc:
         logger.warning(
