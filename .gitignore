@@ -30,3 +30,18 @@ Thumbs.db
 
 # --- Logs ---
 *.log
+
+# --- Accidental nested clone (do not delete, do not commit) ---
+# `Emergency revenue recovery milestone/` is a second, stale clone of THIS
+# repository that ended up nested inside the working copy. Verified on
+# 2026-09-10: its HEAD (11bf4e0, "Milestone 7 - CRM Integrations complete")
+# is an ancestor of main, its working tree is clean, and every commit it
+# holds is already in this repository's history — so it contains no unique
+# work and nothing is lost by ignoring it.
+#
+# It is ignored rather than deleted because deleting ~773MB of someone's
+# working copy is not a decision a tooling change should make silently.
+# Ignoring it is what stops `git add -A` from staging it as a gitlink, which
+# would produce a commit referencing a submodule that does not exist for
+# anyone else who clones this repo.
+/Emergency revenue recovery milestone/
