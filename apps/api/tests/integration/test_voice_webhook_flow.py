@@ -653,3 +653,178 @@ async def test_streaming_second_turn_continues_the_same_conversation(
         f"/api/v1/ai/conversations/{conversation_id}", headers=_auth_headers(token)
     )
     assert len(detail.json()["messages"]) == 4
+
+
+# --- The per-tenant kill switch, over the real webhook -----------------------
+#
+# `test_voice_kill_switch.py` proves the rule at the service. These prove the
+# transport: that a disabled tenant's caller actually hears a truthful
+# sentence and the call ends, on BOTH the streaming and non-streaming paths,
+# and that a disabled tenant leaves no conversation behind.
+
+
+async def _set_voice_assistant_enabled(organization_id: uuid.UUID, *, enabled: bool) -> None:
+    async with AsyncSessionLocal() as session:
+        await session.execute(
+            text(
+                "UPDATE organizations SET voice_assistant_enabled = :enabled "
+                "WHERE id = :oid"
+            ),
+            {"enabled": enabled, "oid": organization_id},
+        )
+        await session.commit()
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_disabled_tenant_hears_a_truthful_sentence_and_the_call_ends(
+    client: AsyncClient, fake_ai_provider: FakeAIProvider
+):
+    """Nothing is broken, so the caller must not be told there is a fault —
+    that would be false and would invite them to redial into the same
+    silence. They are pointed at a human and the call ends."""
+    token, org_id = await _register(
+        client, "Voice Kill Switch A", "owner-ks-a@example.com"
+    )
+    await _seed_voice_line(org_id, assistant_id="asst_ks_json")
+    await _set_voice_assistant_enabled(org_id, enabled=False)
+
+    response = await client.post(
+        "/api/v1/voice/vapi/chat/completions",
+        json=_chat_completion_payload(
+            call_id="call_ks_json",
+            assistant_id="asst_ks_json",
+            messages=[{"role": "user", "content": "My furnace is out."}],
+        ),
+        headers=_vapi_headers(),
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    spoken = body["choices"][0]["message"]["content"]
+    assert "automated assistant is unavailable" in spoken
+    # Not the generic failure message — nothing failed.
+    assert "trouble connecting" not in spoken
+    # The call ends rather than leaving the caller waiting on an assistant
+    # that will not answer.
+    assert body["choices"][0]["finish_reason"] == "tool_calls"
+
+    # The model was never reached, so a disabled tenant accrues no LLM spend.
+    assert fake_ai_provider.requests == []
+
+    # And no conversation row was created.
+    listing = await client.get(
+        "/api/v1/ai/conversations", headers=_auth_headers(token)
+    )
+    assert listing.status_code == 200
+    assert listing.json() == []
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_disabled_tenant_is_also_refused_on_the_streaming_transport(
+    client: AsyncClient, fake_ai_provider: FakeAIProvider
+):
+    """The two transports share `_resolve_voice_line` precisely so this
+    cannot diverge — asserted rather than assumed, because a control
+    honoured on one path and not the other reads as working until the call
+    that matters."""
+    token, org_id = await _register(
+        client, "Voice Kill Switch B", "owner-ks-b@example.com"
+    )
+    await _seed_voice_line(org_id, assistant_id="asst_ks_stream")
+    await _set_voice_assistant_enabled(org_id, enabled=False)
+
+    payload = _chat_completion_payload(
+        call_id="call_ks_stream",
+        assistant_id="asst_ks_stream",
+        messages=[{"role": "user", "content": "My furnace is out."}],
+    )
+    payload["stream"] = True
+
+    response = await client.post(
+        "/api/v1/voice/vapi/chat/completions", json=payload, headers=_vapi_headers()
+    )
+
+    assert response.status_code == 200, response.text
+    assert "automated assistant is unavailable" in response.text
+    assert "trouble connecting" not in response.text
+    # endCall is emitted, so Vapi hangs up rather than waiting.
+    assert "endCall" in response.text
+    assert "[DONE]" in response.text
+    assert fake_ai_provider.requests == []
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_re_enabling_restores_normal_answering(
+    client: AsyncClient, fake_ai_provider: FakeAIProvider
+):
+    """The switch is read per call and cached nowhere, so flipping it back
+    takes effect immediately rather than after a restart."""
+    token, org_id = await _register(
+        client, "Voice Kill Switch C", "owner-ks-c@example.com"
+    )
+    await _seed_voice_line(org_id, assistant_id="asst_ks_cycle")
+
+    await _set_voice_assistant_enabled(org_id, enabled=False)
+    disabled = await client.post(
+        "/api/v1/voice/vapi/chat/completions",
+        json=_chat_completion_payload(
+            call_id="call_ks_cycle_1",
+            assistant_id="asst_ks_cycle",
+            messages=[{"role": "user", "content": "Hello?"}],
+        ),
+        headers=_vapi_headers(),
+    )
+    assert "automated assistant is unavailable" in disabled.text
+
+    await _set_voice_assistant_enabled(org_id, enabled=True)
+    enabled = await client.post(
+        "/api/v1/voice/vapi/chat/completions",
+        json=_chat_completion_payload(
+            call_id="call_ks_cycle_2",
+            assistant_id="asst_ks_cycle",
+            messages=[{"role": "user", "content": "Hello?"}],
+        ),
+        headers=_vapi_headers(),
+    )
+    assert enabled.status_code == 200
+    assert "automated assistant is unavailable" not in enabled.text
+    assert fake_ai_provider.requests, "the model should have been reached once re-enabled"
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_disabling_one_tenant_leaves_another_answering_over_the_webhook(
+    client: AsyncClient, fake_ai_provider: FakeAIProvider
+):
+    """Two tenants, one deployment, one webhook route. The switch must be
+    per-tenant in the transport as well as in the service."""
+    _, disabled_org = await _register(
+        client, "Voice Kill Switch D", "owner-ks-d@example.com"
+    )
+    _, live_org = await _register(
+        client, "Voice Kill Switch E", "owner-ks-e@example.com"
+    )
+    await _seed_voice_line(disabled_org, assistant_id="asst_ks_off")
+    await _seed_voice_line(live_org, assistant_id="asst_ks_on")
+    await _set_voice_assistant_enabled(disabled_org, enabled=False)
+
+    off = await client.post(
+        "/api/v1/voice/vapi/chat/completions",
+        json=_chat_completion_payload(
+            call_id="call_ks_off",
+            assistant_id="asst_ks_off",
+            messages=[{"role": "user", "content": "Hello?"}],
+        ),
+        headers=_vapi_headers(),
+    )
+    on = await client.post(
+        "/api/v1/voice/vapi/chat/completions",
+        json=_chat_completion_payload(
+            call_id="call_ks_on",
+            assistant_id="asst_ks_on",
+            messages=[{"role": "user", "content": "Hello?"}],
+        ),
+        headers=_vapi_headers(),
+    )
+
+    assert "automated assistant is unavailable" in off.text
+    assert "automated assistant is unavailable" not in on.text
