@@ -1,0 +1,73 @@
+# TLS termination and routing for the controlled pilot.
+#
+# `ERRS_DOMAIN` and `ERRS_TLS_EMAIL` come from the environment (see
+# docker-compose.prod.yml). Caddy obtains a Let's Encrypt certificate for
+# that name on first boot and renews it automatically — there is no cron job
+# to forget, which for a single-operator pilot matters more than nginx's
+# extra tuning surface.
+#
+# Prerequisite that cannot be automated here: `ERRS_DOMAIN` must already
+# resolve to this host's public IP, and ports 80 and 443 must be reachable
+# from the internet. Let's Encrypt's HTTP-01 challenge proves control of the
+# name by fetching a token over port 80, so a firewall that blocks it will
+# fail issuance with a confusing "could not get certificate" loop.
+{
+	email {$ERRS_TLS_EMAIL}
+	# Staging endpoint is commented out rather than absent, because the
+	# first thing to do when issuance fails is switch to it: Let's Encrypt
+	# rate-limits failed production attempts (5 per account per hostname per
+	# hour), and burning that budget while debugging DNS turns a five-minute
+	# problem into an hour of waiting.
+	# acme_ca https://acme-staging-v02.api.letsencrypt.org/directory
+}
+
+{$ERRS_DOMAIN} {
+	encode zstd gzip
+
+	# HSTS. Deliberately set here and not in the app: it is an assertion
+	# about the deployment's TLS, and `next.config.mjs` explicitly leaves it
+	# out for that reason. Not preloaded — preload is effectively
+	# irreversible for the domain, which is the wrong commitment to make
+	# during a pilot.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+
+	# The API, including the Vapi webhook path. Ordered before the frontend
+	# catch-all because Caddy matches the most specific route.
+	#
+	# /health and /docs are under /api/v1 already (see app/api/v1/router.py),
+	# so this one matcher covers the API surface entirely.
+	handle /api/* {
+		reverse_proxy api:8000 {
+			# X-Forwarded-Proto and X-Forwarded-For are NOT set explicitly
+			# here: Caddy's reverse_proxy sets both by default, and stating
+			# them again makes `caddy validate` warn. They matter, though —
+			# the API runs uvicorn with --proxy-headers and uses them to
+			# reconstruct the original scheme and client IP. The rate
+			# limiter keys on client IP, so without a correct
+			# X-Forwarded-For every request would share Caddy's address and
+			# one caller could exhaust the limit for everyone.
+
+			# Vapi streams Custom-LLM responses as server-sent events. Any
+			# response buffering here would hold the first token until the
+			# turn finished, which the caller hears as several seconds of
+			# silence before the assistant speaks at all.
+			flush_interval -1
+
+			# A live voice turn can legitimately take tens of seconds
+			# (model latency plus the tool loop). The default would cut a
+			# slow-but-working turn off mid-sentence.
+			transport http {
+				response_header_timeout 120s
+				read_timeout 120s
+			}
+		}
+	}
+
+	# Everything else is the dashboard.
+	handle {
+		reverse_proxy frontend:3000
+	}
+}

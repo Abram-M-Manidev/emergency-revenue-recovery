@@ -15,12 +15,28 @@ def production_settings():
     """A valid, fail-fast-validator-satisfying production configuration —
     needed to exercise the HSTS-only-in-production branch without
     tripping `Settings._validate_production_safety`."""
-    keys = ["ENVIRONMENT", "DEBUG", "JWT_SECRET_KEY", "CORS_ORIGINS"]
+    keys = [
+        "ENVIRONMENT",
+        "DEBUG",
+        "JWT_SECRET_KEY",
+        "CORS_ORIGINS",
+        # Both became production requirements when the validator was
+        # strengthened: each fails closed at runtime (an unset webhook secret
+        # rejects every Vapi call, a missing API key fails every turn) while
+        # leaving the deployment looking healthy, so production now refuses
+        # to boot without them. Set here so this fixture keeps describing a
+        # *valid* production config, and so the run does not depend on
+        # whatever the ambient environment happens to carry.
+        "VAPI_SERVER_SECRET",
+        "OPENAI_API_KEY",
+    ]
     originals = {key: os.environ.get(key) for key in keys}
     os.environ["ENVIRONMENT"] = "production"
     os.environ["DEBUG"] = "false"
     os.environ["JWT_SECRET_KEY"] = "a-real-looking-production-secret-not-the-placeholder-value"
     os.environ["CORS_ORIGINS"] = "https://example.com"
+    os.environ["VAPI_SERVER_SECRET"] = "a-real-webhook-shared-secret"
+    os.environ["OPENAI_API_KEY"] = "sk-not-a-real-key-for-tests-only"
     get_settings.cache_clear()
     try:
         yield get_settings()

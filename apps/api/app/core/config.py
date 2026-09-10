@@ -250,6 +250,43 @@ class Settings(BaseSettings):
                 "CORS_ORIGINS must be an explicit, non-wildcard list of origins "
                 "when ENVIRONMENT=production."
             )
+        # Both of the next two fail CLOSED at runtime rather than crashing,
+        # which is correct behaviour and a terrible way to find out. Without
+        # VAPI_SERVER_SECRET, `is_valid_vapi_secret` rejects every inbound
+        # webhook, so the phone line is unreachable; without OPENAI_API_KEY,
+        # every turn raises `AIProviderUnavailableError` and the caller hears
+        # the fallback sentence. In both cases the deployment looks healthy —
+        # `/health/ready` passes, the dashboard works — and the only signal
+        # is real callers being dropped. Refusing to boot moves that
+        # discovery from a customer's emergency to the deploy itself.
+        if not self.VAPI_SERVER_SECRET or not self.VAPI_SERVER_SECRET.strip():
+            raise ValueError(
+                "VAPI_SERVER_SECRET must be set when ENVIRONMENT=production. "
+                "Without it every inbound Vapi webhook is rejected and the "
+                "phone line silently answers nothing. Generate with: "
+                'python -c "import secrets; print(secrets.token_urlsafe(32))"'
+            )
+        if not self.OPENAI_API_KEY or not self.OPENAI_API_KEY.strip():
+            raise ValueError(
+                "OPENAI_API_KEY must be set when ENVIRONMENT=production. "
+                "Without it every call reaches the AI Brain and fails, and "
+                "the caller hears the fallback message instead of an answer."
+            )
+        # An http origin in production means the dashboard is served over
+        # cleartext — and it is the dashboard that holds every tenant's
+        # customer records. localhost is exempt because an operator
+        # port-forwarding to debug a live host is legitimate and common.
+        insecure_origins = [
+            origin
+            for origin in self.CORS_ORIGINS
+            if origin.startswith("http://")
+            and not origin.startswith(("http://localhost", "http://127.0.0.1"))
+        ]
+        if insecure_origins:
+            raise ValueError(
+                "CORS_ORIGINS must use https:// when ENVIRONMENT=production; "
+                f"found {len(insecure_origins)} cleartext origin(s)."
+            )
         if self.NOTIFICATION_PROVIDER == "logging":
             # The logging provider reports DELIVERED while notifying nobody.
             # In development that is a convenience; in production it would

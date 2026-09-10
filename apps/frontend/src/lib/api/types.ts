@@ -380,6 +380,12 @@ export interface Organization {
   name: string;
   slug: string;
   is_active: boolean;
+  /**
+   * The per-tenant voice kill switch. Distinct from `is_active`, which
+   * disables the whole account: this stops only the inbound phone assistant,
+   * so the dashboard stays usable while it is off.
+   */
+  voice_assistant_enabled: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -387,4 +393,26 @@ export interface Organization {
 export interface UpdateOrganizationPayload {
   name?: string;
   is_active?: boolean;
+  voice_assistant_enabled?: boolean;
+}
+
+export type NotificationChannel = "webhook";
+
+/**
+ * Deliberately carries `destination_hint` and no `destination`. A Slack or
+ * Teams incoming-webhook URL is the entire credential, and the API never
+ * returns it — so there is no field here for it to land in.
+ */
+export interface NotificationSettings {
+  channel: NotificationChannel;
+  destination_hint: string;
+  is_enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ConfigureNotificationsPayload {
+  channel: NotificationChannel;
+  destination: string;
+  is_enabled?: boolean;
 }

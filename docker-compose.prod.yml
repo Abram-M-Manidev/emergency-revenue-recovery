@@ -1,32 +1,241 @@
-name: errs
-
-# Production overlay: builds the `production` Dockerfile targets instead of
-# `development`, drops source bind-mounts (the image is the artifact), and
-# does not expose Postgres on the host.
+# Production overlay for a single-VM controlled pilot.
 #
-# Usage: docker compose -f docker-compose.yml -f docker-compose.prod.yml up --build
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
 # Requires Docker Compose v2.24+ (the `!reset` merge tag used below).
+#
+# What this adds over the development stack
+# -----------------------------------------
+#   Internet
+#     -> caddy      :80/:443  TLS termination, automatic Let's Encrypt
+#          -> frontend :3000  (everything not under /api)
+#          -> api      :8000  (/api/*, /docs, /health)
+#     -> postgres            internal only, never published to the host
+#     -> migrate             one-shot, runs to completion before api starts
+#     -> backup              nightly pg_dump into a named volume
+#
+# Why this shape, and not something bigger
+# ----------------------------------------
+# A controlled pilot serves a handful of businesses on one phone line each.
+# Kubernetes, a service mesh and an autoscaler would all be real work with
+# real failure modes and no benefit at this size. What a pilot genuinely
+# cannot do without is the list below, and each item here exists because
+# its absence would be visible to a customer:
+#
+#   - TLS on a stable domain, because Vapi will not send webhooks to an
+#     ngrok tunnel that changes every restart, and because the caller PII in
+#     those webhooks must not cross the internet in clear text.
+#   - Migrations that run exactly once, before the app serves traffic.
+#   - Health checks the orchestrator acts on, so a broken deploy stops
+#     rather than serving errors.
+#   - A database that is not reachable from the internet at all.
+#   - Backups, because a pilot's data is a real business's call history.
+#
+# Everything here is upgradeable in place: Caddy can be replaced by a load
+# balancer, `postgres` by a managed instance (change DATABASE_URL and delete
+# the service), and the `api` service scaled horizontally once a second host
+# exists.
 
 services:
-  postgres:
-    ports: !reset []
+  # --- TLS + routing -------------------------------------------------------
+  #
+  # Caddy rather than nginx + certbot: it obtains and renews Let's Encrypt
+  # certificates automatically from the `ERRS_DOMAIN` in the Caddyfile, with
+  # no cron job to forget and no renewal that silently stops working. For a
+  # pilot with one operator, "TLS that cannot lapse" is worth more than
+  # nginx's tuning surface.
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      # The public hostname Vapi and browsers reach. Caddy uses it as the
+      # certificate subject, so it must be a real DNS name pointing at this
+      # host — not an IP, and not localhost.
+      ERRS_DOMAIN: ${ERRS_DOMAIN:?ERRS_DOMAIN must be set for production TLS}
+      # Where Let's Encrypt sends expiry warnings if renewal ever fails.
+      ERRS_TLS_EMAIL: ${ERRS_TLS_EMAIL:?ERRS_TLS_EMAIL must be set for Let us Encrypt}
+    volumes:
+      - ./docker/Caddyfile:/etc/caddy/Caddyfile:ro
+      # Certificates and ACME account keys. Losing this volume means
+      # re-issuing certificates, and Let's Encrypt rate-limits that — so it
+      # is a named volume, not a bind mount into a build directory.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - api
+      - frontend
+    networks:
+      - errs-network
 
+  # --- database ------------------------------------------------------------
+  postgres:
+    # No published ports. In development Postgres is on localhost:5432 for
+    # psql and for running the API outside Docker; in production that would
+    # be the database listening on a public interface, which is how pilots
+    # get compromised. Reach it with `docker compose exec postgres psql`.
+    ports: !reset []
+    restart: unless-stopped
+    # `!override` replaces the base file's whole list rather than merging
+    # into it. Merging is the default and it silently kept the dev-only
+    # `init-test-db.sql` bind mount here, which would have had production
+    # create an `errs_test` database on first boot. A `- !reset []` list
+    # *item* does not do this — the tag has to sit on the key.
+    volumes: !override
+      - postgres_data:/var/lib/postgresql/data
+    # Keeps the container from consuming the whole host if a query goes
+    # wrong. Sized for a pilot; raise before onboarding many tenants.
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  # --- migrations ----------------------------------------------------------
+  #
+  # A one-shot service rather than part of the API's entrypoint. The API runs
+  # `uvicorn --workers 4`, and four workers all racing `alembic upgrade` on
+  # boot is a genuine way to corrupt a migration: Alembic's version table is
+  # not a lock, so two workers can both decide a revision still needs
+  # applying. Running it once, to completion, before the API starts makes
+  # that unrepresentable.
+  #
+  # `service_completed_successfully` below is what makes it a gate: if a
+  # migration fails, the API never starts, and the deploy visibly stops
+  # instead of serving traffic against a half-migrated schema.
+  migrate:
+    build:
+      context: ./apps/api
+      target: production
+    restart: "no"
+    env_file:
+      - ./apps/api/.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-errs}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-errs}
+    # Bypasses docker-entrypoint.sh's `exec "$@"` chain deliberately: that
+    # entrypoint validates Settings() and then hands off, which is what the
+    # API wants. Here the validation is equally welcome, so the entrypoint
+    # stays and only the command changes.
+    command: alembic upgrade head
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - errs-network
+
+  # --- application ---------------------------------------------------------
   api:
     build:
       target: production
+    restart: unless-stopped
     volumes: !reset []
-    # 4 workers, each with its own DB connection pool
-    # (DATABASE_POOL_SIZE + DATABASE_MAX_OVERFLOW) — that total x 4 must
-    # stay under Postgres's max_connections (100 by default on
-    # postgres:16-alpine, unmodified by this compose file). The repo's
-    # dev-oriented .env.example defaults (10+20) would allow up to 120,
-    # exceeding that; override them here for a real production deploy.
     environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-errs}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-errs}
+      # 4 workers, each with its own DB connection pool
+      # (DATABASE_POOL_SIZE + DATABASE_MAX_OVERFLOW) — that total x 4 must
+      # stay under Postgres's max_connections (100 by default on
+      # postgres:16-alpine, unmodified by this compose file). The repo's
+      # dev-oriented .env.example defaults (10+20) would allow up to 120,
+      # exceeding that; these keep the ceiling at 40.
       DATABASE_POOL_SIZE: ${DATABASE_POOL_SIZE:-5}
       DATABASE_MAX_OVERFLOW: ${DATABASE_MAX_OVERFLOW:-5}
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4
+    # Not published to the host: Caddy reaches it over the compose network.
+    # Publishing it would put an untrusted-facing port beside the TLS one and
+    # let anyone bypass HTTPS by hitting the IP directly.
+    ports: !reset []
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    # Readiness, not liveness: `/health/ready` runs `SELECT 1`, so an API
+    # that is up but cannot reach the database is correctly reported
+    # unhealthy — which is what a deploy needs to know. `start_period` covers
+    # interpreter and connection-pool startup without counting those seconds
+    # as failures.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/api/v1/health/ready', timeout=5).status == 200 else 1)\""]
+      interval: 15s
+      timeout: 8s
+      retries: 4
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4 --proxy-headers --forwarded-allow-ips=*
 
   frontend:
     build:
       target: production
+    restart: unless-stopped
     volumes: !reset []
+    ports: !reset []
+    environment:
+      # Same-origin: the browser reaches the API through Caddy on the public
+      # domain, so there is no cross-origin request to configure CORS for and
+      # no second hostname to certificate. NEXT_PUBLIC_* is inlined at build
+      # time, which is why this must be set for the image build and not only
+      # at runtime.
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-https://${ERRS_DOMAIN}/api/v1}
+      NODE_ENV: production
+      # Next.js standalone binds to $HOSTNAME, which Docker sets to the
+      # container id — so the server ends up listening only on the address
+      # that name resolves to, and `127.0.0.1:3000` inside the container is
+      # refused. Caddy still reaches it by service name, which is why this
+      # is easy to miss; the container healthcheck does not, and reported
+      # the frontend permanently unhealthy until this was set.
+      HOSTNAME: 0.0.0.0
+    depends_on:
+      - api
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"require('http').get('http://localhost:3000/login', r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))\""]
+      interval: 20s
+      timeout: 8s
+      retries: 4
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  # --- backups -------------------------------------------------------------
+  #
+  # Runs in the same postgres image, so `pg_dump` matches the server version
+  # exactly — a mismatched client is the most common reason a restore fails
+  # at the moment it is needed. No new image, no cron daemon: a shell loop
+  # is enough for one nightly dump and has no scheduler state to corrupt.
+  #
+  # Retention is enforced on every run rather than by a separate sweeper, so
+  # a host that was powered off for a week does not accumulate unbounded
+  # dumps the first time it comes back.
+  backup:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      PGHOST: postgres
+      PGUSER: ${POSTGRES_USER:-errs}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      PGDATABASE: ${POSTGRES_DB:-errs}
+      BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+    volumes:
+      - ./docker/backup.sh:/usr/local/bin/errs-backup.sh:ro
+      # Mounted into the same container so an operator can restore with
+      # `docker compose exec backup ...` — the tooling is where the dumps
+      # are, and where pg_restore matches the server version.
+      - ./docker/restore.sh:/usr/local/bin/errs-restore.sh:ro
+      - postgres_backups:/backups
+    entrypoint: ["/bin/sh", "/usr/local/bin/errs-backup.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - errs-network
+
+volumes:
+  caddy_data:
+  caddy_config:
+  postgres_backups:

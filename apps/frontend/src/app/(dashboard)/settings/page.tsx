@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 
+import { EmergencyNotificationsCard } from "@/components/settings/emergency-notifications-card";
+import { VoiceAssistantCard } from "@/components/settings/voice-assistant-card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -168,6 +170,14 @@ export default function SettingsPage() {
         </CardContent>
       </Card>
 
+      <VoiceAssistantCard
+        canManage={canManageOrganization}
+        organization={organization}
+        onChange={setOrganization}
+      />
+
+      <EmergencyNotificationsCard canManage={canManageOrganization} />
+
       <Card>
         <CardHeader>
           <CardTitle className="text-base">Organization</CardTitle>
@@ -204,7 +214,8 @@ export default function SettingsPage() {
                 <div>
                   <p className="font-medium">Status</p>
                   <p className="text-muted-foreground">
-                    Deactivating blocks every teammate from logging in.
+                    Deactivating blocks every teammate from logging in. To stop only the
+                    phone assistant, use Voice assistant above.
                   </p>
                 </div>
                 <div className="flex items-center gap-3">
