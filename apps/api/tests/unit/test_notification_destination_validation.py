@@ -29,13 +29,36 @@ from app.domain.notifications.settings import (
 )
 
 # --- accepted ----------------------------------------------------------------
+#
+# Every host below is under `example.com` (RFC 2606 reserved) rather than a
+# real provider's. That is not fussiness: these fixtures imitate the *shape*
+# of a webhook URL — deep path, long opaque final segment — and a fixture
+# shaped like a real provider's endpoint is indistinguishable from a leaked
+# one to an automated scanner. GitHub push protection rejected this file for
+# exactly that reason when the first entry used a real chat-tool's webhook
+# host, even though its token was literally `XXXX…` — which is also why this
+# comment describes that host instead of naming it.
+#
+# Keep new fixtures on example.com/example.invalid. The shape is what is
+# under test; the brand contributes nothing and costs a blocked push.
 
 
 @pytest.mark.parametrize(
     "destination",
     [
+        # Subdomain host, deep path, long opaque token segment — the shape a
+        # chat-tool incoming webhook has, without being one.
         "https://hooks.example.com/services/T00000000/B00000000/XXXXXXXXXXXXXXXXXXXXXXXX",
+        # A plain public host that genuinely resolves, so the accepted set
+        # covers both DNS branches: this one resolves publicly, while the
+        # example.com subdomains above do not resolve at all and are allowed
+        # through by the best-effort resolution in
+        # `validate_webhook_destination`.
         "https://example.com/webhooks/emergency",
+        # A real public API endpoint that carries no credential in the URL at
+        # all — PagerDuty's routing key travels in the body. Kept as-is
+        # because there is nothing here for a scanner to mistake for a
+        # secret.
         "https://events.pagerduty.com/v2/enqueue",
         "https://teams.example.com/webhook/abc123/IncomingWebhook/def456",
     ],
@@ -142,9 +165,12 @@ def test_an_absurdly_long_destination_is_refused():
 
 
 def test_masking_keeps_the_host_and_hides_the_secret():
-    """Slack's webhook secret lives entirely in the path, so the host is safe
-    to show and the path is not. An operator's real question is "is this the
-    right service?", which the host answers."""
+    """For every channel we support the secret lives entirely in the path, so
+    the host is safe to show and the path is not. An operator's real question
+    is "is this the right service?", which the host answers.
+
+    The fixture host is under example.com for the reason given at the top of
+    this file — the shape is what matters here, not the brand."""
     hidden = mask_destination(
         "https://hooks.example.com/services/T00000000/B00000000/SUPERSECRETTOKEN"
     )
