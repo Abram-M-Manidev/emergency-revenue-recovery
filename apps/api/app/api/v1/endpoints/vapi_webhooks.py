@@ -53,7 +53,7 @@ from app.application.services.voice_service import (
     VoiceTextDelta,
 )
 from app.domain.entities.emergency_ticket import EmergencyTicket
-from app.domain.exceptions import DomainError
+from app.domain.exceptions import DomainError, VoiceAssistantDisabledError
 from app.shared.logging.timing import elapsed_ms, now
 
 router = APIRouter(
@@ -70,6 +70,18 @@ _MODEL_NAME = "errs-ai-brain"
 _FALLBACK_MESSAGE = (
     "I'm sorry, I'm having trouble connecting to our system right now. "
     "Please try calling back in a few minutes."
+)
+
+# Spoken when a business has switched its own assistant off. Deliberately
+# different from the generic fallback above: nothing is broken, so implying a
+# fault ("trouble connecting", "try again in a few minutes") would be both
+# false and useless — it invites the caller to redial into the same silence.
+# This tells them plainly that the automated line is unavailable and sends
+# them to a human, which is the only action that helps them.
+_ASSISTANT_DISABLED_MESSAGE = (
+    "Thanks for calling. Our automated assistant is unavailable at the "
+    "moment. Please hold the line for our team, or call back during "
+    "business hours and someone will help you."
 )
 
 
@@ -138,6 +150,19 @@ async def vapi_chat_completions(
             customer_utterance=customer_utterance,
         )
     except DomainError as exc:
+        # A tenant that has switched its own assistant off. Checked before
+        # the generic handler below because it is not a failure: the caller
+        # gets a truthful sentence pointing them at a human, and the call
+        # ends rather than looping them through an assistant that will not
+        # answer.
+        if isinstance(exc, VoiceAssistantDisabledError):
+            logger.info(
+                "vapi_chat_completion_assistant_disabled",
+                vapi_call_id=payload.call.id,
+            )
+            return _completion_response(
+                _ASSISTANT_DISABLED_MESSAGE, should_end_call=True, stream=payload.stream
+            )
         # A misconfigured line (`VoiceLineNotFoundError`), a conversation
         # the AI Brain already ended (`ConversationCompletedError`), or the
         # AI provider being unavailable (`AIProviderUnavailableError`) all
@@ -334,6 +359,16 @@ async def _streamed_completion(
                     yield frames.content(event.text)
             else:
                 result = event.result
+    except VoiceAssistantDisabledError:
+        # The tenant switched its own assistant off. Same truthful sentence
+        # the non-streaming path uses, and the call ends here rather than
+        # leaving the caller waiting on an assistant that will not answer.
+        logger.info("vapi_chat_completion_stream_assistant_disabled")
+        yield frames.content(_ASSISTANT_DISABLED_MESSAGE)
+        yield frames.tool_call(_end_call_tool_call())
+        yield frames.finish("tool_calls")
+        yield frames.done()
+        return
     except DomainError as exc:
         # Same contract as the non-streaming path: every domain failure must
         # still be speakable. Only decoded reply text is ever emitted, so a

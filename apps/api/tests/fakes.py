@@ -58,6 +58,7 @@ from app.domain.notifications.emergency import (
     NotificationReceipt,
 )
 from app.domain.notifications.provider import NotificationPort
+from app.domain.notifications.settings import NotificationSettings, mask_destination
 from app.domain.repositories.appointment_repository import AppointmentRepository
 from app.domain.repositories.business_hours_repository import BusinessHoursRepository
 from app.domain.repositories.business_profile_repository import BusinessProfileRepository
@@ -1029,12 +1030,19 @@ class FakeOrganizationRepository(OrganizationRepository):
         self._organizations[organization.id] = organization
         return organization
 
-    async def update(self, organization_id, *, name=None, is_active=None):
+    async def update(
+        self, organization_id, *, name=None, is_active=None, voice_assistant_enabled=None
+    ):
         organization = self._organizations[organization_id]
         updated = replace(
             organization,
             name=name if name is not None else organization.name,
             is_active=is_active if is_active is not None else organization.is_active,
+            voice_assistant_enabled=(
+                voice_assistant_enabled
+                if voice_assistant_enabled is not None
+                else organization.voice_assistant_enabled
+            ),
         )
         self._organizations[organization_id] = updated
         return updated
@@ -1419,15 +1427,66 @@ class FakeNotificationSettingsRepository(NotificationSettingsRepository):
 
     Defaults to nothing configured — the same default the real deployment
     has — so a test that wants the assistant to be allowed to claim an alert
-    has to say so explicitly."""
+    has to say so explicitly.
+
+    `disabled` mirrors the production split between `get_destination` (which
+    filters disabled rows out, so a paused tenant cannot be claimed as
+    alerted) and `get_settings` (which does not, so an operator can still see
+    what they paused)."""
 
     def __init__(
         self, destinations: dict[uuid.UUID, tuple[NotificationChannel, str]] | None = None
     ) -> None:
         self.destinations = destinations or {}
+        self.disabled: set[uuid.UUID] = set()
+        self._timestamps: dict[uuid.UUID, datetime] = {}
 
     async def get_destination(self, organization_id):
+        if organization_id in self.disabled:
+            return None
         return self.destinations.get(organization_id)
+
+    async def get_settings(self, organization_id):
+        entry = self.destinations.get(organization_id)
+        if entry is None:
+            return None
+        channel, destination = entry
+        created = self._timestamps.setdefault(organization_id, datetime.now(timezone.utc))
+        return NotificationSettings(
+            organization_id=organization_id,
+            channel=channel,
+            destination_hint=mask_destination(destination),
+            is_enabled=organization_id not in self.disabled,
+            created_at=created,
+            updated_at=datetime.now(timezone.utc),
+        )
+
+    async def upsert_settings(self, organization_id, *, channel, destination, is_enabled):
+        self.destinations[organization_id] = (channel, destination)
+        self._timestamps.setdefault(organization_id, datetime.now(timezone.utc))
+        if is_enabled:
+            self.disabled.discard(organization_id)
+        else:
+            self.disabled.add(organization_id)
+        settings = await self.get_settings(organization_id)
+        assert settings is not None
+        return settings
+
+    async def set_enabled(self, organization_id, *, is_enabled):
+        if organization_id not in self.destinations:
+            return None
+        if is_enabled:
+            self.disabled.discard(organization_id)
+        else:
+            self.disabled.add(organization_id)
+        return await self.get_settings(organization_id)
+
+    async def delete_settings(self, organization_id):
+        existed = organization_id in self.destinations
+        self.destinations.pop(organization_id, None)
+        self.disabled.discard(organization_id)
+        self._timestamps.pop(organization_id, None)
+        return existed
 
 
 class FakeNotificationDeliveryRepository(NotificationDeliveryRepository):

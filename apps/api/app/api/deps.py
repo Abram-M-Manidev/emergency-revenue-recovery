@@ -20,6 +20,9 @@ from app.application.services.dispatch_service import DispatchService
 from app.application.services.emergency_notification_service import (
     EmergencyNotificationService,
 )
+from app.application.services.notification_settings_service import (
+    NotificationSettingsService,
+)
 from app.application.services.organization_service import OrganizationService
 from app.application.services.team_service import TeamService
 from app.application.services.voice_service import VoiceService
@@ -205,6 +208,16 @@ def get_emergency_notification_service(
     )
 
 
+def get_notification_settings_service(
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+) -> NotificationSettingsService:
+    return NotificationSettingsService(
+        settings_repository=SqlAlchemyNotificationSettingsRepository(db),
+        settings=settings,
+    )
+
+
 def get_voice_tool_executor(
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
@@ -274,6 +287,10 @@ def get_voice_service(
         # with the same transaction — and works across the four uvicorn
         # workers production runs, which an in-process lock would not.
         call_lock=PostgresAdvisoryCallLock(db),
+        # Reads the per-tenant voice kill switch. Without it the switch
+        # cannot be consulted and every call proceeds, which is the
+        # deliberate fail-open direction for this control.
+        organization_repository=SqlAlchemyOrganizationRepository(db),
     )
 
 

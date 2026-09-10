@@ -192,6 +192,28 @@ class LastOwnerError(DomainError):
         super().__init__(message)
 
 
+class VoiceAssistantDisabledError(DomainError):
+    """Raised when an inbound call reaches an organization whose voice
+    assistant has been switched off.
+
+    Deliberately distinct from `VoiceLineNotFoundError`, which means the
+    line maps to no tenant at all. Both end the call politely, but they are
+    different operational facts and the caller deserves different words: an
+    unmapped line is a misconfiguration nobody knows about, while a disabled
+    assistant is a deliberate act by that business, and the caller should be
+    pointed at a human rather than told the number does not work.
+
+    Enforced in `VoiceService`, on the shared path both the streaming and
+    non-streaming transports take, so the switch cannot be true for one and
+    false for the other."""
+
+    def __init__(
+        self,
+        message: str = "This organization's voice assistant is currently disabled.",
+    ) -> None:
+        super().__init__(message)
+
+
 class VoiceLineNotFoundError(DomainError):
     """Raised when an inbound call's assistant/phone number id doesn't map
     to any configured organization. The Vapi webhook endpoint (a voice

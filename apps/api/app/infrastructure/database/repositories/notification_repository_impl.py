@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,6 +14,7 @@ from app.domain.notifications.emergency import (
     NotificationChannel,
     NotificationDelivery,
 )
+from app.domain.notifications.settings import NotificationSettings, mask_destination
 from app.domain.repositories.notification_repository import (
     NotificationDeliveryRepository,
     NotificationSettingsRepository,
@@ -51,6 +52,77 @@ class SqlAlchemyNotificationSettingsRepository(NotificationSettingsRepository):
         if not destination or not destination.strip():
             return None
         return channel, destination
+
+    async def get_settings(self, organization_id: uuid.UUID) -> NotificationSettings | None:
+        result = await self._session.execute(
+            select(OrganizationNotificationSettingsModel).where(
+                # No `is_enabled` filter here, unlike `get_destination`: an
+                # operator must be able to see a configuration they have
+                # switched off, or "disabled" and "never set up" would look
+                # identical in the UI and they could not tell which they did.
+                OrganizationNotificationSettingsModel.organization_id == organization_id
+            )
+        )
+        model = result.scalar_one_or_none()
+        return _settings_to_entity(model) if model else None
+
+    async def upsert_settings(
+        self,
+        organization_id: uuid.UUID,
+        *,
+        channel: NotificationChannel,
+        destination: str,
+        is_enabled: bool,
+    ) -> NotificationSettings:
+        # ON CONFLICT against the unique index on organization_id, so two
+        # admins saving at once resolve to one row rather than racing into a
+        # unique violation that poisons the request's transaction.
+        statement = pg_insert(OrganizationNotificationSettingsModel).values(
+            id=uuid.uuid4(),
+            organization_id=organization_id,
+            channel=channel,
+            destination=destination,
+            is_enabled=is_enabled,
+        )
+        await self._session.execute(
+            statement.on_conflict_do_update(
+                index_elements=["organization_id"],
+                set_={
+                    "channel": statement.excluded.channel,
+                    "destination": statement.excluded.destination,
+                    "is_enabled": statement.excluded.is_enabled,
+                    "updated_at": datetime.now(timezone.utc),
+                },
+            )
+        )
+        await self._session.flush()
+        settings = await self.get_settings(organization_id)
+        assert settings is not None  # just written, in this transaction
+        return settings
+
+    async def set_enabled(
+        self, organization_id: uuid.UUID, *, is_enabled: bool
+    ) -> NotificationSettings | None:
+        result = await self._session.execute(
+            update(OrganizationNotificationSettingsModel)
+            .where(
+                OrganizationNotificationSettingsModel.organization_id == organization_id
+            )
+            .values(is_enabled=is_enabled, updated_at=datetime.now(timezone.utc))
+        )
+        await self._session.flush()
+        if not result.rowcount:
+            return None
+        return await self.get_settings(organization_id)
+
+    async def delete_settings(self, organization_id: uuid.UUID) -> bool:
+        result = await self._session.execute(
+            delete(OrganizationNotificationSettingsModel).where(
+                OrganizationNotificationSettingsModel.organization_id == organization_id
+            )
+        )
+        await self._session.flush()
+        return bool(result.rowcount)
 
 
 class SqlAlchemyNotificationDeliveryRepository(NotificationDeliveryRepository):
@@ -183,6 +255,25 @@ def _to_entity(model: EmergencyNotificationDeliveryModel) -> NotificationDeliver
         attempts=model.attempts,
         error_code=model.error_code,
         delivered_at=model.delivered_at,
+        created_at=model.created_at,
+        updated_at=model.updated_at,
+    )
+
+
+def _settings_to_entity(
+    model: OrganizationNotificationSettingsModel,
+) -> NotificationSettings:
+    """Maps to the operator-visible view.
+
+    The raw `destination` is masked here, at the single point where a stored
+    row becomes something a response can be built from — so there is no
+    version of this object anywhere that holds the credential and could be
+    serialised by accident."""
+    return NotificationSettings(
+        organization_id=model.organization_id,
+        channel=model.channel,
+        destination_hint=mask_destination(model.destination),
+        is_enabled=model.is_enabled,
         created_at=model.created_at,
         updated_at=model.updated_at,
     )

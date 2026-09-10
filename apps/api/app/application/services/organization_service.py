@@ -36,5 +36,11 @@ class OrganizationService:
         *,
         name: str | None = None,
         is_active: bool | None = None,
+        voice_assistant_enabled: bool | None = None,
     ) -> Organization:
-        return await self._organizations.update(organization_id, name=name, is_active=is_active)
+        return await self._organizations.update(
+            organization_id,
+            name=name,
+            is_active=is_active,
+            voice_assistant_enabled=voice_assistant_enabled,
+        )

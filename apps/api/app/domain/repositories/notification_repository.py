@@ -28,6 +28,7 @@ from app.domain.notifications.emergency import (
     NotificationChannel,
     NotificationDelivery,
 )
+from app.domain.notifications.settings import NotificationSettings
 
 
 class NotificationSettingsRepository(ABC):
@@ -49,6 +50,70 @@ class NotificationSettingsRepository(ABC):
         The destination is a secret for every channel we support, so it is
         returned only to the provider that needs it and never logged, never
         echoed into a tool result, and never placed in a prompt."""
+        ...
+
+    @abstractmethod
+    async def get_settings(self, organization_id: uuid.UUID) -> NotificationSettings | None:
+        """The operator-visible view: channel, enabled, and a masked hint.
+
+        Deliberately a different method from `get_destination` rather than a
+        flag on it. The two have different audiences — this one answers an
+        authenticated admin over HTTP, that one feeds the provider — and
+        keeping them apart means a response serialiser cannot accidentally
+        reach a field holding the raw credential, because the object it is
+        handed does not have one.
+
+        Unlike `get_destination`, this returns a disabled configuration
+        rather than None, so an operator can see that alerting exists but is
+        switched off."""
+        ...
+
+    @abstractmethod
+    async def upsert_settings(
+        self,
+        organization_id: uuid.UUID,
+        *,
+        channel: NotificationChannel,
+        destination: str,
+        is_enabled: bool,
+    ) -> NotificationSettings:
+        """Creates or replaces this organization's configuration.
+
+        Upsert rather than create-then-update because there is exactly one
+        row per tenant (enforced by a unique index), and making the caller
+        branch on whether it already exists would be a check-then-write race
+        for no benefit.
+
+        `destination` must already have been validated — see
+        `validate_webhook_destination`. This is storage, and storage is the
+        wrong layer to be deciding whether a URL is safe for the server to
+        call."""
+        ...
+
+    @abstractmethod
+    async def set_enabled(
+        self, organization_id: uuid.UUID, *, is_enabled: bool
+    ) -> NotificationSettings | None:
+        """Flips alerting on or off, returning the updated view, or None when
+        nothing is configured.
+
+        A dedicated method rather than a re-`upsert_settings` with the same
+        destination, because the alternative would mean reading the stored
+        credential out of the database and writing it back just to change a
+        boolean. Every place the raw destination is read is a place it can
+        leak; this keeps that set as small as it can be — one method, feeding
+        the provider."""
+        ...
+
+    @abstractmethod
+    async def delete_settings(self, organization_id: uuid.UUID) -> bool:
+        """Removes this organization's configuration entirely, returning
+        whether there was one.
+
+        Distinct from disabling it. Disabling keeps the destination so it can
+        be switched back on; deleting is what an operator does when the
+        endpoint is wrong or has been rotated, and it should leave no copy of
+        the old credential behind."""
         ...
 
 

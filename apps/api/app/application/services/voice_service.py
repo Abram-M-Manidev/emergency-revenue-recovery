@@ -30,9 +30,14 @@ from app.domain.entities.conversation import ConversationChannel, ConversationSt
 from app.domain.entities.conversation_message import ConversationMessage, MessageRole
 from app.domain.entities.voice_call import VoiceCall
 from app.domain.entities.voice_line import VoiceLine
-from app.domain.exceptions import EntityNotFoundError, VoiceLineNotFoundError
+from app.domain.exceptions import (
+    EntityNotFoundError,
+    VoiceAssistantDisabledError,
+    VoiceLineNotFoundError,
+)
 from app.domain.locks import CallLock, NullCallLock
 from app.domain.repositories.conversation_repository import ConversationRepository
+from app.domain.repositories.organization_repository import OrganizationRepository
 from app.domain.repositories.voice_call_repository import VoiceCallRepository
 from app.domain.repositories.voice_line_repository import VoiceLineRepository
 
@@ -188,6 +193,11 @@ class VoiceService:
         ai_brain_service: AIBrainService,
         call_lock: CallLock | None = None,
         supersession: TranscriptSupersession | None = None,
+        # The per-tenant voice kill switch is read from here. Optional so
+        # every pre-existing construction site keeps working; absent, the
+        # switch simply cannot be consulted and calls proceed exactly as
+        # they did before it existed.
+        organization_repository: OrganizationRepository | None = None,
     ) -> None:
         self._voice_lines = voice_line_repository
         self._voice_calls = voice_call_repository
@@ -195,6 +205,7 @@ class VoiceService:
         self._ai_brain = ai_brain_service
         self._call_lock = call_lock or NullCallLock()
         self._supersession = supersession or _SUPERSESSION
+        self._organizations = organization_repository
 
     # --- Admin-facing reads ---
 
@@ -530,6 +541,9 @@ class VoiceService:
                 phone_number_id=phone_number_id,
             )
             raise VoiceLineNotFoundError()
+
+        await self._require_voice_assistant_enabled(voice_line.organization_id)
+
         # Logged here rather than at each call site so the streaming and
         # non-streaming paths cannot report tenant resolution differently.
         # `matched_on` is what a PSTN investigation will actually need:
@@ -541,3 +555,41 @@ class VoiceService:
             matched_on="assistant_id" if assistant_id else "phone_number_id",
         )
         return voice_line
+
+    async def _require_voice_assistant_enabled(self, organization_id: uuid.UUID) -> None:
+        """The per-tenant kill switch, enforced server-side.
+
+        Placed inside `_resolve_voice_line` rather than at each transport's
+        entry point, because that is the one function both the streaming and
+        non-streaming paths already share — so the switch cannot be honoured
+        on one transport and forgotten on the other, which is exactly the
+        kind of divergence a safety control must not have.
+
+        Enforced *after* the line resolves and *before* any conversation row
+        is created, so a disabled tenant accumulates no conversations, no
+        outcomes, and no LLM spend from calls it has switched off.
+
+        Fails OPEN when no repository is wired in, and only then. That is a
+        deliberate asymmetry: this control exists to stop a misbehaving
+        assistant, not to be a second way for a deployment mistake to take a
+        business's phone line down. A wiring error therefore restores the
+        pre-switch behaviour rather than silently disabling every tenant.
+        The lookup failing is different — that is treated as unknown, and an
+        unknown switch state is not a reason to drop a live call either."""
+        if self._organizations is None:
+            return
+        try:
+            organization = await self._organizations.get_by_id(organization_id)
+        except Exception:
+            logger.warning(
+                "voice_kill_switch_lookup_failed",
+                organization_id=str(organization_id),
+                exc_info=True,
+            )
+            return
+        if organization is not None and not organization.voice_assistant_enabled:
+            logger.warning(
+                "voice_assistant_disabled_for_organization",
+                organization_id=str(organization_id),
+            )
+            raise VoiceAssistantDisabledError()

@@ -18,6 +18,7 @@ from app.domain.exceptions.base import (
     LastOwnerError,
     SlotNotOfferedError,
     SlotNotSelectedError,
+    VoiceAssistantDisabledError,
     VoiceLineNotFoundError,
 )
 
@@ -41,5 +42,6 @@ __all__ = [
     "LastOwnerError",
     "SlotNotOfferedError",
     "SlotNotSelectedError",
+    "VoiceAssistantDisabledError",
     "VoiceLineNotFoundError",
 ]

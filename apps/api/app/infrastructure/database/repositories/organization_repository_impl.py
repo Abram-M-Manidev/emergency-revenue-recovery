@@ -16,6 +16,7 @@ def _to_entity(model: OrganizationModel) -> Organization:
         name=model.name,
         slug=model.slug,
         is_active=model.is_active,
+        voice_assistant_enabled=model.voice_assistant_enabled,
         created_at=model.created_at,
         updated_at=model.updated_at,
     )
@@ -49,6 +50,7 @@ class SqlAlchemyOrganizationRepository(OrganizationRepository):
         *,
         name: str | None = None,
         is_active: bool | None = None,
+        voice_assistant_enabled: bool | None = None,
     ) -> Organization:
         result = await self._session.execute(
             select(OrganizationModel).where(OrganizationModel.id == organization_id)
@@ -58,6 +60,8 @@ class SqlAlchemyOrganizationRepository(OrganizationRepository):
             model.name = name
         if is_active is not None:
             model.is_active = is_active
+        if voice_assistant_enabled is not None:
+            model.voice_assistant_enabled = voice_assistant_enabled
         await self._session.flush()
         await self._session.refresh(model)
         return _to_entity(model)

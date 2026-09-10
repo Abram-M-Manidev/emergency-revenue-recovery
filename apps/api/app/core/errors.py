@@ -42,6 +42,7 @@ from app.domain.exceptions import (
     LastOwnerError,
     SlotNotOfferedError,
     SlotNotSelectedError,
+    VoiceAssistantDisabledError,
     VoiceLineNotFoundError,
 )
 
@@ -65,6 +66,9 @@ _DOMAIN_ERROR_STATUS: dict[type[DomainError], int] = {
     ConversationLimitExceededError: status.HTTP_409_CONFLICT,
     AIProviderUnavailableError: status.HTTP_503_SERVICE_UNAVAILABLE,
     VoiceLineNotFoundError: status.HTTP_404_NOT_FOUND,
+    # 503 rather than 403: the line is real and the caller did nothing
+    # wrong — the service is deliberately unavailable for this tenant.
+    VoiceAssistantDisabledError: status.HTTP_503_SERVICE_UNAVAILABLE,
     InvalidTicketStatusTransitionError: status.HTTP_409_CONFLICT,
     InvalidAppointmentStatusTransitionError: status.HTTP_409_CONFLICT,
     AppointmentSlotUnavailableError: status.HTTP_409_CONFLICT,

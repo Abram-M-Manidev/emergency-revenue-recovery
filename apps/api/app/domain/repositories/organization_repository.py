@@ -23,6 +23,7 @@ class OrganizationRepository(ABC):
         *,
         name: str | None = None,
         is_active: bool | None = None,
+        voice_assistant_enabled: bool | None = None,
     ) -> Organization:
         """Partial update: only fields explicitly passed are changed."""
         ...
