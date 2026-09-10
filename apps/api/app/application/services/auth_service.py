@@ -20,6 +20,7 @@ from app.domain.exceptions import (
     InactiveAccountError,
     InvalidCredentialsError,
     InvalidTokenError,
+    RegistrationDisabledError,
 )
 from app.domain.repositories.organization_repository import OrganizationRepository
 from app.domain.repositories.refresh_token_repository import RefreshTokenRepository
@@ -71,6 +72,20 @@ class AuthService:
         user_agent: str | None = None,
         ip_address: str | None = None,
     ) -> IssuedSession:
+        # Checked FIRST, before the email lookup, and the ordering is the
+        # security property rather than a style choice. Reversed, a closed
+        # deployment would still answer 409 for an address that exists and
+        # 403 for one that does not — turning a disabled endpoint into an
+        # account-existence oracle for anyone who can reach it. Refusing
+        # before looking at the address means a closed deployment says
+        # exactly one thing, whatever it is asked.
+        #
+        # Enforced here rather than in the route so the rule holds for every
+        # caller of `register`, present and future, the same way the booking
+        # and kill-switch invariants live in their services.
+        if not self._settings.FEATURE_REGISTRATION_ENABLED:
+            raise RegistrationDisabledError()
+
         if await self._users.get_by_email(email) is not None:
             raise EntityAlreadyExistsError("User", "email", email)
 

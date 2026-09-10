@@ -36,6 +36,31 @@ class InvalidCredentialsError(DomainError):
         super().__init__(message)
 
 
+class RegistrationDisabledError(DomainError):
+    """Raised when self-service registration is turned off for this
+    deployment.
+
+    Distinct from `AuthorizationError`, which means an authenticated caller
+    lacks a permission. Nobody is authenticated here — the deployment simply
+    does not accept new organizations, which is a different fact and deserves
+    a different code so an operator reading logs can tell "someone tried to
+    sign up while we were closed" from "someone tried to exceed their role".
+
+    The message is deliberately incurious about the request. It says only that
+    registration is closed and where to go instead; it must never hint at
+    whether the submitted email already exists, because on a closed
+    deployment that would turn this endpoint into an account oracle."""
+
+    def __init__(
+        self,
+        message: str = (
+            "Registration is currently disabled. Ask an administrator to "
+            "invite you to an existing organization."
+        ),
+    ) -> None:
+        super().__init__(message)
+
+
 class InactiveAccountError(DomainError):
     def __init__(self, message: str = "This account is inactive.") -> None:
         super().__init__(message)

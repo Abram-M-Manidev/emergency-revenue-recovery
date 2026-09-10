@@ -43,6 +43,7 @@ from app.domain.entities.emergency_ticket import EmergencyTicket, TicketStatus
 from app.domain.entities.faq_entry import FAQEntry
 from app.domain.entities.offered_slot import OfferedSlot
 from app.domain.entities.organization import Organization
+from app.domain.entities.rbac import DEFAULT_ROLES
 from app.domain.entities.role import Role
 from app.domain.entities.service import Service
 from app.domain.entities.service_area import ServiceArea
@@ -954,7 +955,13 @@ class FakeUserRepository(UserRepository):
         return user
 
     async def record_login(self, user_id):
-        raise NotImplementedError
+        # Implemented because `AuthService.login` calls it on every
+        # successful sign-in, so any unit test of the auth flow trips over it
+        # otherwise.
+        user = self._users[user_id]
+        updated = replace(user, last_login_at=datetime.now(timezone.utc))
+        self._users[user_id] = updated
+        return updated
 
     async def list_by_organization_id(self, organization_id):
         matches = [u for u in self._users.values() if u.organization_id == organization_id]
@@ -980,17 +987,29 @@ class FakeUserRepository(UserRepository):
 
 
 class FakeRoleRepository(RoleRepository):
-    """Only `get_or_create_by_name` is implemented — `DispatchService` never
-    calls `seed_default_roles`/`get_by_ids` (those are Auth's concern)."""
+    """Backs both `DispatchService` (which only ever calls
+    `get_or_create_by_name`) and `AuthService.register`, which seeds the
+    default role set for a new organization.
+
+    `seed_default_roles` builds from `DEFAULT_ROLES` rather than a
+    hand-written list, so a permission added to a role in the real catalogue
+    appears here too instead of quietly diverging."""
 
     def __init__(self) -> None:
         self._roles: dict[tuple[uuid.UUID, str], Role] = {}
+        self._by_id: dict[uuid.UUID, Role] = {}
 
     async def seed_default_roles(self, organization_id):
-        raise NotImplementedError
+        seeded: dict[str, Role] = {}
+        for name, permission_codes in DEFAULT_ROLES.items():
+            role = await self.get_or_create_by_name(
+                organization_id, name, permission_codes
+            )
+            seeded[name] = role
+        return seeded
 
     async def get_by_ids(self, role_ids):
-        raise NotImplementedError
+        return [self._by_id[role_id] for role_id in role_ids if role_id in self._by_id]
 
     async def get_or_create_by_name(self, organization_id, name, permission_codes):
         key = (organization_id, name)
@@ -1006,6 +1025,7 @@ class FakeRoleRepository(RoleRepository):
             permission_codes=frozenset(permission_codes),
         )
         self._roles[key] = role
+        self._by_id[role.id] = role
         return role
 
 

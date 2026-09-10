@@ -40,6 +40,7 @@ from app.domain.exceptions import (
     InvalidTicketStatusTransitionError,
     InvalidTokenError,
     LastOwnerError,
+    RegistrationDisabledError,
     SlotNotOfferedError,
     SlotNotSelectedError,
     VoiceAssistantDisabledError,
@@ -62,6 +63,10 @@ _DOMAIN_ERROR_STATUS: dict[type[DomainError], int] = {
     InvalidTokenError: status.HTTP_401_UNAUTHORIZED,
     InactiveAccountError: status.HTTP_403_FORBIDDEN,
     AuthorizationError: status.HTTP_403_FORBIDDEN,
+    # 403, not 404: pretending the route does not exist would be a lie the
+    # frontend cannot act on, and the closed door is not a secret — what
+    # must stay secret is whether any particular account exists.
+    RegistrationDisabledError: status.HTTP_403_FORBIDDEN,
     ConversationCompletedError: status.HTTP_409_CONFLICT,
     ConversationLimitExceededError: status.HTTP_409_CONFLICT,
     AIProviderUnavailableError: status.HTTP_503_SERVICE_UNAVAILABLE,
