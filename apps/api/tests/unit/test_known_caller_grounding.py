@@ -13,7 +13,6 @@ P5 cannot silently change behaviour for callers it does not recognise.
 from __future__ import annotations
 
 import uuid
-from types import SimpleNamespace
 
 import pytest
 
@@ -33,6 +32,7 @@ from tests.fakes import (
     FakeServiceAreaRepository,
     FakeServiceRepository,
     default_reply,
+    fake_settings,
 )
 
 _ORG_ID = uuid.uuid4()
@@ -55,7 +55,7 @@ def _make_brain():
         service_area_repository=FakeServiceAreaRepository(),
         faq_repository=FakeFAQRepository(),
         emergency_keyword_repository=FakeEmergencyKeywordRepository(),
-        settings=SimpleNamespace(AI_MAX_CONVERSATION_TURNS=20),
+        settings=fake_settings(AI_MAX_CONVERSATION_TURNS=20),
         caller_identity_repository=identities,
     )
     return brain, conversations, customers, identities, provider

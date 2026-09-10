@@ -92,6 +92,98 @@ class AppointmentOutsideBusinessHoursError(DomainError):
         super().__init__(message)
 
 
+class AppointmentSlotUnavailableError(DomainError):
+    """Raised when a specific appointment time cannot be taken because it is
+    already at capacity.
+
+    Distinct from `AppointmentOutsideBusinessHoursError`: that one means the
+    business is shut, this one means the business is open and full. The
+    caller-facing recovery differs — a closed day needs a different day, a
+    full slot needs a different time — and the voice assistant is told to
+    offer alternatives only for this one."""
+
+    def __init__(
+        self, message: str = "That appointment time is no longer available."
+    ) -> None:
+        super().__init__(message)
+
+
+class AppointmentSlotInThePastError(DomainError):
+    """Raised when a requested appointment time has already passed.
+
+    Enforced on the AI booking path only. Staff scheduling deliberately does
+    not raise this — recording a visit that already happened is a legitimate
+    admin action — but an assistant offering a caller a time in the past
+    never is."""
+
+    def __init__(
+        self, message: str = "That appointment time has already passed."
+    ) -> None:
+        super().__init__(message)
+
+
+class SlotNotOfferedError(DomainError):
+    """Raised when a booking is attempted for a time this conversation was
+    never offered.
+
+    The structural half of "never claim an appointment the caller did not
+    choose". A live call booked a slot the caller had not been read: the
+    model held a valid time from its prompt and went straight to
+    `book_appointment`. Re-checking availability could not catch it — the
+    slot really was free — so the check has to be against what was *offered*,
+    not what is possible.
+
+    Distinct from `AppointmentSlotUnavailableError`, which means the time was
+    legitimately offered and has since been taken. That one invites the
+    assistant to offer alternatives; this one means it must go and fetch real
+    options first."""
+
+    def __init__(
+        self,
+        message: str = "That time was not offered to this caller, so it cannot be booked.",
+    ) -> None:
+        super().__init__(message)
+
+
+class SlotNotSelectedError(DomainError):
+    """Raised when a booking is attempted for a time the caller was offered
+    but never chose.
+
+    The second half of appointment consent, and the one `SlotNotOfferedError`
+    could not cover. A real-model run offered three times and booked one in
+    the same turn: every one of those was genuinely offered, so an
+    offered-only check approved the write even though the caller had not
+    spoken since hearing them.
+
+    Distinct from `SlotNotOfferedError` because the recovery differs. Not
+    offered means the assistant is holding an invented time and must go and
+    fetch real ones. Not selected means the times are real and already spoken
+    — it must simply ask the caller which of them they want, and wait for the
+    answer."""
+
+    def __init__(
+        self,
+        message: str = "The caller has not chosen that time, so it cannot be booked.",
+    ) -> None:
+        super().__init__(message)
+
+
+class AvailabilityUnavailableError(DomainError):
+    """Raised when an availability search is attempted without a configured
+    `AvailabilityProvider`.
+
+    Deliberately not silently degraded to "no slots": an empty result means
+    the business is fully booked, while this means nothing was ever checked.
+    Conflating the two would let the assistant tell a caller there is no
+    availability on the strength of a wiring mistake."""
+
+    def __init__(
+        self,
+        message: str = "Appointment availability is not configured. Contact your administrator.",
+    ) -> None:
+        super().__init__(message)
+
+
 class LastOwnerError(DomainError):
     def __init__(
         self,

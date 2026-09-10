@@ -17,15 +17,25 @@ from app.application.services.auth_service import AuthService
 from app.application.services.business_knowledge_service import BusinessKnowledgeService
 from app.application.services.customer_service import CustomerService
 from app.application.services.dispatch_service import DispatchService
+from app.application.services.emergency_notification_service import (
+    EmergencyNotificationService,
+)
 from app.application.services.organization_service import OrganizationService
 from app.application.services.team_service import TeamService
 from app.application.services.voice_service import VoiceService
+from app.application.services.voice_tool_executor import VoiceToolExecutor
 from app.core.config import Settings, get_settings
 from app.domain.ai.provider import AIProvider
+from app.domain.ai.tools import ToolExecutorFactory
+from app.domain.availability import AvailabilityProvider
 from app.domain.entities.user import User
 from app.domain.exceptions import AuthorizationError, InvalidTokenError
+from app.domain.notifications.provider import NotificationPort
 from app.infrastructure.ai.openai_provider import OpenAIProvider
-from app.infrastructure.database.locks import PostgresAdvisoryCallLock
+from app.infrastructure.database.locks import (
+    PostgresAdvisoryBookingLock,
+    PostgresAdvisoryCallLock,
+)
 from app.infrastructure.database.repositories import (
     SqlAlchemyAppointmentRepository,
     SqlAlchemyBusinessHoursRepository,
@@ -37,6 +47,9 @@ from app.infrastructure.database.repositories import (
     SqlAlchemyEmergencyKeywordRepository,
     SqlAlchemyEmergencyTicketRepository,
     SqlAlchemyFAQRepository,
+    SqlAlchemyNotificationDeliveryRepository,
+    SqlAlchemyNotificationSettingsRepository,
+    SqlAlchemyOfferedSlotRepository,
     SqlAlchemyOrganizationRepository,
     SqlAlchemyRefreshTokenRepository,
     SqlAlchemyRoleRepository,
@@ -48,6 +61,14 @@ from app.infrastructure.database.repositories import (
     SqlAlchemyVoiceLineRepository,
 )
 from app.infrastructure.database.session import get_db
+from app.infrastructure.notifications.providers import (
+    LoggingNotificationProvider,
+    NullNotificationProvider,
+    WebhookNotificationProvider,
+)
+from app.infrastructure.scheduling.database_availability_provider import (
+    DatabaseAvailabilityProvider,
+)
 from app.infrastructure.security.jwt import decode_access_token
 from app.infrastructure.security.vapi_secret import is_valid_vapi_secret
 
@@ -84,41 +105,21 @@ def get_ai_provider(settings: Settings = Depends(get_settings)) -> AIProvider:
     return OpenAIProvider(settings)
 
 
-def get_ai_brain_service(
+def get_availability_provider(
     db: AsyncSession = Depends(get_db),
-    ai_provider: AIProvider = Depends(get_ai_provider),
     settings: Settings = Depends(get_settings),
-) -> AIBrainService:
-    return AIBrainService(
-        conversation_repository=SqlAlchemyConversationRepository(db),
-        conversation_outcome_repository=SqlAlchemyConversationOutcomeRepository(db),
-        ai_provider=ai_provider,
-        business_profile_repository=SqlAlchemyBusinessProfileRepository(db),
+) -> AvailabilityProvider:
+    """The one place the concrete availability engine is chosen. Swapping in
+    Google Calendar, ServiceTitan, or Jobber later is a change to this
+    function and nothing else — `AppointmentService` and the tools depend
+    only on the port."""
+    return DatabaseAvailabilityProvider(
+        appointment_repository=SqlAlchemyAppointmentRepository(db),
         business_hours_repository=SqlAlchemyBusinessHoursRepository(db),
+        business_profile_repository=SqlAlchemyBusinessProfileRepository(db),
         service_repository=SqlAlchemyServiceRepository(db),
-        service_area_repository=SqlAlchemyServiceAreaRepository(db),
-        faq_repository=SqlAlchemyFAQRepository(db),
-        emergency_keyword_repository=SqlAlchemyEmergencyKeywordRepository(db),
+        technician_profile_repository=SqlAlchemyTechnicianProfileRepository(db),
         settings=settings,
-        # P5: known-caller grounding. Read-only; a lookup failure degrades
-        # to an unrecognised caller rather than failing the turn.
-        caller_identity_repository=SqlAlchemyCallerIdentityRepository(db),
-    )
-
-
-def get_voice_service(
-    db: AsyncSession = Depends(get_db),
-    ai_brain_service: AIBrainService = Depends(get_ai_brain_service),
-) -> VoiceService:
-    return VoiceService(
-        voice_line_repository=SqlAlchemyVoiceLineRepository(db),
-        voice_call_repository=SqlAlchemyVoiceCallRepository(db),
-        conversation_repository=SqlAlchemyConversationRepository(db),
-        ai_brain_service=ai_brain_service,
-        # Bound to this request's session so the advisory lock lives and dies
-        # with the same transaction — and works across the four uvicorn
-        # workers production runs, which an in-process lock would not.
-        call_lock=PostgresAdvisoryCallLock(db),
     )
 
 
@@ -137,6 +138,7 @@ def get_dispatch_service(
 
 def get_appointment_service(
     db: AsyncSession = Depends(get_db),
+    availability_provider: AvailabilityProvider = Depends(get_availability_provider),
 ) -> AppointmentService:
     return AppointmentService(
         appointment_repository=SqlAlchemyAppointmentRepository(db),
@@ -145,6 +147,15 @@ def get_appointment_service(
         service_repository=SqlAlchemyServiceRepository(db),
         business_hours_repository=SqlAlchemyBusinessHoursRepository(db),
         business_profile_repository=SqlAlchemyBusinessProfileRepository(db),
+        availability_provider=availability_provider,
+        # Bound to this request's session, so the advisory lock lives and
+        # dies with the same transaction the booking is written in — the
+        # same reasoning as the call lock above.
+        booking_lock=PostgresAdvisoryBookingLock(db),
+        # The record of what was actually offered to each caller. Booking
+        # refuses any time absent from it, so this is load-bearing rather
+        # than advisory — see `book_for_conversation`.
+        offered_slot_repository=SqlAlchemyOfferedSlotRepository(db),
     )
 
 
@@ -158,6 +169,111 @@ def get_customer_service(
         appointment_repository=SqlAlchemyAppointmentRepository(db),
         # P5: association capture only — C1's field rules are untouched.
         caller_identity_repository=SqlAlchemyCallerIdentityRepository(db),
+    )
+
+
+def get_notification_provider(
+    settings: Settings = Depends(get_settings),
+) -> NotificationPort:
+    """Which adapter backs emergency alerting, from configuration.
+
+    Defaults to `null`, which reports NOT_CONFIGURED and so never permits the
+    assistant to claim a dispatcher was alerted. That default is the point:
+    a deployment nobody has configured degrades to telling callers the truth,
+    rather than to the previous behaviour of asserting an alert that was
+    never sent. `logging` is refused outright in production by
+    `Settings._validate_production_safety`."""
+    if settings.NOTIFICATION_PROVIDER == "webhook":
+        return WebhookNotificationProvider(
+            timeout_seconds=settings.NOTIFICATION_TIMEOUT_SECONDS
+        )
+    if settings.NOTIFICATION_PROVIDER == "logging":
+        return LoggingNotificationProvider()
+    return NullNotificationProvider()
+
+
+def get_emergency_notification_service(
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    provider: NotificationPort = Depends(get_notification_provider),
+) -> EmergencyNotificationService:
+    return EmergencyNotificationService(
+        provider=provider,
+        settings_repository=SqlAlchemyNotificationSettingsRepository(db),
+        delivery_repository=SqlAlchemyNotificationDeliveryRepository(db),
+        settings=settings,
+    )
+
+
+def get_voice_tool_executor(
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    appointment_service: AppointmentService = Depends(get_appointment_service),
+    dispatch_service: DispatchService = Depends(get_dispatch_service),
+    customer_service: CustomerService = Depends(get_customer_service),
+    emergency_notification_service: EmergencyNotificationService = Depends(
+        get_emergency_notification_service
+    ),
+) -> ToolExecutorFactory:
+    """Composed from the three services that already own the business rules,
+    rather than from repositories directly — the executor deliberately
+    reuses the existing AI-Brain -> Dispatch/Appointments/Customers seam
+    instead of writing records itself."""
+    return VoiceToolExecutor(
+        appointment_service=appointment_service,
+        dispatch_service=dispatch_service,
+        customer_service=customer_service,
+        conversation_outcome_repository=SqlAlchemyConversationOutcomeRepository(db),
+        service_repository=SqlAlchemyServiceRepository(db),
+        business_profile_repository=SqlAlchemyBusinessProfileRepository(db),
+        offered_slot_repository=SqlAlchemyOfferedSlotRepository(db),
+        settings=settings,
+        # Decides whether an emergency result may say a dispatcher was
+        # alerted. Without it the tool still creates the ticket and simply
+        # never makes that claim.
+        emergency_notification_service=emergency_notification_service,
+    )
+
+
+def get_ai_brain_service(
+    db: AsyncSession = Depends(get_db),
+    ai_provider: AIProvider = Depends(get_ai_provider),
+    settings: Settings = Depends(get_settings),
+    tool_executor_factory: ToolExecutorFactory = Depends(get_voice_tool_executor),
+) -> AIBrainService:
+    return AIBrainService(
+        conversation_repository=SqlAlchemyConversationRepository(db),
+        conversation_outcome_repository=SqlAlchemyConversationOutcomeRepository(db),
+        ai_provider=ai_provider,
+        business_profile_repository=SqlAlchemyBusinessProfileRepository(db),
+        business_hours_repository=SqlAlchemyBusinessHoursRepository(db),
+        service_repository=SqlAlchemyServiceRepository(db),
+        service_area_repository=SqlAlchemyServiceAreaRepository(db),
+        faq_repository=SqlAlchemyFAQRepository(db),
+        emergency_keyword_repository=SqlAlchemyEmergencyKeywordRepository(db),
+        settings=settings,
+        # P5: known-caller grounding. Read-only; a lookup failure degrades
+        # to an unrecognised caller rather than failing the turn.
+        caller_identity_repository=SqlAlchemyCallerIdentityRepository(db),
+        # Business tools. Gated at the service by `AI_TOOLS_ENABLED`, so
+        # passing the factory here does not by itself turn them on.
+        tool_executor_factory=tool_executor_factory,
+    )
+
+
+def get_voice_service(
+    db: AsyncSession = Depends(get_db),
+    ai_brain_service: AIBrainService = Depends(get_ai_brain_service),
+) -> VoiceService:
+    return VoiceService(
+        voice_line_repository=SqlAlchemyVoiceLineRepository(db),
+        voice_call_repository=SqlAlchemyVoiceCallRepository(db),
+        conversation_repository=SqlAlchemyConversationRepository(db),
+        ai_brain_service=ai_brain_service,
+        # Bound to this request's session so the advisory lock lives and dies
+        # with the same transaction — and works across the four uvicorn
+        # workers production runs, which an in-process lock would not.
+        call_lock=PostgresAdvisoryCallLock(db),
     )
 
 

@@ -24,8 +24,10 @@ from app.domain.ai.provider import (
     AIReply,
     AIRequest,
     AITextDelta,
+    AIToolPhase,
     ConversationTurn,
 )
+from app.domain.ai.tools import VOICE_TOOLS, ToolExecutorFactory
 from app.domain.entities.business_hours import HoursException, WeeklyHours
 from app.domain.entities.business_profile import BusinessProfile
 from app.domain.entities.conversation import Conversation, ConversationChannel, ConversationStatus
@@ -52,6 +54,7 @@ from app.domain.repositories.faq_repository import FAQRepository
 from app.domain.repositories.service_area_repository import ServiceAreaRepository
 from app.domain.repositories.service_repository import ServiceRepository
 from app.shared.logging.timing import elapsed_ms, now
+from app.shared.utils.phone import normalize_phone_number
 
 from .prompt_builder import build_system_prompt
 
@@ -74,6 +77,23 @@ class ConversationTextDelta:
 
 
 @dataclass(frozen=True, slots=True)
+class ConversationToolPhase:
+    """Relayed straight through from `AIToolPhase`: the model has asked for
+    tools and they are about to run.
+
+    Carries no model output by construction, so a transport that turns this
+    into speech cannot leak an unverified claim to the caller — the only
+    thing it can say is that work is in progress.
+
+    `model_already_spoke` is relayed straight through from `AIToolPhase`: the
+    caller has already heard the model announce this work, so a holding
+    phrase would be a redundant second "one moment"."""
+
+    tool_names: tuple[str, ...]
+    model_already_spoke: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class ConversationTurnComplete:
     """Terminal event: everything is persisted and the outcome is
     authoritative."""
@@ -81,7 +101,9 @@ class ConversationTurnComplete:
     result: ConversationTurnResult
 
 
-ConversationStreamEvent = ConversationTextDelta | ConversationTurnComplete
+ConversationStreamEvent = (
+    ConversationTextDelta | ConversationToolPhase | ConversationTurnComplete
+)
 
 
 # A VOICE conversation is a live phone call: every second spent reasoning is
@@ -114,6 +136,10 @@ class AIBrainService:
         # construction site, are unaffected: without it P5 grounding is
         # simply never attempted.
         caller_identity_repository: CallerIdentityRepository | None = None,
+        # Optional for the same reason: without a factory the AI Brain
+        # offers no tools and behaves exactly as it did before they existed
+        # — a one-line rollback if a live call ever regresses.
+        tool_executor_factory: ToolExecutorFactory | None = None,
     ) -> None:
         self._conversations = conversation_repository
         self._outcomes = conversation_outcome_repository
@@ -126,6 +152,7 @@ class AIBrainService:
         self._emergency_keywords = emergency_keyword_repository
         self._settings = settings
         self._caller_identities = caller_identity_repository
+        self._tool_executors = tool_executor_factory
 
     async def start_conversation(
         self,
@@ -196,6 +223,8 @@ class AIBrainService:
         async for event in self._ai.stream_reply(request):
             if isinstance(event, AITextDelta):
                 yield ConversationTextDelta(event.text)
+            elif isinstance(event, AIToolPhase):
+                yield ConversationToolPhase(event.tool_names, event.model_already_spoke)
             else:
                 reply = event.reply
 
@@ -255,6 +284,7 @@ class AIBrainService:
             keyword.phrase.lower() in customer_message.lower() for keyword in emergency_keywords
         )
         known_caller = await self._resolve_known_caller(conversation)
+        tool_progress = await self._describe_tool_progress(organization_id, conversation_id)
         system_prompt = build_system_prompt(
             profile=profile,
             weekly_hours=weekly_hours,
@@ -266,6 +296,8 @@ class AIBrainService:
             today=date.today(),
             emergency_keyword_hint=keyword_hint,
             known_caller=known_caller,
+            tools_enabled=self._tools_enabled,
+            tool_progress=tool_progress,
         )
 
         provider_history = tuple(
@@ -280,8 +312,56 @@ class AIBrainService:
             history=provider_history,
             latest_customer_message=customer_message,
             profile=_CHANNEL_PROFILES.get(conversation.channel, AIModelProfile.QUALITY),
+            tools=VOICE_TOOLS if self._tools_enabled else (),
+            # Bound to the organization and conversation this service already
+            # resolved from the authenticated request, never to anything the
+            # model or the caller supplies — see `ToolExecutorFactory`.
+            tool_executor=(
+                # `len(history)` is this turn's index: the number of messages
+                # already persisted when the turn began, read before anything
+                # from this turn is written. It advances by two per completed
+                # turn and is derived entirely from our own storage, so it is
+                # the one thing in the tool call chain a model cannot
+                # influence — which is what makes it usable as evidence that
+                # the caller has spoken since an offer was made. See
+                # `ToolExecutorFactory.bind`.
+                self._tool_executors.bind(
+                    organization_id, conversation_id, len(history)
+                )
+                if self._tools_enabled and self._tool_executors is not None
+                else None
+            ),
         )
         return conversation, request, services
+
+    async def _describe_tool_progress(
+        self, organization_id: uuid.UUID, conversation_id: uuid.UUID
+    ) -> str | None:
+        """What this call has already accomplished, for the prompt.
+
+        Best-effort, like `_resolve_known_caller`: this is context that makes
+        the model behave better, not something a live call may be failed
+        over. A storage error degrades the turn to the pre-existing
+        behaviour rather than dropping the caller."""
+        if not self._tools_enabled or self._tool_executors is None:
+            return None
+        try:
+            return await self._tool_executors.describe_progress(
+                organization_id, conversation_id
+            )
+        except Exception:
+            logger.warning("tool_progress_lookup_failed", exc_info=True)
+            return None
+
+    @property
+    def _tools_enabled(self) -> bool:
+        """Tools are offered on both channels on purpose. The text
+        conversation endpoint already creates real tickets, appointments,
+        and customers through the same outcome-sync seam, so withholding
+        tools there would not make it a dry run — it would only make the
+        dashboard behave differently from the phone line it exists to
+        rehearse."""
+        return self._settings.AI_TOOLS_ENABLED and self._tool_executors is not None
 
     async def _resolve_known_caller(self, conversation: Conversation) -> KnownCaller | None:
         """Known-caller grounding (P5). Strictly read-only and strictly
@@ -363,13 +443,51 @@ class AIBrainService:
             recommended_action=reply.recommended_action,
             matched_service_id=matched_service_id,
             customer_name=reply.customer_name,
-            customer_phone=reply.customer_phone,
+            # Canonicalised for the same reason `VoiceToolExecutor` and
+            # `CustomerService` canonicalise: this value becomes the customer
+            # deduplication key, and a number captured from speech arrives in
+            # whatever shape the transcript took. Without it here, a turn
+            # whose tool already stored "123456789" would have it overwritten
+            # by the model's "1 2 3 4 5 6 7 8 9" a moment later — which is
+            # exactly what a live call produced, leaving the appointment and
+            # the customer record disagreeing about the same number.
+            #
+            # Falls back to the raw value rather than dropping it: something
+            # unparseable is still worth showing a dispatcher.
+            customer_phone=normalize_phone_number(reply.customer_phone)
+            or reply.customer_phone,
             customer_address=reply.customer_address,
             summary=reply.summary,
         )
 
-        if reply.is_conversation_complete:
+        # The one place a conversation is marked COMPLETED, and therefore the
+        # one place `should_end_call` can be denied — `VoiceService` only
+        # mirrors this status, on all three of its transports.
+        #
+        # Withheld for exactly one turn when this turn tried to book and
+        # failed with nothing booked. The model sets
+        # `is_conversation_complete` itself, and it will set it while
+        # apologising for a booking that did not happen — hanging up on a
+        # caller who has just been told their appointment could not be made,
+        # with no chance to answer. Keeping the line open costs one turn; the
+        # caller replies, and the next turn completes normally.
+        #
+        # Deliberately NOT keyed on appointment state: an unscheduled
+        # appointment is the correct end state when no availability was found
+        # and a callback was offered, and blocking that would leave the line
+        # silent — the failure mode that has already ended one call on
+        # `silence-timed-out`. Only an actual failed attempt gates it, so
+        # emergency, FAQ, callback, escalation, and no-availability
+        # completions are all untouched.
+        withhold_completion = reply.is_conversation_complete and reply.booking_failed_unrecovered
+        if reply.is_conversation_complete and not withhold_completion:
             conversation = await self._conversations.complete(conversation_id)
+        elif withhold_completion:
+            logger.info(
+                "conversation_completion_withheld",
+                reason="booking_failed_unrecovered",
+                conversation_id=str(conversation_id),
+            )
 
         # Classification/action/confidence are the AI's decision, not caller
         # data — they are what an incident review needs and carry no PII.
@@ -383,6 +501,9 @@ class AIBrainService:
             confidence=outcome.confidence,
             matched_service=reply.matched_service_name,
             conversation_complete=reply.is_conversation_complete,
+            # What the model asserted vs. what we honoured — the two differ
+            # only on a withheld turn, and an incident review needs both.
+            completion_withheld=withhold_completion,
         )
 
         return ConversationTurnResult(

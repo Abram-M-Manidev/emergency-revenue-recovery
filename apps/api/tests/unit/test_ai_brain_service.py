@@ -5,7 +5,6 @@ scripted FakeAIProvider — no database, no real LLM call. Establishes the
 from __future__ import annotations
 
 import uuid
-from types import SimpleNamespace
 
 import pytest
 
@@ -28,6 +27,7 @@ from tests.fakes import (
     FakeServiceAreaRepository,
     FakeServiceRepository,
     default_reply,
+    fake_settings,
 )
 
 _ORG_ID = uuid.uuid4()
@@ -47,7 +47,7 @@ def _make_service(
         service_area_repository=FakeServiceAreaRepository(),
         faq_repository=FakeFAQRepository(),
         emergency_keyword_repository=FakeEmergencyKeywordRepository(emergency_keywords),
-        settings=SimpleNamespace(AI_MAX_CONVERSATION_TURNS=max_turns),
+        settings=fake_settings(AI_MAX_CONVERSATION_TURNS=max_turns),
     )
     return service, provider
 

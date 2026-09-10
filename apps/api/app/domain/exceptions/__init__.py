@@ -1,7 +1,10 @@
 from app.domain.exceptions.base import (
     AIProviderUnavailableError,
     AppointmentOutsideBusinessHoursError,
+    AppointmentSlotInThePastError,
+    AppointmentSlotUnavailableError,
     AuthorizationError,
+    AvailabilityUnavailableError,
     ConversationCompletedError,
     ConversationLimitExceededError,
     DomainError,
@@ -13,13 +16,18 @@ from app.domain.exceptions.base import (
     InvalidTicketStatusTransitionError,
     InvalidTokenError,
     LastOwnerError,
+    SlotNotOfferedError,
+    SlotNotSelectedError,
     VoiceLineNotFoundError,
 )
 
 __all__ = [
     "AIProviderUnavailableError",
     "AppointmentOutsideBusinessHoursError",
+    "AppointmentSlotInThePastError",
+    "AppointmentSlotUnavailableError",
     "AuthorizationError",
+    "AvailabilityUnavailableError",
     "ConversationCompletedError",
     "ConversationLimitExceededError",
     "DomainError",
@@ -31,5 +39,7 @@ __all__ = [
     "InvalidTicketStatusTransitionError",
     "InvalidTokenError",
     "LastOwnerError",
+    "SlotNotOfferedError",
+    "SlotNotSelectedError",
     "VoiceLineNotFoundError",
 ]

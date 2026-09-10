@@ -48,6 +48,7 @@ from tests.fakes import (
     FakeServiceAreaRepository,
     FakeServiceRepository,
     default_reply,
+    fake_settings,
 )
 from tests.log_capture import capture_events, names
 
@@ -80,7 +81,6 @@ async def organization_id(database_ready) -> uuid.UUID:
 def _brain(session, provider: FakeAIProvider) -> AIBrainService:
     """Real conversation/outcome repositories on the given session; the
     business-knowledge repositories are read-only here and faked."""
-    from types import SimpleNamespace
 
     return AIBrainService(
         conversation_repository=SqlAlchemyConversationRepository(session),
@@ -92,7 +92,7 @@ def _brain(session, provider: FakeAIProvider) -> AIBrainService:
         service_area_repository=FakeServiceAreaRepository(),
         faq_repository=FakeFAQRepository(),
         emergency_keyword_repository=FakeEmergencyKeywordRepository(),
-        settings=SimpleNamespace(AI_MAX_CONVERSATION_TURNS=20),
+        settings=fake_settings(AI_MAX_CONVERSATION_TURNS=20),
     )
 
 

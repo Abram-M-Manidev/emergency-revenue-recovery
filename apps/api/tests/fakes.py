@@ -11,11 +11,21 @@ import uuid
 from collections import defaultdict
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
-from dataclasses import replace
-from datetime import datetime, timezone
+from dataclasses import dataclass, replace
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from app.domain.ai.provider import AIProvider, AIReply, AIRequest
+from app.core.config import Settings
+from app.domain.ai.provider import (
+    AIProvider,
+    AIReply,
+    AIReplyComplete,
+    AIRequest,
+    AIStreamEvent,
+    AITextDelta,
+    AIToolPhase,
+)
+from app.domain.ai.tools import BOOK_APPOINTMENT, ToolInvocation, ToolResult
 from app.domain.entities.analytics import BucketCount, DailyCount, DailyRevenue
 from app.domain.entities.appointment import Appointment, AppointmentStatus
 from app.domain.entities.business_hours import HoursException, WeeklyHours
@@ -31,6 +41,7 @@ from app.domain.entities.customer import Customer
 from app.domain.entities.emergency_keyword import EmergencyKeyword
 from app.domain.entities.emergency_ticket import EmergencyTicket, TicketStatus
 from app.domain.entities.faq_entry import FAQEntry
+from app.domain.entities.offered_slot import OfferedSlot
 from app.domain.entities.organization import Organization
 from app.domain.entities.role import Role
 from app.domain.entities.service import Service
@@ -38,7 +49,15 @@ from app.domain.entities.service_area import ServiceArea
 from app.domain.entities.technician_profile import TechnicianProfile
 from app.domain.entities.user import User
 from app.domain.exceptions import EntityAlreadyExistsError, EntityNotFoundError
-from app.domain.locks import CallLock
+from app.domain.locks import BookingLock, CallLock
+from app.domain.notifications.emergency import (
+    DeliveryStatus,
+    EmergencyAlert,
+    NotificationChannel,
+    NotificationDelivery,
+    NotificationReceipt,
+)
+from app.domain.notifications.provider import NotificationPort
 from app.domain.repositories.appointment_repository import AppointmentRepository
 from app.domain.repositories.business_hours_repository import BusinessHoursRepository
 from app.domain.repositories.business_profile_repository import BusinessProfileRepository
@@ -49,12 +68,39 @@ from app.domain.repositories.customer_repository import CustomerRepository
 from app.domain.repositories.emergency_keyword_repository import EmergencyKeywordRepository
 from app.domain.repositories.emergency_ticket_repository import EmergencyTicketRepository
 from app.domain.repositories.faq_repository import FAQRepository
+from app.domain.repositories.notification_repository import (
+    NotificationDeliveryRepository,
+    NotificationSettingsRepository,
+)
+from app.domain.repositories.offered_slot_repository import OfferedSlotRepository
 from app.domain.repositories.organization_repository import OrganizationRepository
 from app.domain.repositories.role_repository import RoleRepository
 from app.domain.repositories.service_area_repository import ServiceAreaRepository
 from app.domain.repositories.service_repository import ServiceRepository
 from app.domain.repositories.technician_profile_repository import TechnicianProfileRepository
 from app.domain.repositories.user_repository import UserRepository
+
+# Mirrors `appointment_repository_impl._FALLBACK_DURATION_MINUTES`, so the
+# fake and the real overlap query agree on a SCHEDULED row with no duration.
+_FALLBACK_DURATION_MINUTES = 60
+
+
+def fake_settings(**overrides: object) -> Settings:
+    """A real `Settings` object with test-friendly overrides.
+
+    Deliberately the real class rather than a `SimpleNamespace` stub. A stub
+    only carries the fields whoever wrote it remembered to add, so every
+    setting introduced later silently breaks every test that predates it —
+    which is exactly what happened when `AI_TOOLS_ENABLED` was added and
+    eleven previously-passing unit tests started failing with
+    `AttributeError`. Building from the real class means a test tracks the
+    real settings surface automatically, and a service reading a setting the
+    tests never heard of gets the production default instead of a crash.
+
+    `conftest.py` has already forced `ENVIRONMENT=testing` and a
+    `JWT_SECRET_KEY` into the environment by the time this is called, so
+    construction always succeeds."""
+    return Settings().model_copy(update=dict(overrides))  # type: ignore[call-arg]
 
 
 def _in_range(value: datetime, start: datetime | None, end: datetime) -> bool:
@@ -491,6 +537,7 @@ class FakeEmergencyTicketRepository(EmergencyTicketRepository):
 class FakeAppointmentRepository(AppointmentRepository):
     def __init__(self) -> None:
         self._appointments: dict[uuid.UUID, Appointment] = {}
+        self.backfill_calls: list[tuple[uuid.UUID, dict[str, str | None]]] = []
 
     async def create(
         self,
@@ -592,6 +639,86 @@ class FakeAppointmentRepository(AppointmentRepository):
         updated = replace(appointment, customer_id=customer_id)
         self._appointments[appointment_id] = updated
         return updated
+
+    async def backfill_contact_details(
+        self,
+        organization_id,
+        appointment_id,
+        *,
+        customer_name=None,
+        customer_phone=None,
+        customer_address=None,
+    ):
+        # `backfill_calls` lets a test assert that an appointment with
+        # nothing missing produced *no write at all*, which an equality
+        # check on the returned record cannot distinguish from a no-op
+        # update. Same device as `FakeCustomerRepository`.
+        self.backfill_calls.append(
+            (
+                appointment_id,
+                {
+                    "customer_name": customer_name,
+                    "customer_phone": customer_phone,
+                    "customer_address": customer_address,
+                },
+            )
+        )
+        # Mirrors the real repository: the lookup is org-scoped, so a
+        # mismatched tenant finds nothing and raises rather than writing.
+        appointment = self._appointments.get(appointment_id)
+        if appointment is None or appointment.organization_id != organization_id:
+            raise EntityNotFoundError("Appointment", str(appointment_id))
+        updates = {
+            field: value
+            for field, value in (
+                ("customer_name", customer_name),
+                ("customer_phone", customer_phone),
+                ("customer_address", customer_address),
+            )
+            if value is not None
+        }
+        updated = replace(appointment, **updates)
+        self._appointments[appointment_id] = updated
+        return updated
+
+    async def list_scheduled_in_range(self, organization_id, *, start_at, end_at):
+        matches = [
+            a
+            for a in self._appointments.values()
+            if a.organization_id == organization_id
+            and a.status is AppointmentStatus.SCHEDULED
+            and a.scheduled_start_at is not None
+            and a.scheduled_start_at < end_at
+            and a.scheduled_start_at
+            + timedelta(minutes=a.duration_minutes or _FALLBACK_DURATION_MINUTES)
+            > start_at
+        ]
+        matches.sort(key=lambda a: a.scheduled_start_at)
+        return matches
+
+    async def count_overlapping(
+        self, organization_id, *, start_at, end_at, exclude_appointment_id=None
+    ):
+        # Mirrors the SQL in `appointment_repository_impl.py` exactly: only
+        # SCHEDULED rows hold time, the interval is half-open so
+        # back-to-back appointments do not collide, and the excluded id is
+        # what stops a reschedule conflicting with itself.
+        count = 0
+        for appointment in self._appointments.values():
+            if appointment.organization_id != organization_id:
+                continue
+            if appointment.status is not AppointmentStatus.SCHEDULED:
+                continue
+            if appointment.scheduled_start_at is None:
+                continue
+            if exclude_appointment_id is not None and appointment.id == exclude_appointment_id:
+                continue
+            occupied_end = appointment.scheduled_start_at + timedelta(
+                minutes=appointment.duration_minutes or _FALLBACK_DURATION_MINUTES
+            )
+            if appointment.scheduled_start_at < end_at and occupied_end > start_at:
+                count += 1
+        return count
 
     async def list_by_customer_id(self, organization_id, customer_id):
         matches = [
@@ -1008,6 +1135,238 @@ class FakeCallLock(CallLock):
                 self._active -= 1
 
 
+class FakeOfferedSlotRepository(OfferedSlotRepository):
+    """In-memory record of what each conversation was offered, and of which
+    offer the caller then chose.
+
+    Keyed by `(organization_id, conversation_id, start_at)` so the tests can
+    prove the isolation properties the real queries enforce: an offer made to
+    one conversation cannot authorise a booking in another, neither can one
+    made to another tenant, and neither can a *selection* made in either.
+
+    Mirrors the production constraint that at most one slot per conversation
+    is selected at a time — `mark_selected` clears the others, exactly as the
+    partial unique index forces the real repository to."""
+
+    def __init__(self) -> None:
+        self.offers: dict[tuple[uuid.UUID, uuid.UUID, datetime], OfferedSlot] = {}
+
+    async def record_offered(self, organization_id, conversation_id, slots, turn_index):
+        for slot in slots:
+            key = (organization_id, conversation_id, slot.start_at)
+            existing = self.offers.get(key)
+            self.offers[key] = OfferedSlot(
+                organization_id=organization_id,
+                conversation_id=conversation_id,
+                start_at=slot.start_at,
+                duration_minutes=slot.duration_minutes,
+                # A re-offer refreshes the duration but must not move the
+                # turn index or disturb a selection — the ON CONFLICT DO
+                # UPDATE set in the real repository is exactly this narrow.
+                offered_turn_index=(
+                    existing.offered_turn_index if existing else turn_index
+                ),
+                selected_at=existing.selected_at if existing else None,
+                selected_turn_index=existing.selected_turn_index if existing else None,
+            )
+
+    async def list_offered_starts(self, organization_id, conversation_id):
+        return sorted(
+            start_at
+            for (org, conv, start_at) in self.offers
+            if org == organization_id and conv == conversation_id
+        )
+
+    async def offered_duration_minutes(self, organization_id, conversation_id, start_at):
+        offered = self.offers.get((organization_id, conversation_id, start_at))
+        return offered.duration_minutes if offered else None
+
+    async def get_offered(self, organization_id, conversation_id, start_at):
+        return self.offers.get((organization_id, conversation_id, start_at))
+
+    async def mark_selected(self, organization_id, conversation_id, start_at, turn_index):
+        key = (organization_id, conversation_id, start_at)
+        if key not in self.offers:
+            return None
+        await self.clear_selection(organization_id, conversation_id)
+        offered = self.offers[key]
+        updated = replace(
+            offered,
+            selected_at=datetime.now(timezone.utc),
+            selected_turn_index=turn_index,
+        )
+        self.offers[key] = updated
+        return updated
+
+    async def get_active_selection(self, organization_id, conversation_id):
+        for (org, conv, _), offered in self.offers.items():
+            if org == organization_id and conv == conversation_id and offered.is_selected:
+                return offered
+        return None
+
+    async def clear_selection(self, organization_id, conversation_id):
+        for key, offered in list(self.offers.items()):
+            org, conv, _ = key
+            if org == organization_id and conv == conversation_id and offered.is_selected:
+                self.offers[key] = replace(
+                    offered, selected_at=None, selected_turn_index=None
+                )
+
+
+class FakeBookingLock(BookingLock):
+    """Per-key `asyncio.Lock`, mirroring what `PostgresAdvisoryBookingLock`
+    provides across worker processes.
+
+    `max_concurrent` is the point of it: the double-booking test asserts
+    that two callers racing for one slot never execute the
+    verify-then-write section at the same time. Without that assertion a
+    passing conflict test proves only that the two requests happened not to
+    interleave, not that they cannot."""
+
+    def __init__(self) -> None:
+        self._locks: dict[str, asyncio.Lock] = {}
+        self._active = 0
+        self.max_concurrent = 0
+        self.acquisitions = 0
+
+    def hold(self, key: str) -> AbstractAsyncContextManager[None]:
+        return self._hold(key)
+
+    @asynccontextmanager
+    async def _hold(self, key: str) -> AsyncIterator[None]:
+        lock = self._locks.setdefault(key, asyncio.Lock())
+        async with lock:
+            self.acquisitions += 1
+            self._active += 1
+            self.max_concurrent = max(self.max_concurrent, self._active)
+            try:
+                yield
+            finally:
+                self._active -= 1
+
+
+@dataclass(frozen=True, slots=True)
+class _SpokenToolRound:
+    """One round in which the model both speaks and requests tools — the
+    response shape `response_format=json_schema` + `tools` produces about a
+    third of the time, and the one that used to have its tool calls
+    discarded."""
+
+    text: str | None
+    calls: list[tuple[str, dict]]
+
+
+class ScriptedToolAIProvider(AIProvider):
+    """An `AIProvider` that really drives the tool loop, without OpenAI.
+
+    Scripted as a list of *rounds*. Each round is either a list of
+    `(tool_name, arguments)` pairs — which this provider executes through
+    the real `request.tool_executor`, exactly as `OpenAIProvider` does — or
+    an `AIReply`, which ends the turn.
+
+    This exists to prove the half of the flow that OpenAI's wire format is
+    irrelevant to: that a tool call reaches the real executor, the real
+    application services, and the real database, and that the result comes
+    back. `tests/unit/test_openai_tool_loop.py` covers the other half (chunk
+    accumulation, message shaping, round limits) against a stubbed client.
+
+    `results` records every `ToolResult` produced, so a test can assert on
+    what the model would actually have seen — which is the only thing that
+    can justify the assistant's final sentence."""
+
+    def __init__(self, rounds: list[object] | None = None) -> None:
+        self.rounds: list[object] = rounds or []
+        self.requests: list[AIRequest] = []
+        self.results: list[ToolResult] = []
+        self.invocations: list[ToolInvocation] = []
+
+    def queue_tool_round(self, calls: list[tuple[str, dict]], *, speak: str | None = None) -> None:
+        """`speak` reproduces the response shape that broke the 2026-08-22
+        call: the model announcing what it is about to do *and* requesting
+        the tool in the same response. Without it a test can only exercise
+        the tool-calls-only shape, which is exactly the blind spot that let
+        the bug reach a real caller."""
+        self.rounds.append(_SpokenToolRound(speak, calls) if speak else calls)
+
+    def queue_reply(self, reply: AIReply) -> None:
+        self.rounds.append(reply)
+
+    def _booking_failed_unrecovered(self, since: int) -> bool:
+        """Mirrors `OpenAIProvider._updated_booking_state`: a booking failure
+        latches, and a later success clears it.
+
+        `since` scopes it to the current turn. `results` accumulates for the
+        whole conversation, but the real flag is a local in one
+        `stream_reply`/`generate_reply` call — so without the offset a turn-1
+        failure would leak into turn 2 and this double would gate calls the
+        production loop lets through."""
+        state = False
+        for result in self.results[since:]:
+            if result.name != BOOK_APPOINTMENT.name:
+                continue
+            state = not result.content.get("success")
+        return state
+
+    def _finalise(self, reply: AIReply, since: int) -> AIReply:
+        return replace(
+            reply, booking_failed_unrecovered=self._booking_failed_unrecovered(since)
+        )
+
+    async def generate_reply(self, request: AIRequest) -> AIReply:
+        self.requests.append(request)
+        turn_started_at = len(self.results)
+        for round_spec in list(self.rounds):
+            self.rounds.pop(0)
+            if isinstance(round_spec, AIReply):
+                return self._finalise(round_spec, turn_started_at)
+            if isinstance(round_spec, _SpokenToolRound):
+                round_spec = round_spec.calls
+            assert request.tool_executor is not None, (
+                "ScriptedToolAIProvider was given a tool round but the request "
+                "carries no executor — the AI Brain did not wire tools."
+            )
+            for index, (name, arguments) in enumerate(round_spec):  # type: ignore[union-attr]
+                invocation = ToolInvocation(
+                    id=f"call_{len(self.results)}_{index}", name=name, arguments=arguments
+                )
+                self.invocations.append(invocation)
+                self.results.append(await request.tool_executor.execute(invocation))
+        return self._finalise(default_reply(), turn_started_at)
+
+    async def stream_reply(self, request: AIRequest) -> AsyncIterator[AIStreamEvent]:
+        """Streaming twin, emitting `AIToolPhase` before each tool round so
+        the voice transport's holding-phrase behaviour is exercised the same
+        way a real streamed turn would exercise it."""
+        self.requests.append(request)
+        turn_started_at = len(self.results)
+        for round_spec in list(self.rounds):
+            self.rounds.pop(0)
+            if isinstance(round_spec, AIReply):
+                yield AITextDelta(round_spec.message_to_customer)
+                yield AIReplyComplete(self._finalise(round_spec, turn_started_at))
+                return
+            already_spoke = False
+            if isinstance(round_spec, _SpokenToolRound):
+                if round_spec.text:
+                    already_spoke = True
+                    yield AITextDelta(round_spec.text)
+                round_spec = round_spec.calls
+            assert request.tool_executor is not None
+            yield AIToolPhase(
+                tuple(name for name, _ in round_spec),  # type: ignore[union-attr]
+                model_already_spoke=already_spoke,
+            )
+            for index, (name, arguments) in enumerate(round_spec):  # type: ignore[union-attr]
+                invocation = ToolInvocation(
+                    id=f"call_{len(self.results)}_{index}", name=name, arguments=arguments
+                )
+                self.invocations.append(invocation)
+                self.results.append(await request.tool_executor.execute(invocation))
+        reply = self._finalise(default_reply(), turn_started_at)
+        yield AITextDelta(reply.message_to_customer)
+        yield AIReplyComplete(reply)
+
+
 class FakeCallerIdentityRepository(CallerIdentityRepository):
     """In-memory caller-ID associations, org-scoped like the real one.
 
@@ -1053,3 +1412,127 @@ class FakeCallerIdentityRepository(CallerIdentityRepository):
         key = (organization_id, caller_number.strip(), customer_id)
         # Counts rather than overwrites, so idempotency is observable.
         self.associations[key] = self.associations.get(key, 0) + 1
+
+
+class FakeNotificationSettingsRepository(NotificationSettingsRepository):
+    """One organization's alert destination, in memory.
+
+    Defaults to nothing configured — the same default the real deployment
+    has — so a test that wants the assistant to be allowed to claim an alert
+    has to say so explicitly."""
+
+    def __init__(
+        self, destinations: dict[uuid.UUID, tuple[NotificationChannel, str]] | None = None
+    ) -> None:
+        self.destinations = destinations or {}
+
+    async def get_destination(self, organization_id):
+        return self.destinations.get(organization_id)
+
+
+class FakeNotificationDeliveryRepository(NotificationDeliveryRepository):
+    """Delivery rows keyed by ticket, mirroring the production unique index.
+
+    `claim` returns `True` to exactly one caller per ticket, which is what
+    makes the idempotency tests meaningful: a fake that always granted the
+    claim would let a duplicate-send bug pass."""
+
+    def __init__(self) -> None:
+        self.rows: dict[uuid.UUID, NotificationDelivery] = {}
+        self.claims: list[uuid.UUID] = []
+
+    async def get_for_ticket(self, organization_id, ticket_id):
+        row = self.rows.get(ticket_id)
+        if row is None or row.organization_id != organization_id:
+            return None
+        return row
+
+    async def claim(self, organization_id, ticket_id, *, channel, provider):
+        self.claims.append(ticket_id)
+        existing = await self.get_for_ticket(organization_id, ticket_id)
+        if existing is not None:
+            return existing, False
+        now_at = datetime.now(timezone.utc)
+        row = NotificationDelivery(
+            id=uuid.uuid4(),
+            organization_id=organization_id,
+            ticket_id=ticket_id,
+            channel=channel,
+            provider=provider,
+            status=DeliveryStatus.PENDING,
+            attempts=0,
+            error_code=None,
+            delivered_at=None,
+            created_at=now_at,
+            updated_at=now_at,
+        )
+        self.rows[ticket_id] = row
+        return row, True
+
+    async def record_result(self, organization_id, ticket_id, *, status, error_code, provider):
+        existing = await self.get_for_ticket(organization_id, ticket_id)
+        assert existing is not None, "record_result called without a prior claim"
+        updated = replace(
+            existing,
+            status=status,
+            error_code=error_code,
+            provider=provider,
+            attempts=existing.attempts + 1,
+            delivered_at=(
+                datetime.now(timezone.utc)
+                if status is DeliveryStatus.DELIVERED
+                else existing.delivered_at
+            ),
+            updated_at=datetime.now(timezone.utc),
+        )
+        self.rows[ticket_id] = updated
+        return updated
+
+
+class FakeNotificationProvider(NotificationPort):
+    """A `NotificationPort` whose verdict the test chooses.
+
+    `sends` records every attempt, so a test can assert that exactly one
+    alert went out for one ticket — the property idempotency exists to
+    provide, and one that a call-count-blind fake could not express."""
+
+    def __init__(
+        self,
+        *,
+        status: DeliveryStatus = DeliveryStatus.DELIVERED,
+        error_code: str | None = None,
+        delay_seconds: float = 0.0,
+        raises: bool = False,
+    ) -> None:
+        self.status = status
+        self.error_code = error_code
+        self.delay_seconds = delay_seconds
+        self.raises = raises
+        self.sends: list[tuple[EmergencyAlert, str | None]] = []
+
+    @property
+    def name(self) -> str:
+        return "fake"
+
+    async def send(self, alert, destination):
+        self.sends.append((alert, destination))
+        if self.delay_seconds:
+            await asyncio.sleep(self.delay_seconds)
+        if self.raises:
+            # A provider that violates its own never-raise contract. The
+            # service must still return a receipt rather than propagating.
+            raise RuntimeError("provider blew up")
+        if destination is None:
+            # Every real adapter that needs a destination reports
+            # NOT_CONFIGURED without one. Mirroring that here matters: a fake
+            # that returned DELIVERED regardless would let a tenant with no
+            # configuration inherit another tenant's "alerted" state, which
+            # is precisely the bug the isolation tests are looking for.
+            return NotificationReceipt(
+                status=DeliveryStatus.NOT_CONFIGURED,
+                provider=self.name,
+                error_code="no_destination_configured",
+            )
+        return NotificationReceipt(
+            status=self.status, provider=self.name, error_code=self.error_code
+        )

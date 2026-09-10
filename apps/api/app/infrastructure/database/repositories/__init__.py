@@ -26,6 +26,13 @@ from app.infrastructure.database.repositories.emergency_ticket_repository_impl i
     SqlAlchemyEmergencyTicketRepository,
 )
 from app.infrastructure.database.repositories.faq_repository_impl import SqlAlchemyFAQRepository
+from app.infrastructure.database.repositories.notification_repository_impl import (
+    SqlAlchemyNotificationDeliveryRepository,
+    SqlAlchemyNotificationSettingsRepository,
+)
+from app.infrastructure.database.repositories.offered_slot_repository_impl import (
+    SqlAlchemyOfferedSlotRepository,
+)
 from app.infrastructure.database.repositories.organization_repository_impl import (
     SqlAlchemyOrganizationRepository,
 )
@@ -61,6 +68,9 @@ __all__ = [
     "SqlAlchemyEmergencyKeywordRepository",
     "SqlAlchemyEmergencyTicketRepository",
     "SqlAlchemyFAQRepository",
+    "SqlAlchemyNotificationDeliveryRepository",
+    "SqlAlchemyNotificationSettingsRepository",
+    "SqlAlchemyOfferedSlotRepository",
     "SqlAlchemyOrganizationRepository",
     "SqlAlchemyRefreshTokenRepository",
     "SqlAlchemyRoleRepository",

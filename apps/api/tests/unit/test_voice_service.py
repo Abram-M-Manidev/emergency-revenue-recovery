@@ -10,7 +10,6 @@ import asyncio
 import uuid
 from dataclasses import replace
 from datetime import datetime, timezone
-from types import SimpleNamespace
 
 import pytest
 
@@ -36,6 +35,7 @@ from tests.fakes import (
     FakeServiceAreaRepository,
     FakeServiceRepository,
     default_reply,
+    fake_settings,
 )
 from tests.log_capture import capture_events, names
 
@@ -145,7 +145,7 @@ def _make_voice_service(
         service_area_repository=FakeServiceAreaRepository(),
         faq_repository=FakeFAQRepository(),
         emergency_keyword_repository=FakeEmergencyKeywordRepository(),
-        settings=SimpleNamespace(AI_MAX_CONVERSATION_TURNS=20),
+        settings=fake_settings(AI_MAX_CONVERSATION_TURNS=20),
     )
     voice_line_repo = FakeVoiceLineRepository(voice_lines)
     voice_call_repo = FakeVoiceCallRepository()

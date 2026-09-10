@@ -53,3 +53,31 @@ def test_unsafe_values_are_allowed_outside_production():
         CORS_ORIGINS=["*"],
     )
     assert settings.ENVIRONMENT == "development"
+
+
+def test_rejects_the_logging_notification_provider_in_production():
+    """The logging provider reports DELIVERED while notifying nobody, which in
+    production would licence the assistant to tell an emergency caller a
+    dispatcher had been alerted when the only thing that happened was a log
+    line — exactly the falsehood the notification port exists to remove."""
+    with pytest.raises(ValueError, match="NOTIFICATION_PROVIDER"):
+        _settings(NOTIFICATION_PROVIDER="logging")
+
+
+def test_allows_a_real_notification_provider_in_production():
+    settings = _settings(NOTIFICATION_PROVIDER="webhook")
+    assert settings.NOTIFICATION_PROVIDER == "webhook"
+
+
+def test_allows_running_production_without_notifications_configured():
+    """A pilot may legitimately start with no alerting, reading its dispatch
+    queue by hand. That is safe precisely because 'none' reports
+    NOT_CONFIGURED, so callers are told the alert could not be confirmed
+    rather than being told a human is on the way."""
+    settings = _settings(NOTIFICATION_PROVIDER="none")
+    assert settings.NOTIFICATION_PROVIDER == "none"
+
+
+def test_the_logging_provider_is_still_allowed_in_development():
+    settings = _settings(ENVIRONMENT="development", NOTIFICATION_PROVIDER="logging")
+    assert settings.NOTIFICATION_PROVIDER == "logging"

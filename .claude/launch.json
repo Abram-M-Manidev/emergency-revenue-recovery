@@ -3,9 +3,7 @@
   "configurations": [
     {
       "name": "frontend",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": ["--prefix", "apps/frontend", "run", "dev"],
-      "port": 3000
+      "url": "http://localhost:3000"
     }
   ]
 }

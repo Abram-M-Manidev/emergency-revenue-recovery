@@ -23,6 +23,13 @@ Environment = Literal["development", "testing", "production"]
 # `openai_provider.py` for why the value is sent via `extra_body`.
 ReasoningEffort = Literal["minimal", "low", "medium", "high"]
 
+# Which outbound notification adapter backs emergency alerting.
+# "none" is the default and reports NOT_CONFIGURED, so a deployment that
+# has not set alerting up tells callers the truth instead of claiming an
+# alert. "logging" reports success while telling nobody and is therefore
+# refused in production (see `_validate_production_safety`).
+NotificationProvider = Literal["none", "logging", "webhook"]
+
 # The literal placeholder shipped in `.env.example` — if this is still the
 # configured value in production, the secret was never actually generated.
 _PLACEHOLDER_JWT_SECRET_KEY = "changeme-generate-a-real-64-byte-secret-for-local-dev"
@@ -97,11 +104,76 @@ class Settings(BaseSettings):
     TWILIO_AUTH_TOKEN: str | None = None
     TWILIO_PHONE_NUMBER: str | None = None
 
+    # --- Emergency notification ---
+    # Emergency callers are told a dispatcher has been alerted. Until this
+    # existed nothing outbound was ever sent, so that sentence was false on
+    # every call that produced one. The provider decides whether the backend
+    # can honestly report an alert; the assistant is never allowed to decide
+    # it for itself (see `voice_tool_executor._create_service_request`).
+    NOTIFICATION_PROVIDER: NotificationProvider = "none"
+    # The whole send, per attempt. This runs inside a live voice turn, where
+    # every second is silence the caller hears — so it is deliberately far
+    # below the AI timeouts above. Exceeding it is a FAILED delivery the
+    # assistant reports truthfully, never an exception.
+    NOTIFICATION_TIMEOUT_SECONDS: float = 5.0
+    # Total attempts across the whole call, not per turn: the retry only
+    # fires when an earlier attempt actually FAILED, so two covers a
+    # transient blip without turning one emergency into a page storm.
+    NOTIFICATION_MAX_ATTEMPTS: int = 2
+
     # --- AI Brain ---
     # Counts customer+assistant message pairs; a cheap guardrail against
     # runaway LLM cost on a single conversation until real rate limiting
     # (Production Polish milestone) exists.
     AI_MAX_CONVERSATION_TURNS: int = 20
+
+    # --- AI Brain business tools ---
+    # The tool loop lets the AI Brain create a service request, check real
+    # availability, and book a slot *during* a turn, instead of only
+    # emitting a `recommended_action` the backend reacts to afterwards.
+    # Kept behind a flag so the pre-tool behaviour is one setting away if a
+    # live call ever regresses.
+    AI_TOOLS_ENABLED: bool = True
+    # How many rounds may *execute tools*. The loop runs one more round than
+    # this, with tools withheld, in which the model must produce the sentence
+    # the caller hears — so N here means N tool rounds and at most N+1 model
+    # calls per turn. The bound is a `for` over a fixed range and the loop
+    # ends in a raise, so there is no path that iterates freely.
+    #
+    # Five, not four. The real call of 2026-08-23 used every round of a
+    # budget of four: the model booked before checking (refused,
+    # SLOT_NOT_OFFERED), re-created the service request, checked
+    # availability, then booked successfully — three tool rounds, leaving
+    # exactly one to answer in. One more recovery step and the turn would
+    # have exhausted the budget and told the caller it was having trouble
+    # connecting, *after* the appointment had been successfully booked. The
+    # fifth round is the margin that failure showed we were missing.
+    AI_MAX_TOOL_ROUNDS: int = 5
+    # A tool that hangs is silence the caller hears. Every tool here is a
+    # handful of indexed queries, so this is a generous ceiling, not a
+    # budget.
+    AI_TOOL_TIMEOUT_SECONDS: float = 10.0
+
+    # --- Scheduling / availability ---
+    # Used only when the matched Service has no `default_duration_minutes`.
+    SCHEDULING_DEFAULT_DURATION_MINUTES: int = 60
+    # Offered start times land on this grid, so a caller hears "10:00 or
+    # 10:30", never "10:07".
+    SCHEDULING_SLOT_GRANULARITY_MINUTES: int = 30
+    # A caller must not be able to book a technician for a few minutes from
+    # now — dispatch needs notice.
+    SCHEDULING_MIN_LEAD_MINUTES: int = 120
+    SCHEDULING_DEFAULT_SEARCH_DAYS: int = 7
+    SCHEDULING_MAX_SEARCH_DAYS: int = 14
+    # Deliberately small: this is read aloud on a phone call, where more
+    # than about three options stops being a choice and starts being a list
+    # the caller cannot hold in their head.
+    SCHEDULING_MAX_SLOTS: int = 3
+    # How many appointments may overlap one slot when the organization has
+    # no technician profiles at all. Once a roster exists, the count of
+    # on-call technicians is used instead and this is ignored — see
+    # `DatabaseAvailabilityProvider._capacity_for`.
+    SCHEDULING_DEFAULT_CAPACITY: int = 1
 
     # --- Feature flags ---
     FEATURE_REGISTRATION_ENABLED: bool = True
@@ -177,6 +249,19 @@ class Settings(BaseSettings):
             raise ValueError(
                 "CORS_ORIGINS must be an explicit, non-wildcard list of origins "
                 "when ENVIRONMENT=production."
+            )
+        if self.NOTIFICATION_PROVIDER == "logging":
+            # The logging provider reports DELIVERED while notifying nobody.
+            # In development that is a convenience; in production it would
+            # licence the assistant to tell an emergency caller a dispatcher
+            # had been alerted when the only thing that happened was a log
+            # line — exactly the falsehood this provider abstraction exists
+            # to remove. Refuse to boot rather than ship it.
+            raise ValueError(
+                "NOTIFICATION_PROVIDER='logging' notifies nobody and must not be "
+                "used when ENVIRONMENT=production. Use 'webhook', or 'none' to "
+                "run without emergency alerting (callers will be told it could "
+                "not be confirmed)."
             )
         return self
 

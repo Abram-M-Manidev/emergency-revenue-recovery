@@ -170,6 +170,22 @@ class DispatchService:
             organization_id, status=status, limit=limit, offset=offset
         )
 
+    async def get_ticket_for_conversation(
+        self, organization_id: uuid.UUID, conversation_id: uuid.UUID
+    ) -> EmergencyTicket | None:
+        """The ticket this conversation produced, if any.
+
+        Returns None rather than raising, because "no ticket" is the normal
+        case for most conversations. Added for the `book_appointment` tool:
+        an emergency call has a ticket and no appointment, and without this
+        the tool could only report `NO_SERVICE_REQUEST` — which instructs the
+        assistant to call `create_service_request` and try again, looping it
+        against a call that must never be booked at all."""
+        ticket = await self._tickets.get_by_conversation_id(conversation_id)
+        if ticket is None or ticket.organization_id != organization_id:
+            return None
+        return ticket
+
     async def get_ticket(
         self, organization_id: uuid.UUID, ticket_id: uuid.UUID
     ) -> EmergencyTicket:

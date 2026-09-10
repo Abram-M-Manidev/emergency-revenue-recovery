@@ -21,7 +21,11 @@ from dataclasses import dataclass
 import structlog
 from structlog.contextvars import bind_contextvars
 
-from app.application.services.ai_brain_service import AIBrainService, ConversationTextDelta
+from app.application.services.ai_brain_service import (
+    AIBrainService,
+    ConversationTextDelta,
+    ConversationToolPhase,
+)
 from app.domain.entities.conversation import ConversationChannel, ConversationStatus
 from app.domain.entities.conversation_message import ConversationMessage, MessageRole
 from app.domain.entities.voice_call import VoiceCall
@@ -33,6 +37,57 @@ from app.domain.repositories.voice_call_repository import VoiceCallRepository
 from app.domain.repositories.voice_line_repository import VoiceLineRepository
 
 logger = structlog.get_logger("app.voice")
+
+# Spoken while the AI Brain's tools run. Deliberately says nothing about
+# what the tools will *find* or whether they succeed: the caller must never
+# hear an outcome before one exists. Each one describes the work being
+# started, in the future tense, which is a promise of effort rather than of
+# result.
+#
+# Kept here in the voice transport rather than in the AI Brain because it is
+# a telephony concern — the text/simulation path has no dead air to cover
+# and ignores the event entirely.
+#
+# Per tool rather than one phrase for everything, because a single generic
+# line misdescribes the work. On the live call of 2026-08-22 the caller said
+# "I see it's 9, but please book that" and heard "Let me check that for you,
+# one moment" — which sounds like a second availability lookup, not the
+# booking they had just asked for.
+#
+# "One moment." is its own sentence, and the word is spelled out: a
+# comma-joined ", one moment" was rendered by TTS as a clipped fragment.
+_PROGRESS_PHRASES: dict[str, str] = {
+    "book_appointment": "Absolutely. I'll book that appointment now. One moment.",
+    # Selection almost always runs in the same round as the booking, where
+    # the line below loses to `book_appointment` anyway. It matters for the
+    # round where it runs alone: the caller has just named a time, and the
+    # only thing worse than dead air there is a phrase implying the time is
+    # already theirs. This promises the attempt, nothing more.
+    "select_appointment_slot": "Absolutely. I'll book that time for you now. One moment.",
+    "check_availability": "Let me check our schedule for you. One moment.",
+    "create_service_request": "Let me get that logged for you. One moment.",
+}
+
+_DEFAULT_PROGRESS_PHRASE = "One moment while I take care of that."
+
+
+def _progress_phrase(tool_names: tuple[str, ...]) -> str:
+    """What to say while these tools run.
+
+    Ordered by how specifically the caller is waiting on each outcome, so a
+    round that bundles several tools describes the one they actually asked
+    for: booking beats an availability lookup, which beats recording the
+    request. An unrecognised tool falls back to a phrase that commits to
+    nothing at all."""
+    for name in (
+        "book_appointment",
+        "select_appointment_slot",
+        "check_availability",
+        "create_service_request",
+    ):
+        if name in tool_names:
+            return _PROGRESS_PHRASES[name]
+    return _DEFAULT_PROGRESS_PHRASE
 
 
 class TranscriptSupersession:
@@ -250,11 +305,41 @@ class VoiceService:
                 yield VoiceTurnComplete(result)
                 return
 
+            # Tracks whether the caller has heard anything at all this turn,
+            # not merely whether the holding phrase was used. A turn can run
+            # several tool rounds, and only the round the model narrated
+            # reports `model_already_spoke` — so a per-round check let the
+            # phrase follow the model's own announcement on the *next* round
+            # ("...while I check available times." "Let me check that for
+            # you, one moment."). Dead air is a property of the turn.
+            caller_has_heard_speech = False
             async for event in self._ai_brain.send_message_stream(
                 organization_id, conversation_id, customer_utterance
             ):
                 if isinstance(event, ConversationTextDelta):
+                    if event.text:
+                        caller_has_heard_speech = True
                     yield VoiceTextDelta(event.text)
+                elif isinstance(event, ConversationToolPhase):
+                    # A tool round is a second model call, and the caller
+                    # hears that gap as silence — the same silence that
+                    # already ended one live call on `silence-timed-out`.
+                    # This is a fixed, system-authored line, not model
+                    # output: it states only that work is happening, so it
+                    # cannot become the kind of unbacked claim
+                    # ("I've booked that for you") this whole change exists
+                    # to eliminate.
+                    #
+                    # Only when the caller would otherwise hear nothing.
+                    # `model_already_spoke` covers the response that carried
+                    # both speech and a tool call; `caller_has_heard_speech`
+                    # covers anything said earlier in the same turn,
+                    # including the phrase itself. Together they make this
+                    # "say something only if silence is what follows".
+                    if not caller_has_heard_speech and not event.model_already_spoke:
+                        caller_has_heard_speech = True
+                        logger.info("voice_holding_phrase_emitted", tools=list(event.tool_names))
+                        yield VoiceTextDelta(_progress_phrase(event.tool_names))
                 else:
                     yield VoiceTurnComplete(
                         ChatCompletionResult(

@@ -25,7 +25,10 @@ from fastapi.responses import JSONResponse
 
 from app.domain.exceptions import (
     AIProviderUnavailableError,
+    AppointmentSlotInThePastError,
+    AppointmentSlotUnavailableError,
     AuthorizationError,
+    AvailabilityUnavailableError,
     ConversationCompletedError,
     ConversationLimitExceededError,
     DomainError,
@@ -37,6 +40,8 @@ from app.domain.exceptions import (
     InvalidTicketStatusTransitionError,
     InvalidTokenError,
     LastOwnerError,
+    SlotNotOfferedError,
+    SlotNotSelectedError,
     VoiceLineNotFoundError,
 )
 
@@ -62,6 +67,11 @@ _DOMAIN_ERROR_STATUS: dict[type[DomainError], int] = {
     VoiceLineNotFoundError: status.HTTP_404_NOT_FOUND,
     InvalidTicketStatusTransitionError: status.HTTP_409_CONFLICT,
     InvalidAppointmentStatusTransitionError: status.HTTP_409_CONFLICT,
+    AppointmentSlotUnavailableError: status.HTTP_409_CONFLICT,
+    AppointmentSlotInThePastError: status.HTTP_409_CONFLICT,
+    SlotNotOfferedError: status.HTTP_409_CONFLICT,
+    SlotNotSelectedError: status.HTTP_409_CONFLICT,
+    AvailabilityUnavailableError: status.HTTP_503_SERVICE_UNAVAILABLE,
     LastOwnerError: status.HTTP_409_CONFLICT,
 }
 

@@ -37,6 +37,7 @@ from app.domain.repositories.caller_identity_repository import CallerIdentityRep
 from app.domain.repositories.conversation_outcome_repository import ConversationOutcomeRepository
 from app.domain.repositories.customer_repository import CustomerRepository
 from app.domain.repositories.emergency_ticket_repository import EmergencyTicketRepository
+from app.shared.utils.phone import normalize_phone_number
 
 logger = structlog.get_logger("app.customers")
 
@@ -93,27 +94,36 @@ class CustomerService:
         caller_number: str | None = None,
     ) -> Customer | None:
         outcome = await self._outcomes.get_by_conversation_id(conversation_id)
-        if outcome is None or outcome.customer_phone is None:
-            # No phone number to dedupe on — a Customer record is
+        if outcome is None:
+            return None
+
+        # Normalised before it is used as the deduplication key. A number
+        # captured from speech arrives in whatever shape the transcript took
+        # — a live call on 2026-08-22 produced "1 2 3 4 5 6 7 8 9" on one
+        # turn and "123456789" on the next, and because this lookup matches
+        # exactly, the same caller got two `Customer` rows and a split
+        # history. The stored value is the canonical form for the same
+        # reason: a key is only useful if every writer agrees on it.
+        phone_number = normalize_phone_number(outcome.customer_phone)
+        if phone_number is None:
+            # No usable phone number to dedupe on — a Customer record is
             # meaningless without a way to match repeat callers.
             return None
 
-        customer = await self._customers.get_by_phone_number(
-            organization_id, outcome.customer_phone
-        )
+        customer = await self._customers.get_by_phone_number(organization_id, phone_number)
         if customer is None:
             try:
                 customer = await self._customers.create(
                     organization_id=organization_id,
                     full_name=outcome.customer_name,
-                    phone_number=outcome.customer_phone,
+                    phone_number=phone_number,
                     address=outcome.customer_address,
                 )
             except EntityAlreadyExistsError:
                 # Concurrent retry of the same AI Brain turn / webhook
                 # raced us to create it first — fetch instead of failing.
                 customer = await self._customers.get_by_phone_number(
-                    organization_id, outcome.customer_phone
+                    organization_id, phone_number
                 )
                 if customer is None:
                     raise

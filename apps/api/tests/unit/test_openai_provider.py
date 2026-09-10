@@ -233,8 +233,12 @@ _STREAM_DOC = json.dumps(
 )
 
 
-def _chunk(text: str | None):
-    delta = SimpleNamespace(content=text)
+def _chunk(text: str | None, tool_calls: list | None = None):
+    # `tool_calls` is always present on a real `ChoiceDelta` — None when the
+    # model is emitting text. Omitting it here made this stand-in diverge
+    # from the SDK the moment the provider learned to read that field, so it
+    # is now modelled explicitly rather than left off.
+    delta = SimpleNamespace(content=text, tool_calls=tool_calls)
     return SimpleNamespace(choices=[SimpleNamespace(delta=delta)])
 
 

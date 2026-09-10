@@ -14,6 +14,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from enum import Enum
 
+from app.domain.ai.tools import ToolDefinition, ToolExecutor
 from app.domain.entities.conversation_outcome import CallClassification, RecommendedAction
 
 
@@ -51,6 +52,20 @@ class AIRequest:
     # Defaults to QUALITY so any caller that doesn't care about latency
     # keeps the pre-existing behaviour without opting in.
     profile: AIModelProfile = AIModelProfile.QUALITY
+    # Both default to "no tools", so every existing caller and every test
+    # fake behaves exactly as it did before tools existed. A provider that
+    # cannot call tools may ignore them entirely — the reply contract is
+    # unchanged either way.
+    tools: tuple[ToolDefinition, ...] = ()
+    tool_executor: ToolExecutor | None = None
+
+    @property
+    def tools_enabled(self) -> bool:
+        """Tools are only usable when there is both something to call and
+        something to call it with. Keeping the two fields independent but
+        requiring both means a wiring mistake degrades to the pre-tool
+        behaviour rather than to a crash mid-call."""
+        return bool(self.tools) and self.tool_executor is not None
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +80,19 @@ class AIReply:
     customer_address: str | None
     is_conversation_complete: bool
     summary: str
+    # Not model output — per-turn metadata the provider attaches after the
+    # reply is assembled.
+    #
+    # True when `book_appointment` was invoked during this turn, failed, and
+    # no later attempt in the same turn succeeded. `is_conversation_complete`
+    # is the model's own assertion, and it will set it while apologising for
+    # a booking that did not happen — hanging up on a caller who has just
+    # been told their appointment could not be made. `AIBrainService` uses
+    # this to withhold completion for that one turn only.
+    #
+    # Defaults False, so every existing construction site and every provider
+    # that runs no tools behaves exactly as before.
+    booking_failed_unrecovered: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,7 +117,32 @@ class AIReplyComplete:
     reply: AIReply
 
 
-AIStreamEvent = AITextDelta | AIReplyComplete
+@dataclass(frozen=True, slots=True)
+class AIToolPhase:
+    """Emitted when the model has asked for tools and the provider is about
+    to run them.
+
+    Exists purely so the transport above can cover the gap. A tool round is
+    a second model call, and on a live phone call that gap is silence the
+    caller is listening to — the failure mode that already hung one call up
+    on `silence-timed-out`. `VoiceService` turns this event into a short
+    holding phrase; the text/simulation path ignores it.
+
+    `model_already_spoke` says whether the caller has *already* heard
+    something in this same round. A response may carry both content and tool
+    calls — the model announcing "I'll check that now" and requesting the
+    tool in one breath — and when it does, a holding phrase on top would be
+    the second "one moment" in a row. The flag lets the transport stay quiet
+    in exactly that case without having to track the stream itself.
+
+    Carries no model output of its own, so this event can never put words in
+    the caller's ear ahead of a result."""
+
+    tool_names: tuple[str, ...]
+    model_already_spoke: bool = False
+
+
+AIStreamEvent = AITextDelta | AIToolPhase | AIReplyComplete
 
 
 class AIProvider(ABC):

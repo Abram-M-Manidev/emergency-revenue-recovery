@@ -10,8 +10,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.entities.analytics import BucketCount, DailyRevenue
 from app.domain.entities.appointment import Appointment, AppointmentStatus
+from app.domain.exceptions import EntityNotFoundError
 from app.domain.repositories.appointment_repository import AppointmentRepository
 from app.infrastructure.database.models.appointment import AppointmentModel
+
+# Only reachable by a SCHEDULED row with a NULL duration, which
+# `schedule()` makes unrepresentable. See `count_overlapping`.
+_FALLBACK_DURATION_MINUTES = 60
 
 
 def _to_entity(model: AppointmentModel) -> Appointment:
@@ -188,6 +193,108 @@ class SqlAlchemyAppointmentRepository(AppointmentRepository):
         await self._session.flush()
         await self._session.refresh(model)
         return _to_entity(model)
+
+    async def backfill_contact_details(
+        self,
+        organization_id: uuid.UUID,
+        appointment_id: uuid.UUID,
+        *,
+        customer_name: str | None = None,
+        customer_phone: str | None = None,
+        customer_address: str | None = None,
+    ) -> Appointment:
+        result = await self._session.execute(
+            select(AppointmentModel).where(
+                AppointmentModel.id == appointment_id,
+                AppointmentModel.organization_id == organization_id,
+            )
+        )
+        model = result.scalar_one_or_none()
+        if model is None:
+            # Cross-tenant id (or a deleted appointment): surfaced as a
+            # domain error rather than a raw NoResultFound, so the API
+            # layer's existing `except DomainError` around the sync calls
+            # logs and continues instead of failing a live call turn. Same
+            # reasoning as the emergency-ticket equivalent.
+            raise EntityNotFoundError("Appointment", str(appointment_id))
+
+        if customer_name is not None:
+            model.customer_name = customer_name
+        if customer_phone is not None:
+            model.customer_phone = customer_phone
+        if customer_address is not None:
+            model.customer_address = customer_address
+
+        await self._session.flush()
+        await self._session.refresh(model)
+        return _to_entity(model)
+
+    async def list_scheduled_in_range(
+        self, organization_id: uuid.UUID, *, start_at: datetime, end_at: datetime
+    ) -> list[Appointment]:
+        occupied_end = AppointmentModel.scheduled_start_at + func.make_interval(
+            0,
+            0,
+            0,
+            0,
+            0,
+            func.coalesce(AppointmentModel.duration_minutes, _FALLBACK_DURATION_MINUTES),
+        )
+        result = await self._session.execute(
+            select(AppointmentModel)
+            .where(
+                AppointmentModel.organization_id == organization_id,
+                AppointmentModel.status == AppointmentStatus.SCHEDULED,
+                AppointmentModel.scheduled_start_at.is_not(None),
+                AppointmentModel.scheduled_start_at < end_at,
+                occupied_end > start_at,
+            )
+            .order_by(AppointmentModel.scheduled_start_at.asc())
+        )
+        return [_to_entity(model) for model in result.scalars().all()]
+
+    async def count_overlapping(
+        self,
+        organization_id: uuid.UUID,
+        *,
+        start_at: datetime,
+        end_at: datetime,
+        exclude_appointment_id: uuid.UUID | None = None,
+    ) -> int:
+        # `make_interval(0, 0, 0, 0, 0, mins)` rather than a Python
+        # timedelta: each row's end is `scheduled_start_at + its own
+        # duration_minutes`, so the arithmetic has to happen in SQL. The
+        # positional zeros are make_interval's years/months/weeks/days/hours.
+        #
+        # `coalesce(duration_minutes, _FALLBACK_DURATION_MINUTES)` is
+        # defensive only — `schedule()` requires a duration, so a SCHEDULED
+        # row without one should not exist. Treating such a row as
+        # zero-length would silently make it invisible to every conflict
+        # check, which is the one outcome worth ruling out here.
+        occupied_end = AppointmentModel.scheduled_start_at + func.make_interval(
+            0,
+            0,
+            0,
+            0,
+            0,
+            func.coalesce(AppointmentModel.duration_minutes, _FALLBACK_DURATION_MINUTES),
+        )
+        query = (
+            select(func.count())
+            .select_from(AppointmentModel)
+            .where(
+                AppointmentModel.organization_id == organization_id,
+                AppointmentModel.status == AppointmentStatus.SCHEDULED,
+                AppointmentModel.scheduled_start_at.is_not(None),
+                # Half-open overlap: touching endpoints do not collide, so
+                # back-to-back appointments remain bookable.
+                AppointmentModel.scheduled_start_at < end_at,
+                occupied_end > start_at,
+            )
+        )
+        if exclude_appointment_id is not None:
+            query = query.where(AppointmentModel.id != exclude_appointment_id)
+        return (await self._session.execute(query)).scalar_one()
 
     async def list_by_customer_id(
         self, organization_id: uuid.UUID, customer_id: uuid.UUID

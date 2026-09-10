@@ -36,6 +36,7 @@ from app.api.deps import (
     get_appointment_service,
     get_customer_service,
     get_dispatch_service,
+    get_emergency_notification_service,
     get_voice_service,
     verify_vapi_secret,
 )
@@ -43,11 +44,15 @@ from app.application.schemas.voice import VapiChatCompletionRequest
 from app.application.services.appointment_service import AppointmentService
 from app.application.services.customer_service import CustomerService
 from app.application.services.dispatch_service import DispatchService
+from app.application.services.emergency_notification_service import (
+    EmergencyNotificationService,
+)
 from app.application.services.voice_service import (
     ChatCompletionResult,
     VoiceService,
     VoiceTextDelta,
 )
+from app.domain.entities.emergency_ticket import EmergencyTicket
 from app.domain.exceptions import DomainError
 from app.shared.logging.timing import elapsed_ms, now
 
@@ -75,6 +80,9 @@ async def vapi_chat_completions(
     dispatch_service: DispatchService = Depends(get_dispatch_service),
     appointment_service: AppointmentService = Depends(get_appointment_service),
     customer_service: CustomerService = Depends(get_customer_service),
+    notifications: EmergencyNotificationService = Depends(
+        get_emergency_notification_service
+    ),
 ) -> Response:
     # Bound before anything else so every later event in this turn — across
     # every layer — carries the call id without it being threaded through.
@@ -114,6 +122,7 @@ async def vapi_chat_completions(
                     dispatch_service=dispatch_service,
                     appointment_service=appointment_service,
                     customer_service=customer_service,
+                    notifications=notifications,
                 ),
             ),
             media_type="text/event-stream",
@@ -146,8 +155,11 @@ async def vapi_chat_completions(
         )
 
     try:
-        await dispatch_service.sync_ticket_from_outcome(
+        ticket = await dispatch_service.sync_ticket_from_outcome(
             result.organization_id, result.conversation_id
+        )
+        await _alert_dispatcher(
+            ticket, notifications, correlation={"vapi_call_id": payload.call.id}
         )
     except DomainError as exc:
         # Same reasoning as the text-conversation endpoint: the call turn
@@ -269,6 +281,7 @@ async def _streamed_completion(
     dispatch_service: DispatchService,
     appointment_service: AppointmentService,
     customer_service: CustomerService,
+    notifications: EmergencyNotificationService,
 ) -> AsyncGenerator[str, None]:
     """Emits the turn as OpenAI-compatible SSE while it is still being
     generated.
@@ -354,6 +367,7 @@ async def _streamed_completion(
         dispatch_service=dispatch_service,
         appointment_service=appointment_service,
         customer_service=customer_service,
+        notifications=notifications,
     )
     # Runs after the caller is already hearing the reply, so this is not
     # latency they perceive — but it does delay `[DONE]`, and on a final
@@ -378,12 +392,16 @@ async def _run_outcome_syncs(
     dispatch_service: DispatchService,
     appointment_service: AppointmentService,
     customer_service: CustomerService,
+    notifications: EmergencyNotificationService,
 ) -> None:
     """The three downstream syncs, in the order the non-streaming path runs
     them and with the same isolate-and-continue behaviour."""
     try:
-        await dispatch_service.sync_ticket_from_outcome(
+        ticket = await dispatch_service.sync_ticket_from_outcome(
             result.organization_id, result.conversation_id
+        )
+        await _alert_dispatcher(
+            ticket, notifications, correlation={"vapi_call_id": vapi_call_id}
         )
     except DomainError as exc:
         logger.warning(
@@ -569,3 +587,31 @@ def _first_present(data: dict[str, Any], *keys: str) -> Any | None:
         if data.get(key) is not None:
             return data[key]
     return None
+
+
+async def _alert_dispatcher(
+    ticket: EmergencyTicket | None,
+    notifications: EmergencyNotificationService,
+    *,
+    correlation: dict[str, str],
+) -> None:
+    """Sends the outbound emergency alert for a ticket the outcome sync just
+    created, on the paths that do not go through the tool loop.
+
+    The tool loop alerts inside `create_service_request`, because there the
+    assistant is about to speak and needs the answer. Here nobody is waiting
+    on it — the turn is already decided — but the alert still has to happen,
+    or a call that produced a ticket without using tools would leave a real
+    emergency with nobody told.
+
+    Idempotent by ticket, so the two paths overlapping (which they routinely
+    do: the tool loop creates the ticket and this sync then re-runs on the
+    same conversation) sends exactly one alert. Never raises: a turn that has
+    already reached the caller must not be failed by an alerting problem.
+    """
+    if ticket is None:
+        return
+    try:
+        await notifications.notify_ticket(ticket)
+    except Exception:
+        logger.error("emergency_notification_failed", exc_info=True, **correlation)

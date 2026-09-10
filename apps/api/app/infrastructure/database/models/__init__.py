@@ -17,6 +17,11 @@ from app.infrastructure.database.models.customer_caller_identity import (
 from app.infrastructure.database.models.emergency_keyword import EmergencyKeywordModel
 from app.infrastructure.database.models.emergency_ticket import EmergencyTicketModel
 from app.infrastructure.database.models.faq_entry import FAQEntryModel
+from app.infrastructure.database.models.notification import (
+    EmergencyNotificationDeliveryModel,
+    OrganizationNotificationSettingsModel,
+)
+from app.infrastructure.database.models.offered_slot import OfferedSlotModel
 from app.infrastructure.database.models.organization import OrganizationModel
 from app.infrastructure.database.models.refresh_token import RefreshTokenModel
 from app.infrastructure.database.models.role import (
@@ -41,10 +46,13 @@ __all__ = [
     "CustomerCallerIdentityModel",
     "CustomerModel",
     "EmergencyKeywordModel",
+    "EmergencyNotificationDeliveryModel",
     "EmergencyTicketModel",
     "FAQEntryModel",
     "HoursExceptionModel",
+    "OfferedSlotModel",
     "OrganizationModel",
+    "OrganizationNotificationSettingsModel",
     "PermissionModel",
     "RefreshTokenModel",
     "RoleModel",

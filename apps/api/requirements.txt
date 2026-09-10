@@ -13,3 +13,7 @@ python-dotenv==1.0.1
 greenlet==3.1.1
 tzdata==2024.2
 openai==1.59.6
+# Already present transitively via openai; declared explicitly because
+# `WebhookNotificationProvider` imports it directly, and an undeclared
+# dependency would break the day openai changed its own HTTP client.
+httpx==0.28.1

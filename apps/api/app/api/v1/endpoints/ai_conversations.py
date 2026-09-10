@@ -22,6 +22,7 @@ from app.api.deps import (
     get_appointment_service,
     get_customer_service,
     get_dispatch_service,
+    get_emergency_notification_service,
     require_permission,
 )
 from app.application.schemas.ai_conversations import (
@@ -37,6 +38,9 @@ from app.application.services.ai_brain_service import AIBrainService
 from app.application.services.appointment_service import AppointmentService
 from app.application.services.customer_service import CustomerService
 from app.application.services.dispatch_service import DispatchService
+from app.application.services.emergency_notification_service import (
+    EmergencyNotificationService,
+)
 from app.domain.entities.rbac import Permissions
 from app.domain.entities.user import User
 from app.domain.exceptions import DomainError
@@ -97,11 +101,25 @@ async def send_message(
     dispatch_service: DispatchService = Depends(get_dispatch_service),
     appointment_service: AppointmentService = Depends(get_appointment_service),
     customer_service: CustomerService = Depends(get_customer_service),
+    notifications: EmergencyNotificationService = Depends(
+        get_emergency_notification_service
+    ),
 ) -> SendMessageResult:
     result = await service.send_message(user.organization_id, conversation_id, payload.message)
 
     try:
-        await dispatch_service.sync_ticket_from_outcome(user.organization_id, conversation_id)
+        ticket = await dispatch_service.sync_ticket_from_outcome(
+            user.organization_id, conversation_id
+        )
+        if ticket is not None:
+            # This endpoint backs the dashboard's conversation simulator, but
+            # the records it writes are real — a ticket created here goes into
+            # the same dispatch queue a phone call's does. Alerting on it is
+            # therefore the consistent behaviour, not an over-reach: a real
+            # emergency in the queue that nobody was told about is the exact
+            # failure this milestone removes. Idempotent by ticket, so a turn
+            # that already alerted through the tool loop sends nothing more.
+            await notifications.notify_ticket(ticket)
     except DomainError as exc:
         # The conversation turn itself already succeeded — a Dispatch-side
         # failure must never take that down with it. See
