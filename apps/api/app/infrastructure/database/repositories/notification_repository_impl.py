@@ -141,21 +141,19 @@ class SqlAlchemyNotificationDeliveryRepository(NotificationDeliveryRepository):
         model = result.scalar_one_or_none()
         return _to_entity(model) if model else None
 
-    async def claim(
+    async def enqueue(
         self,
         organization_id: uuid.UUID,
         ticket_id: uuid.UUID,
         *,
         channel: NotificationChannel | None,
         provider: str,
+        status: DeliveryStatus,
+        next_attempt_at: datetime | None,
     ) -> tuple[NotificationDelivery, bool]:
-        # INSERT ... ON CONFLICT DO NOTHING against the unique index on the
-        # ticket. This is the whole idempotency guarantee, and it has to be
-        # one statement: a SELECT-then-INSERT would let two workers both see
-        # no row and both send, which for an emergency means paging a human
-        # twice for one incident. `RETURNING` yields a row only when the
-        # insert actually happened, so an empty result *is* the signal that
-        # someone else owns this ticket.
+        # One statement, against the unique index on the ticket: a
+        # SELECT-then-INSERT would let two writers both see no row. RETURNING
+        # yields a row only when the insert actually happened.
         statement = (
             pg_insert(EmergencyNotificationDeliveryModel)
             .values(
@@ -164,8 +162,9 @@ class SqlAlchemyNotificationDeliveryRepository(NotificationDeliveryRepository):
                 emergency_ticket_id=ticket_id,
                 channel=channel,
                 provider=provider,
-                status=DeliveryStatus.PENDING,
+                status=status,
                 attempts=0,
+                next_attempt_at=next_attempt_at,
             )
             .on_conflict_do_nothing(index_elements=["emergency_ticket_id"])
             .returning(EmergencyNotificationDeliveryModel.id)
@@ -176,48 +175,62 @@ class SqlAlchemyNotificationDeliveryRepository(NotificationDeliveryRepository):
         existing = await self.get_for_ticket(organization_id, ticket_id)
         if existing is None:
             # Only reachable when the conflicting row belongs to another
-            # organization — impossible while ticket ids are unique per
-            # tenant, but a cross-tenant read must never be synthesised to
-            # paper over it. Report a not-configured record rather than
-            # inventing one that could authorise a claim.
-            return (
-                _unpersisted(organization_id, ticket_id, provider),
-                False,
-            )
+            # organization. Never synthesise a cross-tenant read to paper
+            # over it; report a record that licenses nothing.
+            return _unpersisted(organization_id, ticket_id, provider), False
         return existing, inserted_id is not None
 
-    async def record_result(
+    async def lock_next_due(
+        self, *, now: datetime, ticket_id: uuid.UUID | None = None
+    ) -> NotificationDelivery | None:
+        query = (
+            select(EmergencyNotificationDeliveryModel)
+            .where(
+                EmergencyNotificationDeliveryModel.next_attempt_at.is_not(None),
+                EmergencyNotificationDeliveryModel.next_attempt_at <= now,
+                EmergencyNotificationDeliveryModel.status.in_(
+                    (DeliveryStatus.PENDING, DeliveryStatus.FAILED)
+                ),
+            )
+            .order_by(EmergencyNotificationDeliveryModel.next_attempt_at)
+            .limit(1)
+            .with_for_update(skip_locked=True)
+        )
+        if ticket_id is not None:
+            query = query.where(EmergencyNotificationDeliveryModel.emergency_ticket_id == ticket_id)
+        model = (await self._session.execute(query)).scalar_one_or_none()
+        return _to_entity(model) if model else None
+
+    async def record_attempt(
         self,
-        organization_id: uuid.UUID,
-        ticket_id: uuid.UUID,
+        delivery_id: uuid.UUID,
         *,
         status: DeliveryStatus,
         error_code: str | None,
         provider: str,
+        next_attempt_at: datetime | None,
     ) -> NotificationDelivery:
         values: dict[str, object] = {
             "status": status,
             "error_code": error_code,
             "provider": provider,
             "attempts": EmergencyNotificationDeliveryModel.attempts + 1,
+            "next_attempt_at": next_attempt_at,
         }
         if status is DeliveryStatus.DELIVERED:
             values["delivered_at"] = datetime.now(timezone.utc)
-
-        await self._session.execute(
-            update(EmergencyNotificationDeliveryModel)
-            .where(
-                EmergencyNotificationDeliveryModel.organization_id == organization_id,
-                EmergencyNotificationDeliveryModel.emergency_ticket_id == ticket_id,
+        model = (
+            await self._session.execute(
+                update(EmergencyNotificationDeliveryModel)
+                .where(EmergencyNotificationDeliveryModel.id == delivery_id)
+                .values(**values)
+                .returning(EmergencyNotificationDeliveryModel)
+                .execution_options(synchronize_session=False)
             )
-            .values(**values)
-        )
+        ).scalar_one()
         await self._session.flush()
-
-        updated = await self.get_for_ticket(organization_id, ticket_id)
-        if updated is None:
-            return _unpersisted(organization_id, ticket_id, provider)
-        return updated
+        await self._session.refresh(model)
+        return _to_entity(model)
 
 
 def _unpersisted(
@@ -257,6 +270,7 @@ def _to_entity(model: EmergencyNotificationDeliveryModel) -> NotificationDeliver
         delivered_at=model.delivered_at,
         created_at=model.created_at,
         updated_at=model.updated_at,
+        next_attempt_at=model.next_attempt_at,
     )
 
 

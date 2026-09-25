@@ -168,6 +168,7 @@ class _Harness:
             offered_slot_repository=self.offered_slots,
         )
         tool_factory = VoiceToolExecutor(
+            clock=lambda: _NOW,
             appointment_service=appointment_service,
             dispatch_service=DispatchService(
                 emergency_ticket_repository=self.tickets,

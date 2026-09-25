@@ -149,9 +149,13 @@ async def test_last_owner_cannot_be_demoted_or_deactivated(client: AsyncClient):
     me = await client.get("/api/v1/auth/me", headers=_auth_headers(owner_token))
     owner_id = me.json()["id"]
 
+    # The last-owner guard, exercised by the one person still allowed to
+    # act on an Owner at all: the Owner themselves. (This used to be the
+    # Admin's request, which now stops earlier with a 403 — see
+    # `test_an_admin_cannot_take_over_the_organization`.)
     demote_response = await client.patch(
         f"/api/v1/team/members/{owner_id}/role",
-        headers=_auth_headers(admin_token),
+        headers=_auth_headers(owner_token),
         json={"role": "Admin"},
     )
     assert demote_response.status_code == 409
@@ -174,3 +178,93 @@ async def test_last_owner_cannot_be_demoted_or_deactivated(client: AsyncClient):
     )
     assert second_demote_response.status_code == 200
     assert second_demote_response.json()["roles"] == ["Admin"]
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_an_admin_cannot_take_over_the_organization(client: AsyncClient):
+    """The privilege escalation this pins: `users:manage` is held by Admins,
+    and the role endpoint checked nothing else — so an Admin could promote
+    themselves to Owner, then demote and deactivate the real Owner, and
+    end up holding `organization:manage` (the voice kill switch and the
+    emergency alert destination), which the Admin role deliberately lacks.
+    Every step of that sequence must now be refused, and the Owner must be
+    left exactly as they were."""
+    owner_token = await _register(client, "Takeover HVAC", "takeover-owner@example.com")
+    invite = await client.post(
+        "/api/v1/team/members",
+        headers=_auth_headers(owner_token),
+        json={
+            "full_name": "Ambitious Admin",
+            "email": "takeover-admin@example.com",
+            "temporary_password": "temp-pass-123",
+            "role": "Admin",
+        },
+    )
+    assert invite.status_code == 201
+    admin_id = invite.json()["id"]
+    admin_token = (
+        await client.post(
+            "/api/v1/auth/login",
+            json={"email": "takeover-admin@example.com", "password": "temp-pass-123"},
+        )
+    ).json()["tokens"]["access_token"]
+    owner_id = (await client.get("/api/v1/auth/me", headers=_auth_headers(owner_token))).json()[
+        "id"
+    ]
+
+    self_promote = await client.patch(
+        f"/api/v1/team/members/{admin_id}/role",
+        headers=_auth_headers(admin_token),
+        json={"role": "Owner"},
+    )
+    assert self_promote.status_code == 403
+
+    demote_owner = await client.patch(
+        f"/api/v1/team/members/{owner_id}/role",
+        headers=_auth_headers(admin_token),
+        json={"role": "Member"},
+    )
+    assert demote_owner.status_code == 403
+
+    deactivate_owner = await client.patch(
+        f"/api/v1/team/members/{owner_id}/status",
+        headers=_auth_headers(admin_token),
+        json={"is_active": False},
+    )
+    assert deactivate_owner.status_code == 403
+
+    # Still an active Owner, and the Admin still cannot reach an Owner-only
+    # route.
+    members = (
+        await client.get("/api/v1/team/members", headers=_auth_headers(owner_token))
+    ).json()
+    owner_row = next(member for member in members if member["id"] == owner_id)
+    admin_row = next(member for member in members if member["id"] == admin_id)
+    assert owner_row["roles"] == ["Owner"]
+    assert owner_row["is_active"] is True
+    assert admin_row["roles"] == ["Admin"]
+    org_update = await client.patch(
+        "/api/v1/organizations/current",
+        headers=_auth_headers(admin_token),
+        json={"voice_assistant_enabled": False},
+    )
+    assert org_update.status_code == 403
+
+    # What an Admin may still do is unchanged: manage non-Owners.
+    member = await client.post(
+        "/api/v1/team/members",
+        headers=_auth_headers(admin_token),
+        json={
+            "full_name": "New Member",
+            "email": "takeover-member@example.com",
+            "temporary_password": "temp-pass-123",
+            "role": "Member",
+        },
+    )
+    assert member.status_code == 201
+    promote_member = await client.patch(
+        f"/api/v1/team/members/{member.json()['id']}/role",
+        headers=_auth_headers(admin_token),
+        json={"role": "Admin"},
+    )
+    assert promote_member.status_code == 200

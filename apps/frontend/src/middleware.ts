@@ -8,6 +8,9 @@ const PROTECTED_PREFIXES = [
   ROUTES.businessKnowledge,
   ROUTES.aiConversations,
   ROUTES.dispatch,
+  ROUTES.appointments,
+  ROUTES.customers,
+  ROUTES.analytics,
   ROUTES.team,
 ];
 const AUTH_PAGES = ["/login", "/register"];
@@ -52,6 +55,9 @@ export const config = {
     "/business-knowledge/:path*",
     "/ai-conversations/:path*",
     "/dispatch/:path*",
+    "/appointments/:path*",
+    "/customers/:path*",
+    "/analytics/:path*",
     "/team/:path*",
   ],
 };

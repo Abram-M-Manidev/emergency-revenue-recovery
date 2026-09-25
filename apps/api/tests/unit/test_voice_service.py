@@ -84,6 +84,15 @@ class FakeVoiceLineRepository(VoiceLineRepository):
         return line
 
 
+    async def list_all(self):
+        raise NotImplementedError
+
+    async def update(self, line_id, **kwargs):
+        raise NotImplementedError
+
+    async def delete(self, line_id):
+        raise NotImplementedError
+
 class FakeVoiceCallRepository(VoiceCallRepository):
     def __init__(self) -> None:
         self._calls: dict[str, VoiceCall] = {}
@@ -231,6 +240,25 @@ async def test_resolves_by_phone_number_id_when_assistant_id_absent():
     )
 
     assert await voice_call_repo.get_by_vapi_call_id("call_1") is not None
+
+
+@pytest.mark.asyncio
+async def test_an_unmapped_assistant_is_never_routed_by_its_phone_number():
+    """Vapi named an assistant nobody provisioned, on a phone number that
+    belongs to some organization's line. Routing by the number would answer
+    as that organization for an assistant it never had — the wrong-tenant
+    incident by another road. The call fails closed instead."""
+    service, _, _, voice_call_repo, _ = _make_voice_service(voice_lines=[_voice_line()])
+
+    with pytest.raises(VoiceLineNotFoundError):
+        await service.handle_chat_completion(
+            vapi_call_id="call_unmapped",
+            assistant_id="an-assistant-nobody-provisioned",
+            phone_number_id=_PHONE_NUMBER_ID,
+            customer_number=None,
+            customer_utterance="Hello?",
+        )
+    assert await voice_call_repo.get_by_vapi_call_id("call_unmapped") is None
 
 
 @pytest.mark.asyncio

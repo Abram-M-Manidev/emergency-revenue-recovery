@@ -5,6 +5,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
+from app.application.schemas.auth import NewPassword
 from app.domain.entities.emergency_ticket import TicketStatus
 
 # --- Technicians ---
@@ -33,7 +34,7 @@ class CreateTechnicianRequest(BaseModel):
     # bcrypt (see infrastructure/security/password.py) silently truncates
     # beyond 72 bytes and this codebase rejects that instead — capping the
     # request field here keeps that a normal 422, not a raw ValueError.
-    temporary_password: str = Field(min_length=8, max_length=72)
+    temporary_password: NewPassword
 
 
 class SetOnCallRequest(BaseModel):

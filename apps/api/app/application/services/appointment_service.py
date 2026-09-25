@@ -60,6 +60,8 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
+import structlog
+
 from app.domain.availability import AvailabilityProvider
 from app.domain.entities.appointment import Appointment, AppointmentStatus
 from app.domain.entities.availability import (
@@ -90,6 +92,8 @@ from app.domain.repositories.conversation_outcome_repository import Conversation
 from app.domain.repositories.offered_slot_repository import OfferedSlotRepository
 from app.domain.repositories.service_repository import ServiceRepository
 from app.domain.repositories.technician_profile_repository import TechnicianProfileRepository
+
+logger = structlog.get_logger("app.appointments")
 
 # Legal status transitions: REQUESTED -> SCHEDULED only happens through
 # schedule_appointment (it needs extra required fields the generic status
@@ -223,26 +227,57 @@ class AppointmentService:
         appointment: Appointment,
         outcome: ConversationOutcome,
     ) -> Appointment:
-        """Copies contact details the AI has since learned onto an
-        appointment that was created without them.
+        """Brings the appointment's contact details up to date with what the
+        AI currently understands, mirroring
+        `DispatchService._backfill_contact_details` field for field.
 
-        Strictly additive, mirroring `DispatchService._backfill_contact_details`
-        field for field: a value is written only when the appointment's own
-        is blank AND the outcome has something to put there. A staff
-        correction therefore always wins over the AI, and a later turn that
-        *loses* a detail can never blank out a value already recorded. When
-        nothing is missing this performs no write at all.
+        Two rules, and the difference between them is the 2026-09-22 fix:
 
-        This is the gap the 2026-08-22 live call exposed: the outcome held
-        the caller's phone number and address, the appointment row held
-        empty strings for both, and nothing ever reconciled them."""
+        1. A blank outcome value never overwrites a recorded one. This is
+           the 2026-08-22 gap in reverse — a later turn that simply omits a
+           field the model reported earlier must not erase it.
+        2. A DIFFERENT non-blank outcome value does overwrite. Callers
+           correct themselves constantly, and this used to be strictly
+           additive, so the first version of a detail was permanent. Two
+           real calls show the cost: one booked appointment carried
+           "Sixteenth Street, California" while the outcome had learned
+           "Sixteenth Street, Lyle, California", and a replayed caller who
+           said "my name is John. Actually, sorry, it's Jonathan" was
+           dispatched as "John". The row a technician actually reads held
+           the caller's *first*, usually worst, attempt.
+
+        The old rule existed so "a staff correction always wins over the
+        AI". No endpoint lets staff edit these three fields on an
+        appointment — `schedule` and `status` are the only writes — so it
+        was protecting a workflow that does not exist while discarding one
+        that happens on most calls. These rows are per-conversation and the
+        AI is their only writer while the call is live. `customers` is
+        deliberately NOT treated this way: it outlives the conversation and
+        is the CRM dedupe key, so its backfill stays strictly additive.
+
+        When nothing has changed this performs no write at all."""
         updates = {
             field: getattr(outcome, field)
             for field in ("customer_name", "customer_phone", "customer_address")
-            if _is_blank(getattr(appointment, field)) and not _is_blank(getattr(outcome, field))
+            if not _is_blank(getattr(outcome, field))
+            and getattr(outcome, field) != getattr(appointment, field)
         }
         if not updates:
             return appointment
+
+        # Field NAMES only — never their values, which are caller PII.
+        # `overwritten` separates filling a blank from replacing a value the
+        # AI reported earlier: the second is how a caller's correction reaches
+        # the record, and also the only way a model that *degrades* a detail
+        # could reach it. Silent either way until this line existed.
+        logger.info(
+            "appointment_contact_details_synced",
+            organization_id=str(organization_id),
+            fields=sorted(updates),
+            overwritten=sorted(
+                field for field in updates if not _is_blank(getattr(appointment, field))
+            ),
+        )
 
         return await self._appointments.backfill_contact_details(
             organization_id, appointment.id, **updates

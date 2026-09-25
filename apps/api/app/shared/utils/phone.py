@@ -46,3 +46,25 @@ def normalize_phone_number(raw: str | None) -> str | None:
         return None
 
     return f"+{digits}" if international else digits
+
+
+def storable_phone_number(raw: str | None) -> str | None:
+    """`normalize_phone_number`, plus the one check every writer needs: that
+    the result fits the column it is going into.
+
+    Every phone column this value can reach (`conversation_outcomes`,
+    `appointments`, `emergency_tickets`, `customers`) is 32 characters. The
+    canonical form keeps digits only, so this almost never bites — but a
+    caller reciting an account number and a phone number in one breath does
+    exist, and an over-long value is a failed write that rolls back the
+    whole turn (2026-09-24). None means "no usable number", which every
+    caller already handles, rather than a truncated one, which would be a
+    fabricated number indistinguishable from a real one."""
+    # Imported here to keep this module free of domain imports at load time
+    # for the many callers that only need `normalize_phone_number`.
+    from app.domain.entities.conversation_outcome import CUSTOMER_PHONE_MAX_LENGTH
+
+    canonical = normalize_phone_number(raw)
+    if canonical is None or len(canonical) > CUSTOMER_PHONE_MAX_LENGTH:
+        return None
+    return canonical

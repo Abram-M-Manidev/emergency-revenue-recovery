@@ -11,6 +11,7 @@ into this template."""
 from __future__ import annotations
 
 from datetime import date
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.domain.entities.business_hours import HoursException, WeeklyHours
 from app.domain.entities.business_profile import BusinessProfile
@@ -123,15 +124,23 @@ window to someone who booked a routine daytime repair tells them they are \
 being charged and treated as an emergency when they are not.
 
 For an emergency, call create_service_request with classification \
-"emergency". Its result will say "bookable": false — do not offer or attempt \
-an appointment. Emergency wording belongs to this path and only this path.
+"emergency" as soon as you know what is wrong. Do not delay it to collect a \
+name or an address the caller cannot give — the ticket must exist first. If \
+its result lists "still_needed", ask for those details and call the tool \
+again with them. Its result will say "bookable": false — do not offer or \
+attempt an appointment. Emergency wording belongs to this path and only this \
+path.
 
 What you may tell an emergency caller about being alerted depends ENTIRELY \
 on the "dispatcher_alerted" field in that result. Never decide it yourself, \
 and never assume it from the fact that the request was recorded:
 - "dispatcher_alerted": true — say a dispatcher has been alerted and will \
 contact them shortly.
-- "dispatcher_alerted": false — a human has NOT been confirmed as notified. \
+- "dispatcher_alerted": false with "notification_status": "pending" — the \
+alert is being sent right now but is NOT confirmed yet. You may say the team \
+is being alerted now. Do NOT say a dispatcher HAS been alerted or that anyone \
+is on the way.
+- "dispatcher_alerted": false otherwise — a human has NOT been confirmed as notified. \
 Say their emergency has been logged and the team will see it. Do NOT say a \
 dispatcher has been alerted, has been notified, is on the way, or that \
 anyone is coming. If the situation sounds dangerous right now, tell them to \
@@ -228,6 +237,26 @@ def _known_caller_section(known_caller: KnownCaller | None) -> str | None:
     return "\n".join(lines)
 
 
+def _zone_label(profile: BusinessProfile | None) -> str:
+    """The timezone name to print beside today's date.
+
+    Must agree with whatever resolved that date (`ai_brain_service._today_in`),
+    which falls back to UTC on a zone it cannot load. Printing the stored
+    name unchecked would let the prompt announce a zone the date was *not*
+    computed in — and since the model builds booking arguments from that
+    line, a caller could be read a day that belongs to neither zone. The
+    API validates this field on write, but `business_profiles` rows can also
+    be inserted by hand, which is how onboarding already creates
+    `voice_lines`."""
+    if profile is None:
+        return "UTC"
+    try:
+        ZoneInfo(profile.timezone)
+    except (ZoneInfoNotFoundError, ValueError):
+        return "UTC"
+    return profile.timezone
+
+
 def build_system_prompt(
     *,
     profile: BusinessProfile | None,
@@ -258,6 +287,28 @@ def build_system_prompt(
         "caller has an emergency, answer non-emergency questions using only "
         "the verified information below, and collect the caller's name, "
         "phone number, and address when relevant."
+    )
+
+    # The model has no clock. Without this it falls back on its training
+    # data for the year, and on a live call on 2026-09-22 it did exactly
+    # that: the caller chose 8:30 AM from three offered times and the model
+    # sent date="2024-09-22" to book_appointment. The time of day and the
+    # month/day were right; only the year was two years stale. The booking
+    # was refused with SLOT_NOT_OFFERED, whose recovery advice is "call
+    # check_availability again" — so the same three times were re-offered,
+    # the caller chose 8:30 again, and the call looped until they hung up.
+    #
+    # `today` is computed in the business's own timezone by the caller, not
+    # the server's: between midnight and dawn UTC those are different days
+    # for a US business, and being one day out here is the same class of
+    # failure as being two years out.
+    business_zone = _zone_label(profile)
+    sections.append(
+        f"Today's date is {today.strftime('%A, %B %d, %Y')} "
+        f"({business_zone}). Use it for every calendar date you produce — "
+        "especially the year, which you must never guess, assume, or recall "
+        "from memory. When a tool result gives you a date, quote that date "
+        "back exactly as written rather than reconstructing it."
     )
 
     if weekly_hours:

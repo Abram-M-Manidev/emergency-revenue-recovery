@@ -14,7 +14,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, text
 from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -74,6 +74,13 @@ class EmergencyNotificationDeliveryModel(UUIDPrimaryKeyMixin, TimestampMixin, Ba
     """
 
     __tablename__ = "emergency_notification_deliveries"
+    __table_args__ = (
+        Index(
+            "ix_emergency_notification_deliveries_due",
+            "next_attempt_at",
+            postgresql_where=text("next_attempt_at IS NOT NULL"),
+        ),
+    )
 
     organization_id: Mapped[uuid.UUID] = mapped_column(
         PG_UUID(as_uuid=True),
@@ -106,5 +113,13 @@ class EmergencyNotificationDeliveryModel(UUIDPrimaryKeyMixin, TimestampMixin, Ba
     # would turn this column into a place secrets accumulate.
     error_code: Mapped[str | None] = mapped_column(String(50), nullable=True)
     delivered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # The outbox schedule. Non-null means "there is still an alert to send,
+    # and this is when": set when the ticket is created (in the ticket's own
+    # transaction), pushed back after a failed attempt, and cleared once the
+    # row reaches a terminal state. The worker only ever looks at rows where
+    # this is set and due — see the partial index in the migration.
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

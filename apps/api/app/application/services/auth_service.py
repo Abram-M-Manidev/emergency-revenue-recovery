@@ -8,6 +8,8 @@ or FastAPI directly, so it can be unit-tested with in-memory fakes.
 
 from __future__ import annotations
 
+import asyncio
+import secrets
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -34,6 +36,29 @@ from app.infrastructure.security.tokens import (
     parse_refresh_token,
 )
 from app.shared.utils.slugify import slugify
+
+# `refresh_tokens.user_agent` / `.ip_address` widths. Both values come from
+# request headers the client controls, and some real browsers (in-app
+# webviews in particular) send User-Agents longer than 255 characters — which
+# made login and refresh fail with a raw database error for those users.
+_USER_AGENT_MAX_LENGTH = 255
+_IP_ADDRESS_MAX_LENGTH = 64
+
+_dummy_password_hash: str | None = None
+
+
+def _password_hash_for_unknown_user() -> str:
+    """A real bcrypt hash of an unguessable value, computed once.
+
+    Login verifies against this when the email is unknown, so a miss costs
+    the same bcrypt work as a hit. Without it an unknown address answered
+    in microseconds and a known one in ~250ms — enough to enumerate which
+    addresses have accounts, a question the identical error message was
+    already trying not to answer."""
+    global _dummy_password_hash
+    if _dummy_password_hash is None:
+        _dummy_password_hash = hash_password(secrets.token_urlsafe(32))
+    return _dummy_password_hash
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,7 +108,7 @@ class AuthService:
         # Enforced here rather than in the route so the rule holds for every
         # caller of `register`, present and future, the same way the booking
         # and kill-switch invariants live in their services.
-        if not self._settings.FEATURE_REGISTRATION_ENABLED:
+        if not self._settings.registration_enabled:
             raise RegistrationDisabledError()
 
         if await self._users.get_by_email(email) is not None:
@@ -114,7 +139,12 @@ class AuthService:
         ip_address: str | None = None,
     ) -> IssuedSession:
         user = await self._users.get_by_email(email)
-        if user is None or not verify_password(password, user.hashed_password):
+        hashed = user.hashed_password if user is not None else _password_hash_for_unknown_user()
+        # Off the event loop: bcrypt is deliberately slow CPU work, and run
+        # inline it stalled every other request on this worker — live voice
+        # turns included — for the duration of each login attempt.
+        matches = await asyncio.to_thread(verify_password, password, hashed)
+        if user is None or not matches:
             raise InvalidCredentialsError()
         if not user.is_active:
             raise InactiveAccountError()
@@ -178,8 +208,8 @@ class AuthService:
             user_id=user.id,
             token_hash=issued.token_hash,
             expires_at=expires_at,
-            user_agent=user_agent,
-            ip_address=ip_address,
+            user_agent=user_agent[:_USER_AGENT_MAX_LENGTH] if user_agent else user_agent,
+            ip_address=ip_address[:_IP_ADDRESS_MAX_LENGTH] if ip_address else ip_address,
         )
 
         return IssuedSession(

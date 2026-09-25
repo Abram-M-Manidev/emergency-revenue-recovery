@@ -142,10 +142,19 @@ async def test_set_member_active_blocks_deactivating_the_last_owner():
         temporary_password="hunter22", role_name="Admin",
     )
 
-    with pytest.raises(LastOwnerError):
+    # An Admin is refused before the last-owner rule is even consulted: only
+    # an Owner may act on an Owner at all (the org-takeover fix). The Owner
+    # cannot deactivate themselves either, so the last Owner is protected on
+    # every path.
+    with pytest.raises(AuthorizationError):
         await service.set_member_active(
             _ORG_ID, owner.id, is_active=False, acting_user_id=admin.id
         )
+    with pytest.raises(AuthorizationError):
+        await service.set_member_active(
+            _ORG_ID, owner.id, is_active=False, acting_user_id=owner.id
+        )
+    assert (await users.get_by_id(owner.id)).is_active is True
 
 
 @pytest.mark.asyncio
@@ -204,10 +213,44 @@ async def test_set_member_role_blocks_demoting_the_last_owner():
         temporary_password="hunter22", role_name="Admin",
     )
 
+    # The last-owner guard itself, reached by the only person still allowed
+    # to demote an Owner: the Owner.
     with pytest.raises(LastOwnerError):
+        await service.set_member_role(
+            _ORG_ID, owner.id, role_name="Admin", acting_user_id=owner.id
+        )
+    # An Admin never gets that far.
+    with pytest.raises(AuthorizationError):
         await service.set_member_role(
             _ORG_ID, owner.id, role_name="Admin", acting_user_id=admin.id
         )
+
+
+@pytest.mark.asyncio
+async def test_an_admin_cannot_promote_anyone_to_owner():
+    """The first step of the org takeover: `users:manage` alone must not be
+    enough to mint an Owner — not for someone else, and not for oneself."""
+    service, users, roles = _make_service()
+    await _seed_owner(users, roles)
+    admin = await service.invite_member(
+        _ORG_ID, full_name="Admin", email="admin-escalate@example.com",
+        temporary_password="hunter22", role_name="Admin",
+    )
+    member = await service.invite_member(
+        _ORG_ID, full_name="Member", email="member-escalate@example.com",
+        temporary_password="hunter22", role_name="Member",
+    )
+
+    for target in (admin, member):
+        with pytest.raises(AuthorizationError):
+            await service.set_member_role(
+                _ORG_ID, target.id, role_name="Owner", acting_user_id=admin.id
+            )
+    # Managing non-Owners is unchanged.
+    promoted = await service.set_member_role(
+        _ORG_ID, member.id, role_name="Admin", acting_user_id=admin.id
+    )
+    assert [role.name for role in promoted.roles] == ["Admin"]
 
 
 @pytest.mark.asyncio

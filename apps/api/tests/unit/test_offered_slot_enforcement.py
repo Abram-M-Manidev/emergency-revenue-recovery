@@ -171,6 +171,7 @@ class _Harness:
             offered_slot_repository=self.offered_slots,
         )
         self.factory = VoiceToolExecutor(
+            clock=lambda: _NOW,
             appointment_service=self.appointment_service,
             dispatch_service=DispatchService(
                 emergency_ticket_repository=self.tickets,
@@ -876,3 +877,378 @@ async def test_a_conversation_holding_no_appointment_searches_exactly_as_before(
     result = await harness.call(uuid.uuid4(), CHECK_AVAILABILITY.name)
 
     assert [slot["start_time"] for slot in result["slots"]] == ["08:00", "08:30", "09:00"]
+
+
+# --- The 2026-09-22 booking loop ---------------------------------------------
+#
+# A live call offered 8:00, 8:30 and 9:00, the caller chose 8:30 three times,
+# and the model answered each time by reading the same three options back.
+# Nothing in the transcript explained it; the tool log did. Every attempt
+# arrived as date="2024-09-22", start_time="08:30" — the right minute on the
+# right day of the right month, two years stale, because the model has no
+# clock and the tool result carrying the real date is gone from its context
+# by the time the caller answers. The instant missed the offer record, the
+# refusal said "call check_availability", and that advice rebuilt the same
+# wrong instant on the next turn.
+#
+# Every test below drives the tools exactly as that model did.
+
+_STALE_YEAR_DATE = "2024-08-24"  # what the model sends
+_REAL_DATE = "2026-08-24"  # what it was offered
+
+
+@pytest.mark.asyncio
+async def test_a_year_the_model_invented_still_books_the_time_the_caller_chose():
+    """TEST 1. The live failure, end to end: offer, a choice carrying a stale
+    year, and a booking that must still land on the offered instant."""
+    harness = _Harness()
+    conversation = uuid.uuid4()
+    await harness.intake(conversation)
+    await harness.offer(conversation, service_name="Air Conditioning Repair")
+
+    selection = await harness.choose(
+        conversation, date=_STALE_YEAR_DATE, start_time="08:00"
+    )
+    assert selection["success"] is True
+    assert selection["selection_state"] == "selected"
+    # Echoed back in the real year, so the sentence the assistant speaks is
+    # the corrected one rather than the one it guessed.
+    assert selection["date"] == _REAL_DATE
+
+    result = await harness.call(
+        conversation, BOOK_APPOINTMENT.name, date=_STALE_YEAR_DATE, start_time="08:00"
+    )
+
+    assert result["success"] is True
+    assert result["status"] == "confirmed"
+    assert result["date"] == _REAL_DATE
+    appointment = await harness.appointments.get_by_conversation_id(conversation)
+    assert appointment is not None
+    assert appointment.status is AppointmentStatus.SCHEDULED
+    assert appointment.scheduled_start_at == _MONDAY_8AM
+
+
+@pytest.mark.asyncio
+async def test_repeating_the_same_choice_never_restarts_the_offer_cycle():
+    """TEST 2. The caller said "8:30" three times. A repeat must stay a
+    selection of the same slot — never a fresh search, never a refusal that
+    sends the model back to read the list again."""
+    harness = _Harness()
+    conversation = uuid.uuid4()
+    await harness.intake(conversation)
+    await harness.offer(conversation, service_name="Air Conditioning Repair")
+
+    first = await harness.choose(conversation, date=_STALE_YEAR_DATE, start_time="08:00")
+    second = await harness.choose(conversation, date=_STALE_YEAR_DATE, start_time="08:00")
+    third = await harness.choose(conversation, date=_REAL_DATE, start_time="08:00")
+
+    for attempt in (first, second, third):
+        assert attempt["success"] is True
+        assert attempt["selection_state"] == "selected"
+        assert attempt["date"] == _REAL_DATE
+        assert "check_availability" not in attempt["next_step"]
+
+    booked = await harness.call(
+        conversation, BOOK_APPOINTMENT.name, date=_STALE_YEAR_DATE, start_time="08:00"
+    )
+    assert booked["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_successful_booking_never_sends_the_model_back_for_more_times():
+    """TEST 3. The loop's exit condition. A confirmed booking must not carry
+    any instruction that would put the assistant back into the availability
+    flow — that advice is what turned one bad argument into four minutes of
+    the same three options."""
+    harness = _Harness()
+    conversation = uuid.uuid4()
+    await harness.intake(conversation)
+    await harness.offer(conversation, service_name="Air Conditioning Repair")
+    await harness.choose(conversation, date=_STALE_YEAR_DATE, start_time="08:00")
+
+    result = await harness.call(
+        conversation, BOOK_APPOINTMENT.name, date=_STALE_YEAR_DATE, start_time="08:00"
+    )
+
+    assert result["success"] is True
+    assert "check_availability" not in result["next_step"]
+    assert "offered_times" not in result
+    # The confirmation the caller is owed, from the result rather than from
+    # anything the model remembered.
+    assert result["spoken_time"]
+    assert result["duration_minutes"] == 90
+
+
+@pytest.mark.asyncio
+async def test_a_stale_year_cannot_conjure_a_time_that_was_never_offered():
+    """TEST 5. The reconciliation must not become a way in. Repairing the
+    year is only ever allowed to land on a time this caller was read; a
+    never-offered slot stays refused no matter which year is attached."""
+    harness = _Harness()
+    conversation = uuid.uuid4()
+    await harness.intake(conversation)
+    availability = await harness.offer(conversation, service_name="Air Conditioning Repair")
+    assert "14:00" not in {slot["start_time"] for slot in availability["slots"]}
+
+    for attempted_date in (_STALE_YEAR_DATE, _REAL_DATE):
+        selection = await harness.choose(
+            conversation, date=attempted_date, start_time="14:00"
+        )
+        assert selection["success"] is False
+        assert selection["error"] == ToolErrors.SLOT_NOT_OFFERED
+
+        result = await harness.call(
+            conversation, BOOK_APPOINTMENT.name, date=attempted_date, start_time="14:00"
+        )
+        assert result["success"] is False
+        assert result["error"] == ToolErrors.SLOT_NOT_OFFERED
+
+    appointment = await harness.appointments.get_by_conversation_id(conversation)
+    assert appointment is not None
+    assert appointment.status is AppointmentStatus.REQUESTED
+    assert appointment.scheduled_start_at is None
+
+
+@pytest.mark.asyncio
+async def test_an_ambiguous_year_repair_is_refused_rather_than_guessed():
+    """Two offers a year apart share a month, day and minute, so the model's
+    yearless description genuinely cannot say which was meant. Refusing is
+    the only correct answer — picking either would book a caller into a time
+    they might never have chosen."""
+    harness = _Harness()
+    conversation = uuid.uuid4()
+    await harness.intake(conversation)
+    await harness.offered_slots.record_offered(
+        _ORG_ID,
+        conversation,
+        [
+            AvailabilitySlot(start_at=_MONDAY_8AM, duration_minutes=90),
+            AvailabilitySlot(
+                start_at=_MONDAY_8AM.replace(year=_MONDAY_8AM.year + 1),
+                duration_minutes=90,
+            ),
+        ],
+        _OFFER_TURN_INDEX,
+    )
+
+    selection = await harness.choose(
+        conversation, date=_STALE_YEAR_DATE, start_time="08:00"
+    )
+
+    assert selection["success"] is False
+    assert selection["error"] == ToolErrors.SLOT_NOT_OFFERED
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_hands_back_the_offered_times_instead_of_another_search():
+    """The other half of the loop. When a time really was not offered but
+    the caller has already been read some, the recovery must be "ask which
+    of these you meant" — not "call check_availability", which on the live
+    call reproduced the identical list and the identical failure."""
+    harness = _Harness()
+    conversation = uuid.uuid4()
+    await harness.intake(conversation)
+    await harness.offer(conversation, service_name="Air Conditioning Repair")
+
+    refusal = await harness.choose(conversation, date=_REAL_DATE, start_time="14:00")
+
+    assert refusal["success"] is False
+    assert refusal["error"] == ToolErrors.SLOT_NOT_OFFERED
+    # Not merely silent about searching again — explicitly against it, since
+    # the old advice actively told the model to do exactly that.
+    assert "do NOT call check_availability".lower() in refusal["next_step"].lower()
+    assert "read the same list out again" in refusal["next_step"]
+    offered = refusal["offered_times"]
+    assert {slot["start_time"] for slot in offered} == {"08:00", "08:30", "09:00"}
+    # Given in the argument shape the model has to send back, so the repair
+    # does not depend on it reconstructing a date at all.
+    assert all(slot["date"] == _REAL_DATE for slot in offered)
+    assert all(slot["label"] for slot in offered)
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_with_nothing_yet_offered_still_asks_for_a_search():
+    """The empty-record case keeps the original advice: with nothing read to
+    the caller there is nothing to disambiguate against, and fetching real
+    times is genuinely the next step."""
+    harness = _Harness()
+    conversation = uuid.uuid4()
+    await harness.intake(conversation)
+
+    refusal = await harness.choose(conversation, date=_REAL_DATE, start_time="08:00")
+
+    assert refusal["success"] is False
+    assert refusal["error"] == ToolErrors.SLOT_NOT_OFFERED
+    assert "check_availability" in refusal["next_step"]
+    assert "offered_times" not in refusal
+
+
+@pytest.mark.asyncio
+async def test_the_year_repair_does_not_weaken_the_consent_invariant():
+    """TEST 7. The ladder is unchanged. A stale year does not buy the model
+    a way past "the caller has not heard this yet" — the turn-index rule
+    still refuses a choice recorded in the same turn it was offered."""
+    harness = _Harness()
+    conversation = uuid.uuid4()
+    await harness.intake(conversation)
+    await harness.offer(conversation, service_name="Air Conditioning Repair")
+
+    same_turn = await harness.call(
+        conversation,
+        SELECT_APPOINTMENT_SLOT.name,
+        turn_index=_OFFER_TURN_INDEX,
+        date=_STALE_YEAR_DATE,
+        start_time="08:00",
+    )
+    assert same_turn["success"] is False
+    assert same_turn["error"] == ToolErrors.SLOT_NOT_YET_HEARD
+
+    # And booking without a recorded choice is still refused, stale year or not.
+    unchosen = await harness.call(
+        conversation, BOOK_APPOINTMENT.name, date=_STALE_YEAR_DATE, start_time="08:00"
+    )
+    assert unchosen["success"] is False
+    assert unchosen["error"] == ToolErrors.SLOT_NOT_SELECTED
+    appointment = await harness.appointments.get_by_conversation_id(conversation)
+    assert appointment is not None and appointment.scheduled_start_at is None
+
+
+# --- The year repair must not become an isolation hole ------------------------
+#
+# Reconciliation reads the offer record to interpret a date, so if it ever
+# read a *wider* record than enforcement does, a stale year would be the way
+# in: a request no exact lookup could satisfy would suddenly resolve against
+# somebody else's offer. These mirror the exact-year isolation cases above,
+# driven through the wrong-year path instead.
+
+
+@pytest.mark.asyncio
+async def test_a_wrong_year_cannot_reconcile_against_another_conversations_offer():
+    harness = _Harness()
+    offered_to = uuid.uuid4()
+    booking_from = uuid.uuid4()
+    await harness.intake(offered_to)
+    await harness.intake(booking_from, customer_phone="5550001111")
+
+    # Only the first caller is ever read any times.
+    await harness.offer(offered_to, service_name="Air Conditioning Repair")
+
+    selection = await harness.choose(
+        booking_from, date=_STALE_YEAR_DATE, start_time="08:00"
+    )
+    booking = await harness.call(
+        booking_from, BOOK_APPOINTMENT.name, date=_STALE_YEAR_DATE, start_time="08:00"
+    )
+
+    assert selection["error"] == ToolErrors.SLOT_NOT_OFFERED
+    assert booking["error"] == ToolErrors.SLOT_NOT_OFFERED
+    stolen = await harness.appointments.get_by_conversation_id(booking_from)
+    assert stolen is not None and stolen.scheduled_start_at is None
+
+
+@pytest.mark.asyncio
+async def test_a_wrong_year_cannot_reconcile_against_another_tenants_offer():
+    harness = _Harness()
+    conversation = uuid.uuid4()
+    await harness.intake(conversation)
+
+    # Same conversation id, offer recorded against a different tenant.
+    await harness.offered_slots.record_offered(
+        _OTHER_ORG_ID,
+        conversation,
+        [AvailabilitySlot(start_at=_MONDAY_8AM, duration_minutes=90)],
+        _OFFER_TURN_INDEX,
+    )
+
+    selection = await harness.choose(
+        conversation, date=_STALE_YEAR_DATE, start_time="08:00"
+    )
+    booking = await harness.call(
+        conversation, BOOK_APPOINTMENT.name, date=_STALE_YEAR_DATE, start_time="08:00"
+    )
+
+    assert selection["error"] == ToolErrors.SLOT_NOT_OFFERED
+    assert booking["error"] == ToolErrors.SLOT_NOT_OFFERED
+
+
+@pytest.mark.asyncio
+async def test_the_repair_only_ever_returns_an_instant_that_was_offered():
+    """The property the whole design rests on, asserted directly against the
+    resolver rather than through a tool: whatever goes in, what comes out is
+    either unchanged or a member of this conversation's offer record. There
+    is no third outcome, so no argument can invent an appointment time."""
+    harness = _Harness()
+    conversation = uuid.uuid4()
+    await harness.intake(conversation)
+    await harness.offer(conversation, service_name="Air Conditioning Repair")
+
+    offered = set(
+        await harness.offered_slots.list_offered_starts(_ORG_ID, conversation)
+    )
+    assert len(offered) == 3
+
+    probes = [
+        ("2024-08-24", "08:00"),  # the live failure: two years stale
+        ("2025-08-24", "08:30"),  # one year stale
+        ("2099-08-24", "09:00"),  # far future
+        ("2026-08-24", "08:00"),  # already exact
+        ("2026-08-25", "08:00"),  # right year, wrong day
+        ("2024-08-25", "08:00"),  # wrong year AND wrong day
+        ("2024-08-24", "14:00"),  # wrong year, never-offered time
+        ("2024-09-24", "08:00"),  # wrong year, wrong month
+    ]
+    for day, start_time in probes:
+        resolved = await harness.factory._resolve_requested_slot(
+            _ORG_ID, conversation, {"date": day, "start_time": start_time}
+        )
+        assert resolved is not None
+        instant, _ = resolved
+        requested = datetime.fromisoformat(f"{day}T{start_time}:00+00:00")
+        assert instant in offered or instant == requested, (day, start_time)
+
+
+@pytest.mark.asyncio
+async def test_select_and_book_never_give_contradictory_recovery_advice():
+    """Both tools fail in the SAME round routinely — they did on every failed
+    turn of the 2026-09-22 call. If only one of them stopped saying "call
+    check_availability", the model would read one result telling it to search
+    and another telling it not to, and the live evidence is that it follows
+    the search."""
+    harness = _Harness()
+    conversation = uuid.uuid4()
+    await harness.intake(conversation)
+    await harness.offer(conversation, service_name="Air Conditioning Repair")
+
+    selection = await harness.choose(conversation, date=_REAL_DATE, start_time="14:00")
+    booking = await harness.call(
+        conversation, BOOK_APPOINTMENT.name, date=_REAL_DATE, start_time="14:00"
+    )
+
+    for result in (selection, booking):
+        assert result["success"] is False
+        assert result["error"] == ToolErrors.SLOT_NOT_OFFERED
+        assert "do NOT call check_availability".lower() in result["next_step"].lower()
+        assert {slot["start_time"] for slot in result["offered_times"]} == {
+            "08:00",
+            "08:30",
+            "09:00",
+        }
+    assert selection["next_step"] == booking["next_step"]
+
+
+@pytest.mark.asyncio
+async def test_booking_with_nothing_offered_keeps_the_original_advice():
+    """The empty-record case is the one where searching really is the next
+    step, so that path still re-raises into the untouched refusal."""
+    harness = _Harness()
+    conversation = uuid.uuid4()
+    await harness.intake(conversation)
+
+    booking = await harness.call(
+        conversation, BOOK_APPOINTMENT.name, date=_REAL_DATE, start_time="08:00"
+    )
+
+    assert booking["success"] is False
+    assert booking["error"] == ToolErrors.SLOT_NOT_OFFERED
+    assert "check_availability" in booking["next_step"]
+    assert "offered_times" not in booking

@@ -194,6 +194,8 @@ export type VoiceProvider = "vapi";
 export interface VoiceLine {
   id: string;
   provider: VoiceProvider;
+  vapi_assistant_id: string;
+  vapi_phone_number_id: string | null;
   phone_number: string | null;
   is_active: boolean;
   created_at: string;

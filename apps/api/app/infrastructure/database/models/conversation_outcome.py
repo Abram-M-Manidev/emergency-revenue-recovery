@@ -9,7 +9,13 @@ from sqlalchemy import Enum as SAEnum
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.domain.entities.conversation_outcome import CallClassification, RecommendedAction
+from app.domain.entities.conversation_outcome import (
+    CUSTOMER_ADDRESS_MAX_LENGTH,
+    CUSTOMER_NAME_MAX_LENGTH,
+    CUSTOMER_PHONE_MAX_LENGTH,
+    CallClassification,
+    RecommendedAction,
+)
 from app.infrastructure.database.models.mixins import UUIDPrimaryKeyMixin
 from app.infrastructure.database.session import Base
 
@@ -42,9 +48,17 @@ class ConversationOutcomeModel(UUIDPrimaryKeyMixin, Base):
     matched_service_id: Mapped[uuid.UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), ForeignKey("services.id", ondelete="SET NULL"), nullable=True
     )
-    customer_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    customer_phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    customer_address: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Widths come from the domain constants so the ceilings the AI Brain
+    # checks against and the ones Postgres enforces cannot drift apart.
+    customer_name: Mapped[str | None] = mapped_column(
+        String(CUSTOMER_NAME_MAX_LENGTH), nullable=True
+    )
+    customer_phone: Mapped[str | None] = mapped_column(
+        String(CUSTOMER_PHONE_MAX_LENGTH), nullable=True
+    )
+    customer_address: Mapped[str | None] = mapped_column(
+        String(CUSTOMER_ADDRESS_MAX_LENGTH), nullable=True
+    )
     summary: Mapped[str] = mapped_column(Text, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False

@@ -34,6 +34,7 @@ from app.domain.availability import AvailabilityProvider
 from app.domain.entities.user import User
 from app.domain.exceptions import AuthorizationError, InvalidTokenError
 from app.domain.notifications.provider import NotificationPort
+from app.domain.transactions import Savepoints
 from app.infrastructure.ai.openai_provider import OpenAIProvider
 from app.infrastructure.database.locks import (
     PostgresAdvisoryBookingLock,
@@ -64,11 +65,12 @@ from app.infrastructure.database.repositories import (
     SqlAlchemyVoiceLineRepository,
 )
 from app.infrastructure.database.session import get_db
-from app.infrastructure.notifications.providers import (
-    LoggingNotificationProvider,
-    NullNotificationProvider,
-    WebhookNotificationProvider,
+from app.infrastructure.database.transactions import SessionAfterCommit, SqlAlchemySavepoints
+from app.infrastructure.notifications.outbox import EmergencyAlertOutbox
+from app.infrastructure.notifications.outbox import (
+    get_alert_outbox as get_process_alert_outbox,
 )
+from app.infrastructure.notifications.providers import build_notification_provider
 from app.infrastructure.scheduling.database_availability_provider import (
     DatabaseAvailabilityProvider,
 )
@@ -89,6 +91,13 @@ def get_auth_service(
         refresh_token_repository=SqlAlchemyRefreshTokenRepository(db),
         settings=settings,
     )
+
+
+def get_savepoints(db: AsyncSession = Depends(get_db)) -> Savepoints:
+    """Savepoints on the request's own session — the same transaction
+    every repository in the request writes through, which is what lets one
+    failed piece of work be undone without undoing the rest."""
+    return SqlAlchemySavepoints(db)
 
 
 def get_business_knowledge_service(
@@ -126,10 +135,47 @@ def get_availability_provider(
     )
 
 
+def get_notification_provider(
+    settings: Settings = Depends(get_settings),
+) -> NotificationPort:
+    """Which adapter backs emergency alerting — see
+    `build_notification_provider`. Kept as a dependency so tests can swap it."""
+    return build_notification_provider(settings)
+
+
+def get_alert_outbox() -> EmergencyAlertOutbox:
+    """The process-wide emergency-alert outbox worker. A dependency so tests
+    can substitute one with a fake provider and the test session factory."""
+    return get_process_alert_outbox()
+
+
+def get_emergency_notification_service(
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    provider: NotificationPort = Depends(get_notification_provider),
+    outbox: EmergencyAlertOutbox = Depends(get_alert_outbox),
+) -> EmergencyNotificationService:
+    return EmergencyNotificationService(
+        provider=provider,
+        settings_repository=SqlAlchemyNotificationSettingsRepository(db),
+        delivery_repository=SqlAlchemyNotificationDeliveryRepository(db),
+        ticket_repository=SqlAlchemyEmergencyTicketRepository(db),
+        settings=settings,
+        # The outbox's first attempt, run by `get_db` only after this
+        # request's transaction has committed.
+        after_commit=SessionAfterCommit(db),
+        deliver_after_commit=outbox.deliver,
+    )
+
+
 def get_dispatch_service(
     db: AsyncSession = Depends(get_db),
+    emergency_notifications: EmergencyNotificationService = Depends(
+        get_emergency_notification_service
+    ),
 ) -> DispatchService:
     return DispatchService(
+        emergency_notifications=emergency_notifications,
         emergency_ticket_repository=SqlAlchemyEmergencyTicketRepository(db),
         technician_profile_repository=SqlAlchemyTechnicianProfileRepository(db),
         conversation_outcome_repository=SqlAlchemyConversationOutcomeRepository(db),
@@ -172,39 +218,7 @@ def get_customer_service(
         appointment_repository=SqlAlchemyAppointmentRepository(db),
         # P5: association capture only — C1's field rules are untouched.
         caller_identity_repository=SqlAlchemyCallerIdentityRepository(db),
-    )
-
-
-def get_notification_provider(
-    settings: Settings = Depends(get_settings),
-) -> NotificationPort:
-    """Which adapter backs emergency alerting, from configuration.
-
-    Defaults to `null`, which reports NOT_CONFIGURED and so never permits the
-    assistant to claim a dispatcher was alerted. That default is the point:
-    a deployment nobody has configured degrades to telling callers the truth,
-    rather than to the previous behaviour of asserting an alert that was
-    never sent. `logging` is refused outright in production by
-    `Settings._validate_production_safety`."""
-    if settings.NOTIFICATION_PROVIDER == "webhook":
-        return WebhookNotificationProvider(
-            timeout_seconds=settings.NOTIFICATION_TIMEOUT_SECONDS
-        )
-    if settings.NOTIFICATION_PROVIDER == "logging":
-        return LoggingNotificationProvider()
-    return NullNotificationProvider()
-
-
-def get_emergency_notification_service(
-    db: AsyncSession = Depends(get_db),
-    settings: Settings = Depends(get_settings),
-    provider: NotificationPort = Depends(get_notification_provider),
-) -> EmergencyNotificationService:
-    return EmergencyNotificationService(
-        provider=provider,
-        settings_repository=SqlAlchemyNotificationSettingsRepository(db),
-        delivery_repository=SqlAlchemyNotificationDeliveryRepository(db),
-        settings=settings,
+        savepoints=SqlAlchemySavepoints(db),
     )
 
 
@@ -245,6 +259,11 @@ def get_voice_tool_executor(
         # alerted. Without it the tool still creates the ticket and simply
         # never makes that claim.
         emergency_notification_service=emergency_notification_service,
+        # The call's own caller ID, as the last-resort callback number.
+        conversation_repository=SqlAlchemyConversationRepository(db),
+        # One savepoint per tool: a failed tool must not take down what the
+        # turn's earlier tools already did.
+        savepoints=SqlAlchemySavepoints(db),
     )
 
 
@@ -271,6 +290,7 @@ def get_ai_brain_service(
         # Business tools. Gated at the service by `AI_TOOLS_ENABLED`, so
         # passing the factory here does not by itself turn them on.
         tool_executor_factory=tool_executor_factory,
+        savepoints=SqlAlchemySavepoints(db),
     )
 
 
@@ -291,6 +311,7 @@ def get_voice_service(
         # cannot be consulted and every call proceeds, which is the
         # deliberate fail-open direction for this control.
         organization_repository=SqlAlchemyOrganizationRepository(db),
+        savepoints=SqlAlchemySavepoints(db),
     )
 
 

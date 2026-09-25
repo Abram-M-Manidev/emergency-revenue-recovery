@@ -7,6 +7,8 @@ should never grow past "assemble the pieces."
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
@@ -25,6 +27,7 @@ from app.core.middleware import (
 )
 from app.core.version import APP_VERSION
 from app.infrastructure.database.session import engine
+from app.infrastructure.notifications.outbox import get_alert_outbox
 from app.shared.logging.setup import configure_logging, get_logger
 
 settings = get_settings()
@@ -35,7 +38,18 @@ logger = get_logger("app.lifecycle")
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("app_startup", environment=settings.ENVIRONMENT, version=APP_VERSION)
+    # The emergency-alert outbox poller: retries, and any alert a crash or
+    # restart left unsent. One per uvicorn worker; `FOR UPDATE SKIP LOCKED`
+    # means they never send the same alert twice. Off under test, where the
+    # outbox is driven directly, and when the interval is set to 0.
+    poller: asyncio.Task[None] | None = None
+    if not settings.is_testing and settings.NOTIFICATION_OUTBOX_POLL_SECONDS > 0:
+        poller = asyncio.create_task(get_alert_outbox().run_forever())
     yield
+    if poller is not None:
+        poller.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await poller
     await engine.dispose()
     logger.info("app_shutdown")
 

@@ -5,11 +5,14 @@ scripted FakeAIProvider — no database, no real LLM call. Establishes the
 from __future__ import annotations
 
 import uuid
+from datetime import date, datetime, timezone
+from unittest import mock
 
 import pytest
 
 from app.application.services.ai_brain_service import AIBrainService
 from app.domain.ai.provider import AIModelProfile
+from app.domain.entities.business_profile import BusinessProfile, BusinessType
 from app.domain.entities.conversation import ConversationChannel, ConversationStatus
 from app.domain.entities.conversation_message import MessageRole
 from app.domain.entities.conversation_outcome import CallClassification, RecommendedAction
@@ -233,3 +236,57 @@ async def test_profile_choice_does_not_weaken_the_ai_brain_contract():
     assert "flooding" in request.system_prompt
     assert result.outcome.classification is CallClassification.EMERGENCY
     assert result.outcome.recommended_action is RecommendedAction.CREATE_EMERGENCY_TICKET
+
+
+# --- Which day "today" is ------------------------------------------------
+#
+# The prompt states this date and the model builds every booking argument
+# from it, so an off-by-one here books a caller into the wrong day. The
+# containers run UTC; the businesses do not.
+
+
+def test_today_is_read_in_the_businesss_timezone_not_the_servers():
+    """23:30 on the 21st in Chicago is already the 22nd in UTC. The caller
+    hears "today" from their own clock, so the prompt must use theirs."""
+    from app.application.services.ai_brain_service import _today_in
+
+    late_evening_in_chicago = datetime(2026, 9, 22, 4, 30, tzinfo=timezone.utc)
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return late_evening_in_chicago.astimezone(tz)
+
+    with mock.patch("app.application.services.ai_brain_service.datetime", _FrozenDatetime):
+        assert _today_in(_chicago_profile()) == date(2026, 9, 21)
+        assert _today_in(None) == date(2026, 9, 22)
+
+
+def test_an_unusable_timezone_falls_back_to_utc_rather_than_failing_the_turn():
+    """A bad zone name is a configuration fault, not a reason to drop a live
+    call — the same degradation the rest of the voice path makes."""
+    from app.application.services.ai_brain_service import _today_in
+
+    assert _today_in(_chicago_profile(timezone_name="Not/AZone")) is not None
+    assert _today_in(_chicago_profile(timezone_name="")) is not None
+
+
+def _chicago_profile(timezone_name: str = "America/Chicago") -> BusinessProfile:
+    now = datetime.now(timezone.utc)
+    return BusinessProfile(
+        id=uuid.uuid4(),
+        organization_id=uuid.uuid4(),
+        business_type=BusinessType.HVAC,
+        display_name="Northside Heating & Cooling",
+        phone_number=None,
+        timezone=timezone_name,
+        address_line1=None,
+        address_line2=None,
+        city=None,
+        state=None,
+        postal_code=None,
+        country="US",
+        website=None,
+        created_at=now,
+        updated_at=now,
+    )

@@ -97,11 +97,12 @@ POST /api/v1/auth/register
 This creates the organization, the Owner user, and seeds the four default
 roles (Owner / Admin / Member / Technician) with their permissions.
 
-> **Close self-service signup once the pilot tenants exist.** Set
-> `FEATURE_REGISTRATION_ENABLED=false` in `apps/api/.env` and restart the
-> API; `/auth/register` then answers `403 REGISTRATION_DISABLED`. Existing
-> users still log in, and new teammates are still added from the Team page,
-> so this shuts the front door without locking anyone out.
+> **Self-service signup is closed by default in production.** With
+> `ENVIRONMENT=production` and `FEATURE_REGISTRATION_ENABLED` unset,
+> `/auth/register` answers `403 REGISTRATION_DISABLED`. To create the pilot
+> tenants, temporarily set `FEATURE_REGISTRATION_ENABLED=true`, restart the
+> API, register, then remove the line and restart again. Existing users still
+> log in, and new teammates are still added from the Team page.
 >
 > Register the pilot organizations *before* flipping it — with registration
 > closed there is no other way to create one.
@@ -159,41 +160,41 @@ Capacity matters: with **no** technician profiles the availability engine
 uses `SCHEDULING_DEFAULT_CAPACITY` (1 concurrent appointment). Once a roster
 exists, the count of on-call technicians is used instead.
 
-### 5. Voice line — ⚠️ MANUAL SQL, no API exists
+### 5. Voice line — operator CLI (never hand-written SQL)
 
 This row is what maps an inbound Vapi assistant id to an organization.
-Without it every call fails with `voice_line_not_found`.
+Without it every call fails with `voice_line_not_found`. Provision it with
+the operator CLI inside the API container, which writes through the ORM (no
+enum-casing trap) and refuses anything ambiguous:
 
 ```bash
-essr exec postgres psql -U errs -d errs -c "
-  INSERT INTO voice_lines
-    (id, organization_id, provider, vapi_assistant_id,
-     vapi_phone_number_id, phone_number, is_active, created_at, updated_at)
-  VALUES
-    (gen_random_uuid(),
-     (SELECT id FROM organizations WHERE name = 'THE BUSINESS'),
-     'VAPI',
-     'asst_xxxxxxxxxxxx',
-     NULL,
-     '+15551234567',
-     true, now(), now());"
+# See the whole routing table first.
+essr exec api python -m app.cli.voice_lines list
+
+# Map the assistant (and optionally its Vapi phone-number id / E.164 number).
+essr exec api python -m app.cli.voice_lines assign \
+  --org-slug the-business \
+  --assistant-id <vapi assistant uuid> \
+  --phone-number-id <vapi phone number uuid> --phone-number +15551234567
 ```
 
-> **`provider` must be the uppercase string `'VAPI'`.**
-> The Python enum is `VoiceProvider.VAPI = "vapi"`, but the column is a
-> `native_enum=False` SQLAlchemy Enum, which persists the member **name**, not
-> its value. Inserting `'vapi'` produces a row the ORM cannot map back, so the
-> line silently fails to resolve and every call is rejected. This project has
-> been caught by this enum-casing behaviour more than once; it is the single
-> most error-prone step in onboarding.
+- An assistant that already answers for another organization is **refused**
+  unless you name that current owner: `--reassign-from <its organization id>`.
+  That is the step that would have stopped the 2026-09-23 wrong-tenant call.
+- An organization that already has a line gets a different assistant only
+  with `--replace-existing`.
+- A Vapi phone-number id that routes elsewhere is never taken.
+- Ids must be UUIDs and numbers E.164, so a pasted secret or a truncated id
+  is rejected before anything is written.
+- `deactivate` / `activate` stop or resume routing without losing the mapping.
 
-Verify immediately:
+The table is printed after every change. The Owner can also see the mapped
+assistant id in the dashboard under **Settings → Voice line**; ask them to
+check it against their Vapi dashboard.
 
-```bash
-essr exec postgres psql -U errs -d errs -c "
-  SELECT o.name, v.vapi_assistant_id, v.provider, v.is_active
-    FROM voice_lines v JOIN organizations o ON o.id = v.organization_id;"
-```
+What the CLI cannot do: create the assistant or number in Vapi, or verify
+that the assistant's Custom-LLM URL and `x-vapi-secret` point here — those
+remain Vapi-dashboard steps (above).
 
 Then confirm the API agrees (this is the read path a call actually uses):
 
@@ -218,7 +219,7 @@ discovered on a real call.
 
 | Item | Status | Note |
 |---|---|---|
-| Open registration | **Closeable** | `FEATURE_REGISTRATION_ENABLED=false` refuses signup with `403 REGISTRATION_DISABLED`, before the submitted address is looked up — so a closed deployment cannot be used to test whether an account exists. Left `true`, anyone who finds the domain can create an organization. Decide deliberately. |
+| Open registration | **Closed by default in production** | Unset `FEATURE_REGISTRATION_ENABLED` refuses signup in production with `403 REGISTRATION_DISABLED`, before the submitted address is looked up — so a closed deployment cannot be used to test whether an account exists. Set `true` only deliberately: then anyone who finds the domain can create an organization. |
 | Registration enumeration | Present | A duplicate email returns a distinguishable error, so account existence is discoverable. |
 | API docs | Not reachable in production | `/docs`, `/redoc` and `/openapi.json` are mounted at the **root**, not under `/api/v1`, so Caddy routes them to the frontend and they 404. Fine — arguably desirable on a public deployment — but it is accidental rather than chosen. |
 | Backups | Same host only | Survive a container rebuild, not the loss of the VM. |

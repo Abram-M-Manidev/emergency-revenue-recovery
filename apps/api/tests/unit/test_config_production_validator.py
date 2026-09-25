@@ -140,3 +140,36 @@ def test_allows_a_localhost_origin_in_production():
 def test_a_fully_configured_production_deployment_boots():
     settings = _settings(NOTIFICATION_PROVIDER="webhook")
     assert settings.is_production
+
+
+# --- Registration: closed by default in production -----------------------------
+#
+# `FEATURE_REGISTRATION_ENABLED=None` is passed explicitly in these tests
+# because constructor arguments beat the environment, and the container's
+# `apps/api/.env` may set the flag — which would otherwise decide the result
+# and make "the default" untestable.
+
+
+def test_production_closes_registration_when_the_flag_is_unset():
+    assert _settings(FEATURE_REGISTRATION_ENABLED=None).registration_enabled is False
+
+
+def test_production_opens_registration_only_when_explicitly_enabled():
+    assert _settings(FEATURE_REGISTRATION_ENABLED=True).registration_enabled is True
+    assert _settings(FEATURE_REGISTRATION_ENABLED=False).registration_enabled is False
+
+
+@pytest.mark.parametrize("environment", ["development", "testing"])
+def test_non_production_keeps_registration_open_by_default(environment):
+    settings = Settings(
+        ENVIRONMENT=environment,
+        JWT_SECRET_KEY=_REAL_JWT_SECRET_KEY,
+        FEATURE_REGISTRATION_ENABLED=None,
+    )
+    assert settings.registration_enabled is True
+
+
+def test_an_empty_registration_flag_means_the_environment_default():
+    """`FEATURE_REGISTRATION_ENABLED=` in an env file must not fail to boot,
+    and must not silently mean "open"."""
+    assert _settings(FEATURE_REGISTRATION_ENABLED="").registration_enabled is False

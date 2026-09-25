@@ -165,6 +165,12 @@ services:
       resources:
         limits:
           memory: 1g
+    # Docker's default is 10s between SIGTERM and SIGKILL. uvicorn drains
+    # in-flight requests on SIGTERM, but a live voice turn can legitimately
+    # run longer than 10s (a 15s realtime model timeout plus tool rounds), so
+    # a deploy would SIGKILL it mid-sentence: the caller hears silence and
+    # the turn's transaction is lost. 45s lets any turn in flight finish.
+    stop_grace_period: 45s
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers 4 --proxy-headers --forwarded-allow-ips=*
 
   frontend:

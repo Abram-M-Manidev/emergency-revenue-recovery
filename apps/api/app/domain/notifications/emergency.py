@@ -151,7 +151,21 @@ class NotificationDelivery:
     delivered_at: datetime | None
     created_at: datetime
     updated_at: datetime
+    # When the outbox will next try to send, or None once there is nothing
+    # left to do (delivered, not configured, or retries exhausted).
+    next_attempt_at: datetime | None = None
 
     @property
     def alerted_a_human(self) -> bool:
         return self.status.alerted_a_human
+
+    @property
+    def is_queued(self) -> bool:
+        """An alert that has not been sent YET but will be.
+
+        Distinct from both outcomes the assistant is allowed to report: it
+        licenses "the team is being alerted now", never "has been alerted"."""
+        return (
+            self.status in (DeliveryStatus.PENDING, DeliveryStatus.FAILED)
+            and self.next_attempt_at is not None
+        )

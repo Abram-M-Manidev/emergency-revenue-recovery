@@ -80,11 +80,19 @@ class OfferedSlotRepository(ABC):
     ) -> list[datetime]:
         """Every start instant this conversation was offered, ascending.
 
-        Read-only, and used only to explain a refusal: a `SLOT_NOT_OFFERED`
-        that logs nothing but its own name is undiagnosable, which is exactly
-        what happened on 2026-08-23 — the requested time was never recorded,
-        so whether it was a 12/24-hour slip or a timezone slip could not be
-        established afterwards. Enforcement does not consult this."""
+        Read-only. Originally added to explain a refusal: a
+        `SLOT_NOT_OFFERED` that logs nothing but its own name is
+        undiagnosable, which is exactly what happened on 2026-08-23 — the
+        requested time was never recorded, so whether it was a 12/24-hour
+        slip or a timezone slip could not be established afterwards.
+
+        Since 2026-09-22 it is also read to *interpret* a requested time
+        before enforcement runs, and to tell the model which times this
+        caller has already heard. Both stay inside the same guarantee: this
+        list is the set of times the caller was read, so nothing derived
+        from it can authorise a slot they were not offered. Enforcement
+        itself is still `get_offered`/`offered_duration_minutes` on one
+        exact instant, and it does not consult this."""
         ...
 
     @abstractmethod

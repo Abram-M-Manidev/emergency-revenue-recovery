@@ -1510,15 +1510,18 @@ class FakeNotificationSettingsRepository(NotificationSettingsRepository):
 
 
 class FakeNotificationDeliveryRepository(NotificationDeliveryRepository):
-    """Delivery rows keyed by ticket, mirroring the production unique index.
+    """Outbox rows keyed by ticket, mirroring the production unique index.
 
-    `claim` returns `True` to exactly one caller per ticket, which is what
-    makes the idempotency tests meaningful: a fake that always granted the
-    claim would let a duplicate-send bug pass."""
+    `enqueue` creates exactly one row per ticket, which is what makes the
+    idempotency tests meaningful: a fake that inserted a row per call would
+    let a duplicate-alert bug pass. `lock_next_due` models the row lock with
+    `locked`: a row returned to one caller is not returned again until its
+    attempt is recorded, as `FOR UPDATE SKIP LOCKED` guarantees in Postgres."""
 
     def __init__(self) -> None:
         self.rows: dict[uuid.UUID, NotificationDelivery] = {}
-        self.claims: list[uuid.UUID] = []
+        self.enqueues: list[uuid.UUID] = []
+        self.locked: set[uuid.UUID] = set()
 
     async def get_for_ticket(self, organization_id, ticket_id):
         row = self.rows.get(ticket_id)
@@ -1526,10 +1529,14 @@ class FakeNotificationDeliveryRepository(NotificationDeliveryRepository):
             return None
         return row
 
-    async def claim(self, organization_id, ticket_id, *, channel, provider):
-        self.claims.append(ticket_id)
-        existing = await self.get_for_ticket(organization_id, ticket_id)
+    async def enqueue(
+        self, organization_id, ticket_id, *, channel, provider, status, next_attempt_at
+    ):
+        self.enqueues.append(ticket_id)
+        existing = self.rows.get(ticket_id)
         if existing is not None:
+            if existing.organization_id != organization_id:
+                raise AssertionError("cross-tenant enqueue")
             return existing, False
         now_at = datetime.now(timezone.utc)
         row = NotificationDelivery(
@@ -1538,25 +1545,43 @@ class FakeNotificationDeliveryRepository(NotificationDeliveryRepository):
             ticket_id=ticket_id,
             channel=channel,
             provider=provider,
-            status=DeliveryStatus.PENDING,
+            status=status,
             attempts=0,
             error_code=None,
             delivered_at=None,
             created_at=now_at,
             updated_at=now_at,
+            next_attempt_at=next_attempt_at,
         )
         self.rows[ticket_id] = row
         return row, True
 
-    async def record_result(self, organization_id, ticket_id, *, status, error_code, provider):
-        existing = await self.get_for_ticket(organization_id, ticket_id)
-        assert existing is not None, "record_result called without a prior claim"
+    async def lock_next_due(self, *, now, ticket_id=None):
+        due = [
+            row
+            for row in self.rows.values()
+            if row.next_attempt_at is not None
+            and row.next_attempt_at <= now
+            and row.status in (DeliveryStatus.PENDING, DeliveryStatus.FAILED)
+            and row.ticket_id not in self.locked
+            and (ticket_id is None or row.ticket_id == ticket_id)
+        ]
+        if not due:
+            return None
+        row = min(due, key=lambda r: r.next_attempt_at)
+        self.locked.add(row.ticket_id)
+        return row
+
+    async def record_attempt(self, delivery_id, *, status, error_code, provider, next_attempt_at):
+        existing = next(row for row in self.rows.values() if row.id == delivery_id)
+        self.locked.discard(existing.ticket_id)
         updated = replace(
             existing,
             status=status,
             error_code=error_code,
             provider=provider,
             attempts=existing.attempts + 1,
+            next_attempt_at=next_attempt_at,
             delivered_at=(
                 datetime.now(timezone.utc)
                 if status is DeliveryStatus.DELIVERED
@@ -1564,7 +1589,7 @@ class FakeNotificationDeliveryRepository(NotificationDeliveryRepository):
             ),
             updated_at=datetime.now(timezone.utc),
         )
-        self.rows[ticket_id] = updated
+        self.rows[existing.ticket_id] = updated
         return updated
 
 

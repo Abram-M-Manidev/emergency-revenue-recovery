@@ -174,11 +174,16 @@ class ToolErrors:
 CREATE_SERVICE_REQUEST = ToolDefinition(
     name="create_service_request",
     description=(
-        "Record the caller's service request in the business's system. Call "
-        "this once you know the caller's name, callback phone number, "
-        "service address, and what is wrong. This creates the real record "
-        "staff will work from, so call it before checking availability or "
-        "booking. Safe to call again if a detail was corrected."
+        "Record the caller's service request in the business's system. For a "
+        "standard request, call this once you know the caller's name, "
+        "callback phone number, service address, and what is wrong. For an "
+        "EMERGENCY, call it as soon as you know what is wrong — do not hold "
+        "the ticket back for a name or address the caller cannot give; if "
+        "they will not or cannot give a number, the number they are calling "
+        "from is used. Then ask for anything still missing and call it again. "
+        "This creates the real record staff will work from, so call it before "
+        "checking availability or booking. Safe to call again if a detail was "
+        "corrected."
     ),
     parameters={
         "type": "object",
@@ -189,7 +194,11 @@ CREATE_SERVICE_REQUEST = ToolDefinition(
             },
             "customer_phone": {
                 "type": "string",
-                "description": "The callback number the caller stated.",
+                "description": (
+                    "The callback number the caller stated, as digits only "
+                    "(e.g. \"6305550184\"), converting any number words to "
+                    "digits. Empty string if they have not given one."
+                ),
             },
             "service_address": {
                 "type": "string",

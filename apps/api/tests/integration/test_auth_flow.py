@@ -247,3 +247,55 @@ async def test_registration_still_works_by_default(client: AsyncClient):
     )
 
     assert response.status_code == 201
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_production_refuses_signup_by_default_but_existing_users_still_work(
+    client: AsyncClient,
+):
+    """The production default, end to end: nobody set the flag, and the
+    front door is shut — with a controlled 403, not a 500 — while an
+    organization that already exists logs in, refreshes and reads its own
+    data exactly as before."""
+    from app.core.config import get_settings
+    from app.main import fastapi_app
+
+    existing = await client.post(
+        "/api/v1/auth/register",
+        json={
+            "organization_name": "Existing Pilot HVAC",
+            "full_name": "Pilot Owner",
+            "email": "pilot-owner@example.com",
+            "password": "super-secret-123",
+        },
+    )
+    assert existing.status_code == 201
+
+    base = get_settings()
+    fastapi_app.dependency_overrides[get_settings] = lambda: base.model_copy(
+        update={"ENVIRONMENT": "production", "FEATURE_REGISTRATION_ENABLED": None}
+    )
+    try:
+        refused = await client.post(
+            "/api/v1/auth/register",
+            json={
+                "organization_name": "Drive-By Signup",
+                "full_name": "Stranger",
+                "email": "stranger@example.com",
+                "password": "super-secret-123",
+            },
+        )
+        assert refused.status_code == 403
+        assert refused.json()["error"]["code"] == "REGISTRATION_DISABLED"
+        assert "invite" in refused.json()["error"]["message"]
+
+        login = await client.post(
+            "/api/v1/auth/login",
+            json={"email": "pilot-owner@example.com", "password": "super-secret-123"},
+        )
+        assert login.status_code == 200
+        token = login.json()["tokens"]["access_token"]
+        me = await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+        assert me.status_code == 200
+    finally:
+        fastapi_app.dependency_overrides.pop(get_settings, None)

@@ -154,6 +154,15 @@ export default function SettingsPage() {
                 <span className="text-muted-foreground">Phone number</span>
                 <span className="font-medium">{voiceLine.phone_number ?? "—"}</span>
               </div>
+              {/* The routing key. Shown so an Owner can confirm it matches
+                  the assistant in their Vapi dashboard — a mismatch means
+                  calls are being answered for the wrong business. */}
+              <div className="flex items-center justify-between gap-4 border-b border-border pb-3 text-sm">
+                <span className="text-muted-foreground">Vapi assistant ID</span>
+                <span className="break-all text-right font-mono text-xs">
+                  {voiceLine.vapi_assistant_id}
+                </span>
+              </div>
               <div className="flex items-center justify-between text-sm">
                 <span className="text-muted-foreground">Status</span>
                 <Badge variant={voiceLine.is_active ? "success" : "secondary"}>

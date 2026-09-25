@@ -23,7 +23,8 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -89,14 +90,34 @@ def _ticket(organization_id: uuid.UUID = _ORG_ID) -> EmergencyTicket:
     )
 
 
+class _Tickets:
+    """The one read the outbox makes at send time, org-scoped like the real
+    repository: a ticket is only visible under its own organization."""
+
+    def __init__(self, *tickets: EmergencyTicket) -> None:
+        self.by_id = {ticket.id: ticket for ticket in tickets}
+
+    def add(self, ticket: EmergencyTicket) -> EmergencyTicket:
+        self.by_id[ticket.id] = ticket
+        return ticket
+
+    async def get_by_id(self, organization_id, ticket_id):
+        ticket = self.by_id.get(ticket_id)
+        if ticket is None or ticket.organization_id != organization_id:
+            return None
+        return ticket
+
+
 def _service(
     provider: FakeNotificationProvider,
     *,
     destinations: dict | None = None,
     deliveries: FakeNotificationDeliveryRepository | None = None,
+    tickets: _Tickets | None = None,
     **setting_overrides: object,
-) -> tuple[EmergencyNotificationService, FakeNotificationDeliveryRepository]:
+) -> tuple[EmergencyNotificationService, FakeNotificationDeliveryRepository, _Tickets]:
     repo = deliveries or FakeNotificationDeliveryRepository()
+    ticket_repo = tickets or _Tickets()
     settings_repo = FakeNotificationSettingsRepository(
         destinations
         if destinations is not None
@@ -107,211 +128,329 @@ def _service(
             provider=provider,
             settings_repository=settings_repo,
             delivery_repository=repo,
+            ticket_repository=ticket_repo,  # type: ignore[arg-type]
             settings=fake_settings(**setting_overrides),
         ),
         repo,
+        ticket_repo,
     )
 
 
+def _later(seconds: float = 3600) -> datetime:
+    return datetime.now(timezone.utc) + timedelta(seconds=seconds)
+
+
 # =============================================================================
-# The service: delivery state, idempotency, bounds
+# The outbox: queued in the ticket's transaction, sent only afterwards
 # =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_enqueue_records_a_pending_alert_and_sends_nothing():
+    """The whole point of the outbox: nothing leaves the system while the
+    ticket's transaction is still open."""
+    provider = FakeNotificationProvider(status=DeliveryStatus.DELIVERED)
+    service, repo, tickets = _service(provider)
+    ticket = tickets.add(_ticket())
+
+    delivery = await service.enqueue(ticket)
+
+    assert provider.sends == []
+    assert delivery.status is DeliveryStatus.PENDING
+    assert delivery.is_queued is True
+    assert delivery.alerted_a_human is False
+    assert repo.rows[ticket.id].next_attempt_at is not None
+
+
+@pytest.mark.asyncio
+async def test_enqueue_registers_the_send_to_run_after_commit():
+    delivered: list[uuid.UUID] = []
+
+    class _Hooks:
+        def __init__(self) -> None:
+            self.callbacks = []
+
+        def register(self, callback) -> None:
+            self.callbacks.append(callback)
+
+    async def deliver(ticket_id: uuid.UUID) -> None:
+        delivered.append(ticket_id)
+
+    hooks = _Hooks()
+    service = EmergencyNotificationService(
+        provider=FakeNotificationProvider(),
+        settings_repository=FakeNotificationSettingsRepository(
+            {_ORG_ID: (NotificationChannel.WEBHOOK, _DESTINATION)}
+        ),
+        delivery_repository=FakeNotificationDeliveryRepository(),
+        settings=fake_settings(),
+        after_commit=hooks,  # type: ignore[arg-type]
+        deliver_after_commit=deliver,
+    )
+    ticket = _ticket()
+    await service.enqueue(ticket)
+
+    # Nothing ran yet — it runs only when the commit hook fires.
+    assert delivered == []
+    for callback in hooks.callbacks:
+        await callback()
+    assert delivered == [ticket.id]
 
 
 @pytest.mark.asyncio
 async def test_a_successful_alert_is_recorded_as_delivered():
     provider = FakeNotificationProvider(status=DeliveryStatus.DELIVERED)
-    service, repo = _service(provider)
-    ticket = _ticket()
+    service, repo, tickets = _service(provider)
+    ticket = tickets.add(_ticket())
+    await service.enqueue(ticket)
 
-    delivery = await service.notify_ticket(ticket)
+    delivery = await service.deliver_next_due()
 
+    assert delivery is not None
     assert delivery.status is DeliveryStatus.DELIVERED
     assert delivery.alerted_a_human is True
     assert delivery.attempts == 1
     assert delivery.delivered_at is not None
-    assert repo.rows[ticket.id].status is DeliveryStatus.DELIVERED
-    # The destination reached the provider and came from settings, not from
-    # anything the caller or the model supplied.
+    assert delivery.next_attempt_at is None
+    # The destination came from settings, not from anything the caller or
+    # the model supplied.
     assert provider.sends[0][1] == _DESTINATION
 
 
 @pytest.mark.asyncio
-async def test_a_refused_alert_is_recorded_as_failed_and_never_claims_success():
-    provider = FakeNotificationProvider(
-        status=DeliveryStatus.FAILED, error_code="http_500"
-    )
-    service, _ = _service(provider)
+async def test_a_refused_alert_leaves_the_ticket_and_schedules_a_retry():
+    provider = FakeNotificationProvider(status=DeliveryStatus.FAILED, error_code="http_500")
+    service, repo, tickets = _service(provider)
+    ticket = tickets.add(_ticket())
+    await service.enqueue(ticket)
 
-    delivery = await service.notify_ticket(_ticket())
+    delivery = await service.deliver_next_due()
 
+    assert delivery is not None
     assert delivery.status is DeliveryStatus.FAILED
     assert delivery.alerted_a_human is False
     assert delivery.error_code == "http_500"
+    assert delivery.is_queued is True, "a failed alert with budget left must be retried"
+    assert ticket.id in tickets.by_id
 
 
 @pytest.mark.asyncio
-async def test_an_organization_with_no_destination_is_not_configured_not_failed():
-    """The distinction an operator needs: nobody set alerting up here, which
-    is an onboarding gap rather than an incident."""
-    provider = FakeNotificationProvider(status=DeliveryStatus.NOT_CONFIGURED)
-    service, _ = _service(provider, destinations={})
+async def test_an_organization_with_no_destination_is_not_configured_and_never_sent():
+    """An onboarding gap, not an incident: recorded as such at enqueue time,
+    never retried, never claimed."""
+    provider = FakeNotificationProvider(status=DeliveryStatus.DELIVERED)
+    service, repo, tickets = _service(provider, destinations={})
+    ticket = tickets.add(_ticket())
 
-    delivery = await service.notify_ticket(_ticket())
+    delivery = await service.enqueue(ticket)
 
     assert delivery.status is DeliveryStatus.NOT_CONFIGURED
-    assert delivery.alerted_a_human is False
-    # No destination was handed over, because there was none.
-    assert provider.sends[0][1] is None
+    assert delivery.is_queued is False
+    assert await service.deliver_next_due(at=_later()) is None
+    assert provider.sends == []
 
 
 @pytest.mark.asyncio
-async def test_notifying_the_same_ticket_twice_sends_exactly_one_alert():
-    """The tool loop alerts, then the webhook's outcome sync runs on the same
-    conversation and would alert again. One gas leak must not page the
-    on-call engineer twice."""
+async def test_queuing_the_same_ticket_twice_sends_exactly_one_alert():
+    """The tool loop and the webhook's outcome sync both sync one ticket.
+    One gas leak must not page the on-call engineer twice."""
     provider = FakeNotificationProvider(status=DeliveryStatus.DELIVERED)
-    service, _ = _service(provider)
-    ticket = _ticket()
+    service, repo, tickets = _service(provider)
+    ticket = tickets.add(_ticket())
 
-    first = await service.notify_ticket(ticket)
-    second = await service.notify_ticket(ticket)
+    await service.enqueue(ticket)
+    await service.enqueue(ticket)
+    await service.deliver_next_due()
+    assert await service.deliver_next_due(at=_later()) is None
 
-    assert len(provider.sends) == 1
-    assert first.status is DeliveryStatus.DELIVERED
-    assert second.status is DeliveryStatus.DELIVERED
-    assert second.attempts == 1
-
-
-@pytest.mark.asyncio
-async def test_concurrent_notifications_for_one_ticket_send_once():
-    """Two requests for the same call arriving together — which Vapi produces
-    routinely as a transcript grows."""
-    provider = FakeNotificationProvider(status=DeliveryStatus.DELIVERED)
-    service, _ = _service(provider)
-    ticket = _ticket()
-
-    await asyncio.gather(service.notify_ticket(ticket), service.notify_ticket(ticket))
-
+    assert len(repo.rows) == 1
     assert len(provider.sends) == 1
 
 
 @pytest.mark.asyncio
-async def test_a_failed_alert_is_retried_within_budget():
-    """A transient outage should not permanently mark a call unalerted."""
-    provider = FakeNotificationProvider(
-        status=DeliveryStatus.FAILED, error_code="transport_error"
-    )
-    service, _ = _service(provider, NOTIFICATION_MAX_ATTEMPTS=2)
-    ticket = _ticket()
+async def test_concurrent_workers_send_one_alert_once():
+    """The post-commit send and a poller tick landing together. The row lock
+    lets exactly one of them have the alert."""
+    provider = FakeNotificationProvider(status=DeliveryStatus.DELIVERED, delay_seconds=0.05)
+    service, repo, tickets = _service(provider)
+    ticket = tickets.add(_ticket())
+    await service.enqueue(ticket)
 
-    await service.notify_ticket(ticket)
+    results = await asyncio.gather(service.deliver_next_due(), service.deliver_next_due())
+
+    assert len(provider.sends) == 1
+    assert sum(result is not None for result in results) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_alert_is_retried_when_due_and_eventually_delivered():
+    provider = FakeNotificationProvider(status=DeliveryStatus.FAILED, error_code="transport_error")
+    service, repo, tickets = _service(provider, NOTIFICATION_MAX_ATTEMPTS=3)
+    ticket = tickets.add(_ticket())
+    await service.enqueue(ticket)
+    await service.deliver_next_due()
+
+    # Not due yet: backoff is honoured.
+    assert await service.deliver_next_due() is None
     provider.status = DeliveryStatus.DELIVERED
     provider.error_code = None
-    recovered = await service.notify_ticket(ticket)
+    recovered = await service.deliver_next_due(at=_later())
 
-    assert len(provider.sends) == 2
+    assert recovered is not None
     assert recovered.status is DeliveryStatus.DELIVERED
-    assert recovered.alerted_a_human is True
+    assert recovered.attempts == 2
+    assert len(provider.sends) == 2
 
 
 @pytest.mark.asyncio
 async def test_retries_stop_at_the_configured_budget():
     provider = FakeNotificationProvider(status=DeliveryStatus.FAILED, error_code="timeout")
-    service, _ = _service(provider, NOTIFICATION_MAX_ATTEMPTS=2)
-    ticket = _ticket()
+    service, repo, tickets = _service(provider, NOTIFICATION_MAX_ATTEMPTS=2)
+    ticket = tickets.add(_ticket())
+    await service.enqueue(ticket)
 
-    for _ in range(5):
-        await service.notify_ticket(ticket)
+    for hours in range(1, 6):
+        await service.deliver_next_due(at=_later(3600 * hours))
 
     assert len(provider.sends) == 2, "the attempt budget was not enforced"
+    assert repo.rows[ticket.id].next_attempt_at is None
+    assert repo.rows[ticket.id].is_queued is False
+
+
+@pytest.mark.asyncio
+async def test_retry_delays_back_off():
+    provider = FakeNotificationProvider(status=DeliveryStatus.FAILED, error_code="http_503")
+    service, repo, tickets = _service(
+        provider, NOTIFICATION_MAX_ATTEMPTS=5, NOTIFICATION_RETRY_BASE_SECONDS=10.0
+    )
+    ticket = tickets.add(_ticket())
+    await service.enqueue(ticket)
+    at = datetime.now(timezone.utc)
+    gaps = []
+    for _ in range(3):
+        delivery = await service.deliver_next_due(at=at)
+        assert delivery is not None and delivery.next_attempt_at is not None
+        gaps.append((delivery.next_attempt_at - at).total_seconds())
+        at = delivery.next_attempt_at
+    assert gaps == [10.0, 30.0, 90.0]
 
 
 @pytest.mark.asyncio
 async def test_a_delivered_alert_is_never_re_sent_even_with_budget_left():
     provider = FakeNotificationProvider(status=DeliveryStatus.DELIVERED)
-    service, _ = _service(provider, NOTIFICATION_MAX_ATTEMPTS=5)
-    ticket = _ticket()
+    service, repo, tickets = _service(provider, NOTIFICATION_MAX_ATTEMPTS=5)
+    ticket = tickets.add(_ticket())
+    await service.enqueue(ticket)
 
-    for _ in range(3):
-        await service.notify_ticket(ticket)
-
-    assert len(provider.sends) == 1
-
-
-@pytest.mark.asyncio
-async def test_an_unconfigured_organization_is_not_retried_on_every_turn():
-    """Retrying a missing destination cannot fix it, and would spend the
-    timeout budget as dead air on every later turn of the call."""
-    provider = FakeNotificationProvider(status=DeliveryStatus.NOT_CONFIGURED)
-    service, _ = _service(provider, destinations={}, NOTIFICATION_MAX_ATTEMPTS=5)
-    ticket = _ticket()
-
-    for _ in range(3):
-        await service.notify_ticket(ticket)
+    for hours in range(3):
+        await service.deliver_next_due(at=_later(3600 * hours))
+        await service.enqueue(ticket)
 
     assert len(provider.sends) == 1
 
 
 @pytest.mark.asyncio
-async def test_a_slow_provider_is_cut_off_and_reported_as_failed():
-    """A live caller hears every second of this as silence, so the bound is
-    load-bearing — and exceeding it must be a truthful FAILED, not a crash."""
-    provider = FakeNotificationProvider(
-        status=DeliveryStatus.DELIVERED, delay_seconds=0.5
-    )
-    service, _ = _service(provider, NOTIFICATION_TIMEOUT_SECONDS=0.05)
+async def test_a_slow_provider_is_cut_off_and_recorded_as_a_failed_attempt():
+    provider = FakeNotificationProvider(status=DeliveryStatus.DELIVERED, delay_seconds=0.5)
+    service, repo, tickets = _service(provider, NOTIFICATION_TIMEOUT_SECONDS=0.05)
+    ticket = tickets.add(_ticket())
+    await service.enqueue(ticket)
 
-    delivery = await service.notify_ticket(_ticket())
+    delivery = await service.deliver_next_due()
 
+    assert delivery is not None
     assert delivery.status is DeliveryStatus.FAILED
     assert delivery.error_code == "timeout"
     assert delivery.alerted_a_human is False
 
 
 @pytest.mark.asyncio
-async def test_a_provider_that_raises_does_not_break_the_turn():
-    """The port forbids raising, but a defective adapter must still degrade
-    to a weaker sentence rather than dropping a call."""
+async def test_a_provider_that_raises_is_recorded_not_propagated():
     provider = FakeNotificationProvider(raises=True)
-    service, _ = _service(provider)
+    service, repo, tickets = _service(provider)
+    ticket = tickets.add(_ticket())
+    await service.enqueue(ticket)
 
-    delivery = await service.notify_ticket(_ticket())
+    delivery = await service.deliver_next_due()
 
+    assert delivery is not None
     assert delivery.status is DeliveryStatus.FAILED
     assert delivery.error_code == "provider_error"
-    assert delivery.alerted_a_human is False
+    assert delivery.is_queued is True
 
 
 @pytest.mark.asyncio
 async def test_one_tenants_destination_is_never_used_for_another():
-    """The destination is read per call, scoped by organization. A second
-    tenant with no configuration must not inherit the first tenant's."""
+    """The destination is read per send, scoped by the delivery row's own
+    organization. A tenant with no configuration must not inherit another's."""
     provider = FakeNotificationProvider(status=DeliveryStatus.DELIVERED)
-    service, _ = _service(provider)
+    service, repo, tickets = _service(provider)
+    mine = tickets.add(_ticket(_ORG_ID))
+    other = tickets.add(_ticket(_OTHER_ORG_ID))
 
-    await service.notify_ticket(_ticket(_ORG_ID))
-    other = await service.notify_ticket(_ticket(_OTHER_ORG_ID))
+    await service.enqueue(mine)
+    other_delivery = await service.enqueue(other)
+    await service.deliver_next_due(at=_later())
 
-    assert provider.sends[0][1] == _DESTINATION
-    assert provider.sends[1][1] is None, "a destination leaked across tenants"
-    assert other.alerted_a_human is False
+    assert [destination for _, destination in provider.sends] == [_DESTINATION]
+    assert other_delivery.status is DeliveryStatus.NOT_CONFIGURED
+
+
+@pytest.mark.asyncio
+async def test_a_row_pointing_at_another_tenants_ticket_is_never_sent():
+    """Impossible through the write path, but a corrupted or hand-edited
+    outbox row must not carry one tenant's emergency to another tenant's
+    destination."""
+    provider = FakeNotificationProvider(status=DeliveryStatus.DELIVERED)
+    service, repo, tickets = _service(provider)
+    foreign = tickets.add(_ticket(_OTHER_ORG_ID))
+    await repo.enqueue(
+        _ORG_ID,
+        foreign.id,
+        channel=NotificationChannel.WEBHOOK,
+        provider="fake",
+        status=DeliveryStatus.PENDING,
+        next_attempt_at=datetime.now(timezone.utc),
+    )
+
+    delivery = await service.deliver_next_due()
+
+    assert provider.sends == []
+    assert delivery is not None
+    assert delivery.status is DeliveryStatus.FAILED
+    assert delivery.error_code == "ticket_unavailable"
+    assert delivery.next_attempt_at is None
 
 
 @pytest.mark.asyncio
 async def test_delivery_state_is_readable_without_sending():
     provider = FakeNotificationProvider(status=DeliveryStatus.DELIVERED)
-    service, _ = _service(provider)
-    ticket = _ticket()
-    await service.notify_ticket(ticket)
+    service, repo, tickets = _service(provider)
+    ticket = tickets.add(_ticket())
+    await service.enqueue(ticket)
+    await service.deliver_next_due()
 
     found = await service.get_delivery(_ORG_ID, ticket.id)
     missing = await service.get_delivery(_OTHER_ORG_ID, ticket.id)
 
     assert found is not None and found.alerted_a_human is True
-    # Scoped by organization, so another tenant cannot read this state.
     assert missing is None
     assert len(provider.sends) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_alert_carries_details_learned_after_the_ticket_opened():
+    """Built at send time from the ticket as it is then, so an address the
+    caller gave after the ticket was created still reaches the dispatcher."""
+    provider = FakeNotificationProvider(status=DeliveryStatus.DELIVERED)
+    service, repo, tickets = _service(provider)
+    ticket = tickets.add(replace(_ticket(), customer_address=None))
+    await service.enqueue(ticket)
+    tickets.add(replace(ticket, customer_address="11 69 Street"))
+
+    await service.deliver_next_due()
+
+    assert provider.sends[0][0].customer_address == "11 69 Street"
 
 
 # =============================================================================
@@ -394,8 +533,10 @@ def _alert() -> EmergencyAlert:
 
 
 class _ToolHarness:
-    """`create_service_request` over real services, with the notification
-    outcome under the test's control."""
+    """`create_service_request` over real services, with the outbox and the
+    provider's verdict under the test's control. The tool never sends: the
+    alert is queued with the ticket and `deliver()` stands in for the
+    post-commit send."""
 
     def __init__(
         self,
@@ -415,7 +556,7 @@ class _ToolHarness:
             else None
         )
         self.deliveries = FakeNotificationDeliveryRepository()
-        notifications = (
+        self.notifications = (
             EmergencyNotificationService(
                 provider=self.provider,
                 settings_repository=FakeNotificationSettingsRepository(
@@ -424,6 +565,7 @@ class _ToolHarness:
                     else {_ORG_ID: (NotificationChannel.WEBHOOK, _DESTINATION)}
                 ),
                 delivery_repository=self.deliveries,
+                ticket_repository=self.tickets,
                 settings=self.settings,
             )
             if self.provider is not None
@@ -449,6 +591,7 @@ class _ToolHarness:
                 conversation_repository=self.conversations,
                 user_repository=FakeUserRepository(),
                 role_repository=FakeRoleRepository(),
+                emergency_notifications=self.notifications,
             ),
             customer_service=CustomerService(
                 customer_repository=self.customers,
@@ -462,7 +605,7 @@ class _ToolHarness:
             business_profile_repository=FakeBusinessProfileRepository(None),
             offered_slot_repository=FakeOfferedSlotRepository(),
             settings=self.settings,
-            emergency_notification_service=notifications,
+            emergency_notification_service=self.notifications,
         )
         self.conversation_id = uuid.uuid4()
         self.executor = self.factory.bind(_ORG_ID, self.conversation_id, 2)
@@ -484,6 +627,11 @@ class _ToolHarness:
         )
         return result.content
 
+    async def deliver(self) -> None:
+        """What the post-commit hook does once the turn has committed."""
+        assert self.notifications is not None
+        await self.notifications.deliver_next_due()
+
 
 class _NoHours:
     async def get_weekly_hours(self, organization_id):
@@ -494,44 +642,48 @@ class _NoHours:
 
 
 @pytest.mark.asyncio
-async def test_a_delivered_alert_licenses_the_dispatcher_sentence():
+async def test_the_tool_itself_never_sends_an_alert():
+    """The turn that creates the ticket is inside an uncommitted transaction.
+    Sending from there is exactly how a dispatcher got paged about a ticket
+    that then rolled back."""
     harness = _ToolHarness(notification_status=DeliveryStatus.DELIVERED)
 
     result = await harness.report_emergency()
 
     assert result["success"] is True
-    assert result["dispatcher_alerted"] is True
-    assert result["notification_status"] == "delivered"
-    assert "A dispatcher has been alerted" in result["next_step"]
+    assert harness.provider is not None and harness.provider.sends == []
+    assert harness.deliveries.rows, "the alert was not queued with the ticket"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "status",
-    [DeliveryStatus.FAILED, DeliveryStatus.NOT_CONFIGURED],
-)
-async def test_an_undelivered_alert_forbids_the_dispatcher_sentence(
-    status: DeliveryStatus,
-):
-    """The heart of it. The ticket exists either way; the sentence does not."""
-    harness = _ToolHarness(notification_status=status)
+async def test_a_queued_alert_licenses_being_alerted_but_not_alerted():
+    harness = _ToolHarness(notification_status=DeliveryStatus.DELIVERED)
 
     result = await harness.report_emergency()
 
-    # The emergency is still recorded — a failed alert must never lose the
-    # ticket, or a degraded notification becomes a lost emergency.
+    assert result["dispatcher_alerted"] is False
+    assert result["notification_status"] == "pending"
+    guidance = result["next_step"]
+    assert "being sent right now" in guidance
+    assert "Do NOT say a dispatcher HAS been alerted" in guidance
+    assert "emergency services" in guidance
+
+
+@pytest.mark.asyncio
+async def test_an_unconfigured_organization_forbids_the_dispatcher_sentence():
+    """The heart of it. The ticket exists either way; the sentence does not."""
+    harness = _ToolHarness(notification_status=DeliveryStatus.DELIVERED, destinations={})
+
+    result = await harness.report_emergency()
+
     assert result["success"] is True
     assert result["service_request_type"] == "emergency_ticket"
-    ticket = await harness.tickets.get_by_conversation_id(harness.conversation_id)
-    assert ticket is not None
-
-    # But nothing may claim a human was told.
+    assert await harness.tickets.get_by_conversation_id(harness.conversation_id) is not None
     assert result["dispatcher_alerted"] is False
-    assert result["notification_status"] == status.value
+    assert result["notification_status"] == "not_configured"
     guidance = result["next_step"]
     assert "could NOT be confirmed" in guidance
     assert "Do NOT say a dispatcher has been alerted" in guidance
-    assert "emergency services" in guidance
 
 
 @pytest.mark.asyncio
@@ -548,51 +700,56 @@ async def test_a_missing_notification_service_still_forbids_the_claim():
 
 @pytest.mark.asyncio
 async def test_a_later_turn_reads_the_alert_state_rather_than_assuming_it():
-    """`describe_progress` is prompt text on every subsequent turn. It used to
-    assert "dispatcher alerted" unconditionally, which put the false sentence
-    back into the prompt even once the tool result had stopped claiming it."""
-    failed = _ToolHarness(notification_status=DeliveryStatus.FAILED)
-    await failed.report_emergency()
+    """`describe_progress` is prompt text on every subsequent turn, read from
+    the outbox row: queued, delivered and failed each license a different
+    sentence."""
+    queued = _ToolHarness(notification_status=DeliveryStatus.DELIVERED)
+    await queued.report_emergency()
     delivered = _ToolHarness(notification_status=DeliveryStatus.DELIVERED)
     await delivered.report_emergency()
+    await delivered.deliver()
+    failed = _ToolHarness(notification_status=DeliveryStatus.DELIVERED, destinations={})
+    await failed.report_emergency()
 
-    failed_progress = await failed.factory.describe_progress(
-        _ORG_ID, failed.conversation_id
-    )
+    queued_progress = await queued.factory.describe_progress(_ORG_ID, queued.conversation_id)
     delivered_progress = await delivered.factory.describe_progress(
         _ORG_ID, delivered.conversation_id
     )
+    failed_progress = await failed.factory.describe_progress(_ORG_ID, failed.conversation_id)
 
-    assert failed_progress is not None
-    assert "could NOT be confirmed" in failed_progress
-    assert "Do NOT tell the caller a dispatcher has been alerted" in failed_progress
+    assert queued_progress is not None
+    assert "being sent now" in queued_progress
+    assert "Do NOT say a dispatcher HAS been alerted" in queued_progress
 
     assert delivered_progress is not None
     assert "A dispatcher has been alerted and will contact them" in delivered_progress
     assert "could NOT be confirmed" not in delivered_progress
 
+    assert failed_progress is not None
+    assert "could NOT be confirmed" in failed_progress
+    assert "Do NOT tell the caller a dispatcher has been alerted" in failed_progress
+
 
 @pytest.mark.asyncio
 async def test_one_alert_per_emergency_even_when_the_tool_runs_twice():
     """`create_service_request` is safe to call again when a detail is
-    corrected, and the model does. The caller's on-call engineer should not
-    hear about it twice."""
+    corrected, and the model does. The on-call engineer hears about it once."""
     harness = _ToolHarness(notification_status=DeliveryStatus.DELIVERED)
 
-    first = await harness.report_emergency()
-    second = await harness.report_emergency()
+    await harness.report_emergency()
+    await harness.report_emergency()
+    await harness.deliver()
+    await harness.deliver()
 
-    assert first["dispatcher_alerted"] is True
-    assert second["dispatcher_alerted"] is True
+    assert len(harness.deliveries.rows) == 1
     assert harness.provider is not None
     assert len(harness.provider.sends) == 1
 
 
 @pytest.mark.asyncio
 async def test_the_alert_never_carries_the_destination_into_the_tool_result():
-    """Tool results are handed to the model, which puts them within reach of
-    prompt-injection and of anything downstream that logs a turn. The
-    destination is a credential and must not be in there."""
+    """Tool results are handed to the model. The destination is a credential
+    and must not be in there."""
     harness = _ToolHarness(notification_status=DeliveryStatus.DELIVERED)
 
     result = await harness.report_emergency()

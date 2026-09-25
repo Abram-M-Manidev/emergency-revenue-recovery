@@ -13,7 +13,8 @@ from __future__ import annotations
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import structlog
 
@@ -32,7 +33,12 @@ from app.domain.entities.business_hours import HoursException, WeeklyHours
 from app.domain.entities.business_profile import BusinessProfile
 from app.domain.entities.conversation import Conversation, ConversationChannel, ConversationStatus
 from app.domain.entities.conversation_message import ConversationMessage, MessageRole
-from app.domain.entities.conversation_outcome import ConversationOutcome
+from app.domain.entities.conversation_outcome import (
+    CUSTOMER_ADDRESS_MAX_LENGTH,
+    CUSTOMER_NAME_MAX_LENGTH,
+    ConversationOutcome,
+    bounded_contact_text,
+)
 from app.domain.entities.emergency_keyword import EmergencyKeyword
 from app.domain.entities.faq_entry import FAQEntry
 from app.domain.entities.known_caller import KnownCaller
@@ -42,7 +48,9 @@ from app.domain.exceptions import (
     AIProviderUnavailableError,
     ConversationCompletedError,
     ConversationLimitExceededError,
+    DomainError,
     EntityNotFoundError,
+    TurnPersistenceError,
 )
 from app.domain.repositories.business_hours_repository import BusinessHoursRepository
 from app.domain.repositories.business_profile_repository import BusinessProfileRepository
@@ -53,8 +61,9 @@ from app.domain.repositories.emergency_keyword_repository import EmergencyKeywor
 from app.domain.repositories.faq_repository import FAQRepository
 from app.domain.repositories.service_area_repository import ServiceAreaRepository
 from app.domain.repositories.service_repository import ServiceRepository
+from app.domain.transactions import NullSavepoints, Savepoints
 from app.shared.logging.timing import elapsed_ms, now
-from app.shared.utils.phone import normalize_phone_number
+from app.shared.utils.phone import storable_phone_number
 
 from .prompt_builder import build_system_prompt
 
@@ -140,6 +149,11 @@ class AIBrainService:
         # offers no tools and behaves exactly as it did before they existed
         # — a one-line rollback if a live call ever regresses.
         tool_executor_factory: ToolExecutorFactory | None = None,
+        # Isolates the turn's own writes, and the best-effort lookups, from
+        # the rest of the request's transaction. Optional so every existing
+        # construction site keeps working; the in-memory fakes have no
+        # transaction to protect.
+        savepoints: Savepoints | None = None,
     ) -> None:
         self._conversations = conversation_repository
         self._outcomes = conversation_outcome_repository
@@ -153,6 +167,7 @@ class AIBrainService:
         self._settings = settings
         self._caller_identities = caller_identity_repository
         self._tool_executors = tool_executor_factory
+        self._savepoints = savepoints or NullSavepoints()
 
     async def start_conversation(
         self,
@@ -293,7 +308,7 @@ class AIBrainService:
             service_areas=service_areas,
             faqs=faqs,
             emergency_keywords=emergency_keywords,
-            today=date.today(),
+            today=_today_in(profile),
             emergency_keyword_hint=keyword_hint,
             known_caller=known_caller,
             tools_enabled=self._tools_enabled,
@@ -346,9 +361,13 @@ class AIBrainService:
         if not self._tools_enabled or self._tool_executors is None:
             return None
         try:
-            return await self._tool_executors.describe_progress(
-                organization_id, conversation_id
-            )
+            # The savepoint sits INSIDE the `try`: catching a database error
+            # does not un-abort a Postgres transaction, so without it this
+            # "best-effort" lookup would fail every statement after it.
+            async with self._savepoints.isolate():
+                return await self._tool_executors.describe_progress(
+                    organization_id, conversation_id
+                )
         except Exception:
             logger.warning("tool_progress_lookup_failed", exc_info=True)
             return None
@@ -386,9 +405,12 @@ class AIBrainService:
             return None
 
         try:
-            customers = await self._caller_identities.find_customers_by_caller_number(
-                conversation.organization_id, conversation.caller_phone_number
-            )
+            # Savepoint inside the `try`, for the reason given in
+            # `_describe_tool_progress`.
+            async with self._savepoints.isolate():
+                customers = await self._caller_identities.find_customers_by_caller_number(
+                    conversation.organization_id, conversation.caller_phone_number
+                )
         except Exception:
             # Deliberately broad: any storage-layer failure degrades to an
             # unknown caller rather than failing a live emergency turn.
@@ -405,6 +427,43 @@ class AIBrainService:
         return KnownCaller(name=customer.full_name, address=customer.address)
 
     async def _persist_turn(
+        self,
+        conversation: Conversation,
+        conversation_id: uuid.UUID,
+        services: list[Service],
+        reply: AIReply,
+        customer_message: str,
+    ) -> ConversationTurnResult:
+        """Records the turn in isolation from everything else the request
+        has already done.
+
+        By the time this runs the caller has usually heard the reply, and
+        this turn's tools may already have booked an appointment or opened
+        an emergency ticket (and paged a dispatcher about it). A failed write
+        here used to escape as a raw database error, which rolled the whole
+        request back — the booking and the ticket included — after the
+        caller had been told about them. Now only this turn's own writes are
+        undone, and the failure surfaces as a `DomainError` every transport
+        already turns into a spoken fallback while still committing the
+        rest."""
+        try:
+            async with self._savepoints.isolate():
+                return await self._write_turn(
+                    conversation, conversation_id, services, reply, customer_message
+                )
+        except DomainError:
+            raise
+        except Exception as exc:
+            # Type only: a driver error quotes the offending parameters,
+            # which here are the caller's name, number and address.
+            logger.error(
+                "conversation_turn_persist_failed",
+                conversation_id=str(conversation_id),
+                error=type(exc).__name__,
+            )
+            raise TurnPersistenceError() from exc
+
+    async def _write_turn(
         self,
         conversation: Conversation,
         conversation_id: uuid.UUID,
@@ -436,13 +495,20 @@ class AIBrainService:
         matched_service_id = next(
             (s.id for s in services if s.name == reply.matched_service_name), None
         )
+        # Read before the write because `upsert` replaces every column it is
+        # given, and one of them must not be replaced by an unusable value —
+        # see `_phone_to_persist`. An indexed lookup on a unique column, on a
+        # row `upsert` is about to select anyway.
+        existing_outcome = await self._outcomes.get_by_conversation_id(conversation_id)
         outcome = await self._outcomes.upsert(
             conversation_id,
             classification=reply.classification,
             confidence=reply.confidence,
             recommended_action=reply.recommended_action,
             matched_service_id=matched_service_id,
-            customer_name=reply.customer_name,
+            # Bounded to the column: an over-long value is not merely
+            # untidy, it is a failed write that rolls back the whole turn.
+            customer_name=bounded_contact_text(reply.customer_name, CUSTOMER_NAME_MAX_LENGTH),
             # Canonicalised for the same reason `VoiceToolExecutor` and
             # `CustomerService` canonicalise: this value becomes the customer
             # deduplication key, and a number captured from speech arrives in
@@ -451,12 +517,15 @@ class AIBrainService:
             # by the model's "1 2 3 4 5 6 7 8 9" a moment later — which is
             # exactly what a live call produced, leaving the appointment and
             # the customer record disagreeing about the same number.
-            #
-            # Falls back to the raw value rather than dropping it: something
-            # unparseable is still worth showing a dispatcher.
-            customer_phone=normalize_phone_number(reply.customer_phone)
-            or reply.customer_phone,
-            customer_address=reply.customer_address,
+            customer_phone=_phone_to_persist(
+                reply.customer_phone,
+                already_stored=(
+                    existing_outcome.customer_phone if existing_outcome else None
+                ),
+            ),
+            customer_address=bounded_contact_text(
+                reply.customer_address, CUSTOMER_ADDRESS_MAX_LENGTH
+            ),
             summary=reply.summary,
         )
 
@@ -537,3 +606,68 @@ class AIBrainService:
             faqs,
             emergency_keywords,
         )
+
+
+def _phone_to_persist(reported: str | None, *, already_stored: str | None) -> str | None:
+    """What belongs in `conversation_outcomes.customer_phone` after a turn.
+
+    The model reports whatever the transcript held, and that is not always a
+    phone number. On a live PSTN call on 2026-09-24 the caller said their
+    number aloud and the model reported "one two three four five six seven
+    eight nine" — 44 characters into a 32-character column. The previous
+    rule kept the raw value whenever canonicalisation failed, reasoning that
+    something unparseable is still worth showing a dispatcher. That reasoning
+    was sound and the consequence was not: Postgres rejected the write, the
+    request transaction rolled back, and the caller lost a turn they had
+    already heard, along with the three appointment times offered in it.
+
+    Three rules, in order:
+
+    1. A value that canonicalises is the answer. This is what keeps a genuine
+       correction working — a caller who restates their number gets the new
+       one, which is the behaviour `VoiceToolExecutor` and `CustomerService`
+       also rely on.
+    2. Otherwise keep what is already stored. An unusable report means the
+       model did not learn a number this turn, which is not the same as the
+       caller withdrawing one; blanking a good number because a later turn
+       garbled it would lose the only callback route the business has.
+    3. Never persist the raw utterance. It is not a phone number, it has no
+       bounded length, and `customer_phone` is the customer deduplication
+       key — storing prose there would split one caller across records even
+       if it happened to fit.
+
+    Deliberately not truncated to fit. `"one two three four five six seven"`
+    is not a better phone number than nothing; it is a fabricated one, and
+    it would be indistinguishable from a real value downstream.
+
+    The width check is a floor, not the mechanism: `normalize_phone_number`
+    keeps digits only, so anything reaching it is already short. It exists so
+    that a pathological transcript — a caller reciting an address, an account
+    number and a phone number in one breath — degrades to "no number learned"
+    instead of taking the turn down, which is precisely the failure this
+    function was written to end."""
+    canonical = storable_phone_number(reported)
+    if canonical is not None:
+        return canonical
+    return already_stored
+
+
+def _today_in(profile: BusinessProfile | None) -> date:
+    """The current date as the *business* reckons it, not as the server does.
+
+    The prompt states this date and the model builds every booking argument
+    from it, so an off-by-one here is an off-by-one in a real appointment.
+    Containers run UTC: for a US organization, every call between 7pm and
+    midnight local already falls on the following UTC day, and `date.today()`
+    would have told the model — and therefore the caller — the wrong day.
+
+    Falls back to UTC on an unset or unrecognised timezone, which is the same
+    thing the rest of the voice path does with a bad zone name rather than
+    failing the turn."""
+    if profile is None:
+        return datetime.now(timezone.utc).date()
+    try:
+        zone = ZoneInfo(profile.timezone)
+    except (ZoneInfoNotFoundError, ValueError):
+        zone = ZoneInfo("UTC")
+    return datetime.now(zone).date()

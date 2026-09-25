@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Callable
 from datetime import date as py_date
 from datetime import datetime, time, timedelta, timezone
 from typing import Any
@@ -58,7 +59,13 @@ from app.domain.ai.tools import (
 )
 from app.domain.entities.appointment import Appointment
 from app.domain.entities.availability import AvailabilityQuery, AvailabilitySlot
-from app.domain.entities.conversation_outcome import CallClassification, RecommendedAction
+from app.domain.entities.conversation_outcome import (
+    CUSTOMER_ADDRESS_MAX_LENGTH,
+    CUSTOMER_NAME_MAX_LENGTH,
+    CallClassification,
+    RecommendedAction,
+    bounded_contact_text,
+)
 from app.domain.entities.offered_slot import SlotSelectionVerdict
 from app.domain.entities.service import Service
 from app.domain.exceptions import (
@@ -75,10 +82,12 @@ from app.domain.exceptions import (
 from app.domain.notifications.emergency import DeliveryStatus, NotificationDelivery
 from app.domain.repositories.business_profile_repository import BusinessProfileRepository
 from app.domain.repositories.conversation_outcome_repository import ConversationOutcomeRepository
+from app.domain.repositories.conversation_repository import ConversationRepository
 from app.domain.repositories.offered_slot_repository import OfferedSlotRepository
 from app.domain.repositories.service_repository import ServiceRepository
+from app.domain.transactions import NullSavepoints, Savepoints
 from app.shared.logging.timing import elapsed_ms, now
-from app.shared.utils.phone import normalize_phone_number
+from app.shared.utils.phone import storable_phone_number
 
 logger = structlog.get_logger("app.voice.tools")
 
@@ -118,6 +127,16 @@ class VoiceToolExecutor(ToolExecutorFactory):
         # simply never permitted to claim a dispatcher was alerted — the
         # honest degradation, and the one the whole design fails towards.
         emergency_notification_service: EmergencyNotificationService | None = None,
+        # Where the call's own caller ID is read from, as the last-resort
+        # callback number. Optional; absent, that fallback is simply skipped.
+        conversation_repository: ConversationRepository | None = None,
+        # Runs each tool in its own savepoint. Optional so every existing
+        # construction site keeps working; see `_BoundToolExecutor._run`.
+        savepoints: Savepoints | None = None,
+        # The clock times are spoken against — only its year is used, to
+        # decide whether a date needs its year read out. Injectable so tests
+        # that pin the availability engine's clock pin this one too.
+        clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._appointments = appointment_service
         self._dispatch = dispatch_service
@@ -128,6 +147,9 @@ class VoiceToolExecutor(ToolExecutorFactory):
         self._offered_slots = offered_slot_repository
         self._settings = settings
         self._notifications = emergency_notification_service
+        self._conversations = conversation_repository
+        self._savepoints = savepoints or NullSavepoints()
+        self._clock = clock or (lambda: datetime.now(timezone.utc))
 
     def bind(
         self,
@@ -151,12 +173,24 @@ class VoiceToolExecutor(ToolExecutorFactory):
             # previously asserted "dispatcher alerted" on every later turn of
             # an emergency call, which put the false sentence back into the
             # prompt even once the tool result itself had stopped claiming it.
-            alerted = await self._dispatcher_was_alerted(organization_id, ticket.id)
-            if alerted:
+            delivery = await self._alert_state(organization_id, ticket.id)
+            # Read back from the outbox row rather than assumed. A turn after
+            # the ticket's turn usually finds the alert already delivered,
+            # because the send runs the moment that turn committed.
+            if delivery is not None and delivery.alerted_a_human:
                 reassurance = (
                     "- A dispatcher has been alerted and will contact them. "
                     "You may say so, and should reassure them someone will be "
                     "in touch shortly."
+                )
+            elif delivery is not None and delivery.is_queued:
+                reassurance = (
+                    "- The emergency IS recorded and the alert to the on-call "
+                    "team is being sent now, but it is NOT confirmed yet. You "
+                    "may say the team is being alerted. Do NOT say a dispatcher "
+                    "HAS been alerted, notified, or is on the way. If it is "
+                    "dangerous right now, tell them to call the business "
+                    "directly or the emergency services."
                 )
             else:
                 reassurance = (
@@ -192,7 +226,7 @@ class VoiceToolExecutor(ToolExecutorFactory):
             zone = await self._zone_for(organization_id)
             local = appointment.scheduled_start_at.astimezone(zone)
             lines.append(
-                f'- The appointment is BOOKED for {_spoken(local)}. This is '
+                f'- The appointment is BOOKED for {self._say(local)}. This is '
                 "confirmed and you may say so, as a standard appointment — "
                 "never as emergency service or an emergency dispatch. Only "
                 "call book_appointment again if the caller asks to move it."
@@ -215,7 +249,7 @@ class VoiceToolExecutor(ToolExecutorFactory):
                 zone = await self._zone_for(organization_id)
                 chosen = selection.start_at.astimezone(zone)
                 lines.append(
-                    f"- The caller has ALREADY chosen {_spoken(chosen)}. Do "
+                    f"- The caller has ALREADY chosen {self._say(chosen)}. Do "
                     "not offer times again and do not ask them to choose "
                     "again — call book_appointment for that time now."
                 )
@@ -292,21 +326,6 @@ class VoiceToolExecutor(ToolExecutorFactory):
         arguments: dict[str, Any],
         turn_index: int,
     ) -> dict[str, Any]:
-        missing = [
-            field
-            for field in ("customer_name", "customer_phone", "service_address", "problem_description")
-            if _is_blank(arguments.get(field))
-        ]
-        if missing:
-            # Named rather than a generic failure so the assistant can ask
-            # for precisely what it still needs instead of restarting the
-            # whole intake.
-            return {
-                "success": False,
-                "error": ToolErrors.MISSING_REQUIRED_FIELDS,
-                "missing_fields": missing,
-            }
-
         classification = _CLASSIFICATIONS.get(str(arguments.get("classification", "")).strip())
         if classification is None:
             return {
@@ -314,30 +333,108 @@ class VoiceToolExecutor(ToolExecutorFactory):
                 "error": ToolErrors.INVALID_ARGUMENTS,
                 "detail": "classification must be 'emergency' or 'non_emergency'.",
             }
+        is_emergency = classification is CallClassification.EMERGENCY
+
+        existing = await self._outcomes.get_by_conversation_id(conversation_id)
+
+        # The phone number is resolved rather than copied, by the same rule
+        # `AIBrainService` persists with: a value that canonicalises wins (so
+        # a correction still lands), otherwise keep what is already stored,
+        # otherwise fall back to the number the call is coming from — and
+        # never the raw utterance. The raw fallback here was the second copy
+        # of the 2026-09-24 defect: "one two three four five six seven eight
+        # nine" is 44 characters into a 32-character column, the write
+        # aborted the transaction, and the turn — ticket and all — rolled
+        # back after the caller had heard it.
+        customer_phone = storable_phone_number(_text_or_none(arguments.get("customer_phone")))
+        phone_source = "stated"
+        if customer_phone is None and existing is not None and existing.customer_phone:
+            customer_phone = existing.customer_phone
+            phone_source = "earlier_in_call"
+        if customer_phone is None:
+            customer_phone = await self._caller_id_for(organization_id, conversation_id)
+            phone_source = "caller_id"
+
+        # A blank name or address in this call must not erase one reported
+        # earlier in the same conversation: re-calling the tool to correct
+        # one field is the documented way to update a request.
+        customer_name = bounded_contact_text(
+            _text_or_none(arguments.get("customer_name"))
+            or (existing.customer_name if existing is not None else None),
+            CUSTOMER_NAME_MAX_LENGTH,
+        )
+        customer_address = bounded_contact_text(
+            _text_or_none(arguments.get("service_address"))
+            or (existing.customer_address if existing is not None else None),
+            CUSTOMER_ADDRESS_MAX_LENGTH,
+        )
+        problem = _text_or_none(arguments.get("problem_description"))
+
+        # An emergency needs only what a dispatcher cannot act without: what
+        # is wrong and a way to call back. Requiring the name and the address
+        # as well meant a caller with smoke coming from the unit who could
+        # not give an address produced no ticket and no alert at all — the
+        # tool refused, and the assistant kept asking. The ticket now exists
+        # first, and the missing details are asked for afterwards and
+        # backfilled onto it by the ticket's contact-detail sync.
+        required: dict[str, str | None] = {
+            "problem_description": problem,
+            "customer_phone": customer_phone,
+        }
+        if not is_emergency:
+            required["customer_name"] = customer_name
+            required["service_address"] = customer_address
+        missing = [field for field, value in required.items() if _is_blank(value)]
+        if missing:
+            # Named rather than a generic failure so the assistant can ask
+            # for precisely what it still needs instead of restarting the
+            # whole intake.
+            refusal: dict[str, Any] = {
+                "success": False,
+                "error": ToolErrors.MISSING_REQUIRED_FIELDS,
+                "missing_fields": missing,
+            }
+            if "customer_phone" in missing and not _is_blank(arguments.get("customer_phone")):
+                # The caller did give a number; it just was not usable as
+                # passed. Saying so stops the assistant asking a caller who
+                # has already answered as if they had not.
+                refusal["detail"] = (
+                    "customer_phone must be the digits of the number, e.g. "
+                    '"6305550184". If the caller said the digits as words, '
+                    "write them as digits; if you are unsure of any digit, "
+                    "read the number back and ask them to confirm it."
+                )
+            return refusal
 
         matched_service = await self._match_service(organization_id, arguments.get("service_name"))
         recommended_action = (
             RecommendedAction.CREATE_EMERGENCY_TICKET
-            if classification is CallClassification.EMERGENCY
+            if is_emergency
             else RecommendedAction.BOOK_APPOINTMENT
         )
 
-        existing = await self._outcomes.get_by_conversation_id(conversation_id)
         await self._outcomes.upsert(
             conversation_id,
             classification=classification,
             confidence=existing.confidence if existing is not None else _DEFAULT_CONFIDENCE,
             recommended_action=recommended_action,
             matched_service_id=matched_service.id if matched_service else None,
-            customer_name=_clean(arguments["customer_name"]),
-            # Canonicalised here too, so the snapshot copied onto the
-            # ticket/appointment matches the customer key rather than
-            # whatever spacing the transcript happened to use.
-            customer_phone=normalize_phone_number(arguments["customer_phone"])
-            or _clean(arguments["customer_phone"]),
-            customer_address=_clean(arguments["service_address"]),
-            summary=_clean(arguments["problem_description"]) or "Service request.",
+            customer_name=customer_name,
+            # Canonicalised, so the snapshot copied onto the ticket or
+            # appointment matches the customer key rather than whatever
+            # spacing the transcript happened to use.
+            customer_phone=customer_phone,
+            customer_address=customer_address,
+            summary=problem or "Service request.",
         )
+        still_needed = [
+            field
+            for field, value in (
+                ("customer_name", customer_name),
+                ("service_address", customer_address),
+            )
+            if _is_blank(value)
+        ]
 
         # The existing AI-Brain -> module seam, called in the same order the
         # webhook already calls it, so a tool-driven turn produces exactly
@@ -356,7 +453,7 @@ class VoiceToolExecutor(ToolExecutorFactory):
             # what it is allowed to say depends on whether this succeeded.
             # Bounded and non-raising: a failure costs the caller a weaker
             # sentence, never the ticket and never the call.
-            delivery = await self._notify_dispatcher(ticket)
+            delivery = await self._alert_state(organization_id, ticket.id)
             return {
                 "success": True,
                 "service_request_id": str(ticket.id),
@@ -367,6 +464,19 @@ class VoiceToolExecutor(ToolExecutorFactory):
                 "customer_id": str(customer.id) if customer else None,
                 "service_name": matched_service.name if matched_service else None,
                 "bookable": False,
+                "callback_number_source": phone_source,
+                **(
+                    {
+                        "still_needed": still_needed,
+                        "still_needed_next_step": (
+                            "The ticket exists. Now ask the caller for the "
+                            "missing details and call create_service_request "
+                            "again with them, so the dispatcher has them."
+                        ),
+                    }
+                    if still_needed
+                    else {}
+                ),
                 "next_step": _dispatcher_next_step(delivery),
             }
 
@@ -381,6 +491,7 @@ class VoiceToolExecutor(ToolExecutorFactory):
                 "service_name": matched_service.name if matched_service else None,
                 "duration_minutes": appointment.duration_minutes,
                 "bookable": True,
+                "callback_number_source": phone_source,
                 "next_step": "Call check_availability next.",
             }
 
@@ -394,6 +505,19 @@ class VoiceToolExecutor(ToolExecutorFactory):
             classification=classification.value,
         )
         return {"success": False, "error": ToolErrors.INTERNAL_ERROR}
+
+    async def _caller_id_for(
+        self, organization_id: uuid.UUID, conversation_id: uuid.UUID
+    ) -> str | None:
+        """The number this call is coming from, if the telephony layer gave
+        one and it is usable as a callback number. The text/simulation path
+        never has one."""
+        if self._conversations is None:
+            return None
+        conversation = await self._conversations.get_by_id(organization_id, conversation_id)
+        if conversation is None:
+            return None
+        return storable_phone_number(conversation.caller_phone_number)
 
     async def _check_availability(
         self,
@@ -466,7 +590,7 @@ class VoiceToolExecutor(ToolExecutorFactory):
             )
 
         zone = _zone_or_utc(result.timezone)
-        slots = [_render_slot(slot, zone) for slot in result.slots]
+        slots = [_render_slot(slot, zone, self._clock()) for slot in result.slots]
         payload: dict[str, Any] = {
             "success": True,
             "timezone": result.timezone,
@@ -546,7 +670,9 @@ class VoiceToolExecutor(ToolExecutorFactory):
                 ),
             }
 
-        resolved = await self._resolve_requested_slot(organization_id, arguments)
+        resolved = await self._resolve_requested_slot(
+            organization_id, conversation_id, arguments
+        )
         if resolved is None:
             logger.info(
                 "select_slot_unresolvable",
@@ -579,6 +705,22 @@ class VoiceToolExecutor(ToolExecutorFactory):
                 conversation_id=str(conversation_id),
                 turn_index=turn_index,
             )
+            # What this caller has already been read, so the recovery can be
+            # "ask which of these you meant" instead of "go and fetch times".
+            # The old advice was unconditionally the latter, and on the
+            # 2026-09-22 call that turned one bad argument into a loop: the
+            # model re-ran check_availability, read out the identical three
+            # times, got the same answer from the caller, and rebuilt the
+            # same wrong instant. Re-offering is only progress when there is
+            # nothing on record to re-offer.
+            already_offered = await self._offered_times_for(
+                organization_id, conversation_id
+            )
+            if already_offered:
+                return {
+                    **_not_offered_with_options(already_offered),
+                    "selection_state": "none",
+                }
             return {
                 "success": False,
                 "error": ToolErrors.SLOT_NOT_OFFERED,
@@ -622,7 +764,7 @@ class VoiceToolExecutor(ToolExecutorFactory):
             "date": local.date().isoformat(),
             "start_time": local.strftime("%H:%M"),
             "timezone": str(zone),
-            "spoken_time": _spoken(local),
+            "spoken_time": self._say(local),
             "duration_minutes": offered.duration_minutes,
             "next_step": (
                 "The caller's choice is recorded. Call book_appointment for "
@@ -659,7 +801,9 @@ class VoiceToolExecutor(ToolExecutorFactory):
                 ),
             }
 
-        resolved = await self._resolve_requested_slot(organization_id, arguments)
+        resolved = await self._resolve_requested_slot(
+            organization_id, conversation_id, arguments
+        )
         if resolved is None:
             # Which identifying fields the model supplied, never their
             # values — enough to tell "it sent nothing" from "it sent a
@@ -701,15 +845,27 @@ class VoiceToolExecutor(ToolExecutorFactory):
             )
             raise
         except SlotNotOfferedError:
-            # Diagnostics only — re-raised untouched, so the refusal and its
-            # error code are exactly what they were. This exists because the
+            # Diagnostics first, and unconditional. This exists because the
             # 2026-08-23 refusal recorded nothing but its own name: the
             # requested instant was unrecoverable afterwards, leaving a
             # 12/24-hour slip and a timezone slip indistinguishable.
             await self._log_slot_not_offered(
                 organization_id, conversation_id, arguments, start_at
             )
-            raise
+            # The error code is unchanged; only the advice is. `select` and
+            # `book` routinely fail in the SAME tool round — they did on
+            # every failed turn of the 2026-09-22 call — so if only one of
+            # them stopped saying "call check_availability", the model would
+            # read one result telling it to search and another telling it
+            # not to. With nothing on record there is genuinely nothing to
+            # disambiguate against, and that case still re-raises into the
+            # original advice.
+            already_offered = await self._offered_times_for(
+                organization_id, conversation_id
+            )
+            if not already_offered:
+                raise
+            return _not_offered_with_options(already_offered)
 
         zone = await self._zone_for(organization_id)
         local_start = appointment.scheduled_start_at.astimezone(zone)  # type: ignore[union-attr]
@@ -722,7 +878,7 @@ class VoiceToolExecutor(ToolExecutorFactory):
             "start_time": local_start.strftime("%H:%M"),
             "end_time": local_end.strftime("%H:%M"),
             "timezone": str(zone),
-            "spoken_time": _spoken(local_start),
+            "spoken_time": self._say(local_start),
             "duration_minutes": appointment.duration_minutes,
             # Restated at the exact moment the assistant is about to
             # confirm, because that is where it went wrong on a live call:
@@ -834,7 +990,10 @@ class VoiceToolExecutor(ToolExecutorFactory):
             logger.warning("book_appointment_slot_not_offered_diagnostics_failed", exc_info=True)
 
     async def _resolve_requested_slot(
-        self, organization_id: uuid.UUID, arguments: dict[str, Any]
+        self,
+        organization_id: uuid.UUID,
+        conversation_id: uuid.UUID,
+        arguments: dict[str, Any],
     ) -> tuple[datetime, int | None] | None:
         """A `slot_id` is preferred because it carries the duration the
         availability search actually used. An explicit date+time is accepted
@@ -854,7 +1013,117 @@ class VoiceToolExecutor(ToolExecutorFactory):
         if day is None or at is None:
             return None
         zone = await self._zone_for(organization_id)
-        return datetime.combine(day, at).replace(tzinfo=zone), None
+        requested = datetime.combine(day, at).replace(tzinfo=zone)
+        return await self._reconcile_with_offer(
+            organization_id, conversation_id, requested, zone
+        ), None
+
+    async def _offered_times_for(
+        self, organization_id: uuid.UUID, conversation_id: uuid.UUID
+    ) -> list[dict[str, str]]:
+        """The times this conversation has already been read, in the shape
+        `select_appointment_slot` and `book_appointment` take as arguments.
+
+        Handing back `date`/`start_time` is safe here in a way it is not in
+        `describe_progress`: these are not live availability the model might
+        book unasked, they are the record of what this caller was already
+        offered, and every one of them still has to survive selection and
+        the freshness check before it can become a booking. The point is to
+        give the model a way forward that is not "search again and read the
+        same list".
+
+        Best-effort: an empty list simply falls back to the older advice."""
+        try:
+            offered = await self._offered_slots.list_offered_starts(
+                organization_id, conversation_id
+            )
+            zone = await self._zone_for(organization_id)
+        except Exception:
+            logger.warning("offered_times_lookup_failed", exc_info=True)
+            return []
+        return [
+            {
+                "date": local.date().isoformat(),
+                "start_time": local.strftime("%H:%M"),
+                "label": self._say(local),
+            }
+            for local in (start.astimezone(zone) for start in offered)
+        ]
+
+    async def _reconcile_with_offer(
+        self,
+        organization_id: uuid.UUID,
+        conversation_id: uuid.UUID,
+        requested: datetime,
+        zone: ZoneInfo,
+    ) -> datetime:
+        """Maps a date+time the model *described* onto the instant this
+        conversation was actually offered, when the two can only be the same
+        slot.
+
+        `date` + `start_time` is a description built from memory, not a
+        quotation: by the time the caller answers, the tool result carrying
+        the real date is gone from the model's context — only its own spoken
+        sentence survives in the transcript. A live call on 2026-09-22 made
+        that concrete. Three slots were offered, the caller chose 8:30 AM,
+        and the model sent date="2024-09-22", start_time="08:30". The
+        wall-clock time and the month and day were exactly right; the year
+        came from the model's training data. The instant missed the offered
+        record by two years, booking was refused SLOT_NOT_OFFERED, and the
+        advertised recovery — call check_availability again — re-offered the
+        identical three times, so the caller chose 8:30 again and the call
+        looped until they hung up.
+
+        The year is the one part of a date a caller never says out loud and
+        the model can never check, so it is the one part worth repairing.
+        Everything else must match: same month, same day, same minute.
+
+        This cannot book an un-offered time, which is the property that
+        matters. It only ever returns an instant already in this
+        conversation's offer record, and it returns it unchanged unless
+        exactly ONE offer matches — two candidates mean the description is
+        genuinely ambiguous and the refusal is the correct answer. The
+        consent ladder downstream is untouched: `offered_turn_index` must
+        still predate the caller's reply, `select_appointment_slot` must
+        still have recorded their choice, and the slot must still be free,
+        in hours, and in the future.
+
+        Best-effort: a failure here returns the requested instant unchanged,
+        which is exactly the behaviour before this existed."""
+        try:
+            offered = await self._offered_slots.list_offered_starts(
+                organization_id, conversation_id
+            )
+        except Exception:
+            logger.warning("offer_reconciliation_failed", exc_info=True)
+            return requested
+
+        # Already exact — the overwhelmingly common case, and the only one
+        # before a model ever gets the year wrong.
+        if not offered or any(candidate == requested for candidate in offered):
+            return requested
+
+        wall = requested.astimezone(zone)
+        matches = [
+            candidate
+            for candidate in offered
+            if _same_wall_clock_but_for_the_year(candidate.astimezone(zone), wall)
+        ]
+        if len(matches) != 1:
+            return requested
+
+        resolved = matches[0]
+        # Derived instants only, never the caller's words — same rule as
+        # every other log line in this module.
+        logger.info(
+            "offer_year_reconciled",
+            organization_id=str(organization_id),
+            conversation_id=str(conversation_id),
+            requested_start_at=requested.astimezone(timezone.utc).isoformat(),
+            resolved_start_at=resolved.astimezone(timezone.utc).isoformat(),
+            offered_count=len(offered),
+        )
+        return resolved
 
     async def _match_service(self, organization_id: uuid.UUID, name: Any) -> Service | None:
         """Resolves a service by the name the model quoted.
@@ -898,55 +1167,33 @@ class VoiceToolExecutor(ToolExecutorFactory):
         profile = await self._profiles.get_by_organization_id(organization_id)
         return _zone_or_utc(profile.timezone if profile else "UTC")
 
+    def _say(self, value: datetime) -> str:
+        return _spoken(value, reference=self._clock())
+
     # --- Emergency alerting ---
 
-    async def _notify_dispatcher(self, ticket: Any) -> NotificationDelivery | None:
-        """Attempts the outbound alert for a newly-created emergency ticket.
+    async def _alert_state(
+        self, organization_id: uuid.UUID, ticket_id: uuid.UUID
+    ) -> NotificationDelivery | None:
+        """The ticket's alert, as the outbox has recorded it. Read-only: the
+        alert itself is queued by `DispatchService` in the ticket's own
+        transaction and sent only after that commits, so nothing here can
+        page anyone.
 
-        Returns None when no notification service is wired in at all, which
-        `_dispatcher_alert_fields` treats identically to a failure: the
-        assistant may not claim an alert either way. That equivalence is
-        deliberate — a missing dependency is a deployment mistake, and the
-        one thing it must never do is silently restore the old behaviour of
-        claiming an alert that never happened.
-
-        Never raises. The service is already bounded and non-raising, and
-        this adds a second net because the cost of being wrong is a dropped
-        call on someone reporting an emergency."""
+        Fails closed: no service wired in, or an unreadable record, is None,
+        which licenses no claim at all."""
         if self._notifications is None:
             logger.warning(
                 "emergency_notification_service_unavailable",
-                organization_id=str(ticket.organization_id),
-                ticket_id=str(ticket.id),
+                organization_id=str(organization_id),
+                ticket_id=str(ticket_id),
             )
             return None
         try:
-            return await self._notifications.notify_ticket(ticket)
-        except Exception:
-            logger.error(
-                "emergency_notification_failed",
-                organization_id=str(ticket.organization_id),
-                ticket_id=str(ticket.id),
-                exc_info=True,
-            )
-            return None
-
-    async def _dispatcher_was_alerted(
-        self, organization_id: uuid.UUID, ticket_id: uuid.UUID
-    ) -> bool:
-        """Whether a human was actually told, read from stored delivery state.
-
-        Fails closed on any error: an unreadable delivery record means we
-        cannot prove anyone was alerted, and the whole point of this milestone
-        is that unproven means unsaid."""
-        if self._notifications is None:
-            return False
-        try:
-            delivery = await self._notifications.get_delivery(organization_id, ticket_id)
+            return await self._notifications.get_delivery(organization_id, ticket_id)
         except Exception:
             logger.warning("emergency_notification_lookup_failed", exc_info=True)
-            return False
-        return delivery is not None and delivery.alerted_a_human
+            return None
 
 
 class _BoundToolExecutor(ToolExecutor):
@@ -1023,20 +1270,13 @@ class _BoundToolExecutor(ToolExecutor):
         handler = getattr(self._parent, handler_name)
         try:
             return await asyncio.wait_for(
-                handler(
-                    self._organization_id,
-                    self._conversation_id,
-                    invocation.arguments,
-                    self._turn_index,
-                ),
+                self._isolated(handler, invocation),
                 timeout=self._parent._settings.AI_TOOL_TIMEOUT_SECONDS,
             )
         except TimeoutError:
             # `asyncio.TimeoutError` is an alias of the builtin from 3.11.
             logger.warning("voice_tool_timed_out", tool_name=invocation.name)
             return {"success": False, "error": ToolErrors.TIMEOUT}
-        except DomainError as exc:
-            return _domain_error_result(exc)
         except Exception:
             # Deliberately broad, and deliberately not re-raised: an
             # unexpected failure in a tool must degrade to something the
@@ -1044,6 +1284,36 @@ class _BoundToolExecutor(ToolExecutor):
             # traceback so it is still visible as a defect.
             logger.error("voice_tool_failed", tool_name=invocation.name, exc_info=True)
             return {"success": False, "error": ToolErrors.INTERNAL_ERROR}
+
+
+    async def _isolated(self, handler: Any, invocation: ToolInvocation) -> dict[str, Any]:
+        """Runs one tool inside its own savepoint.
+
+        Catching the exception in `_run` was never enough on its own. On
+        Postgres a failed statement aborts the whole transaction, so a tool
+        that hit a database error returned INTERNAL_ERROR to the model and
+        then every later statement in the turn failed too — the turn's own
+        persistence included — and the request rolled back, taking with it
+        whatever EARLIER tools had already done: a booked appointment the
+        caller had just been told about, or an emergency ticket. The
+        savepoint undoes exactly this tool's writes and leaves the rest of
+        the turn usable.
+
+        A `DomainError` is converted to its result INSIDE the savepoint, so
+        its writes are kept: those are business refusals, not faults, and
+        some deliberately write on the way out — booking clears a selection
+        whose slot has just been taken before refusing."""
+        async with self._parent._savepoints.isolate():
+            try:
+                result: dict[str, Any] = await handler(
+                    self._organization_id,
+                    self._conversation_id,
+                    invocation.arguments,
+                    self._turn_index,
+                )
+                return result
+            except DomainError as exc:
+                return _domain_error_result(exc)
 
 
 def _dispatcher_alert_fields(delivery: NotificationDelivery | None) -> dict[str, Any]:
@@ -1082,6 +1352,19 @@ def _dispatcher_next_step(delivery: NotificationDelivery | None) -> str:
         return (
             "A dispatcher has been alerted and will contact the caller. You "
             "may say so. Do not offer an appointment time."
+        )
+    if delivery is not None and delivery.is_queued:
+        # The outbox state on the ticket's own turn: the alert is committed
+        # with the ticket and sent the moment this turn is saved, but it has
+        # not happened yet, so "has been alerted" would be a claim ahead of
+        # the fact.
+        return (
+            "The emergency IS recorded, and the alert to the on-call team is "
+            "being sent right now. You may say the team is being alerted now. "
+            "Do NOT say a dispatcher HAS been alerted, notified, or is on the "
+            "way — that is not confirmed yet. If it is dangerous right now, "
+            "tell them to call the business directly or the emergency "
+            "services. Do not offer an appointment time."
         )
     return (
         "The emergency IS recorded and the team will see it, but the alert to "
@@ -1159,7 +1442,9 @@ def _domain_error_result(exc: DomainError) -> dict[str, Any]:
     return {"success": False, "error": ToolErrors.INTERNAL_ERROR, "detail": exc.message}
 
 
-def _render_slot(slot: AvailabilitySlot, zone: ZoneInfo) -> dict[str, Any]:
+def _render_slot(
+    slot: AvailabilitySlot, zone: ZoneInfo, reference: datetime | None = None
+) -> dict[str, Any]:
     local_start = slot.start_at.astimezone(zone)
     local_end = slot.end_at.astimezone(zone)
     return {
@@ -1170,15 +1455,66 @@ def _render_slot(slot: AvailabilitySlot, zone: ZoneInfo) -> dict[str, Any]:
         # Pre-rendered so the model reads a time back rather than doing
         # 24h -> 12h arithmetic itself, which is a step it can get wrong and
         # the caller would never catch.
-        "label": _spoken(local_start),
+        "label": _spoken(local_start, reference=reference),
     }
 
 
-def _spoken(value: datetime) -> str:
+def _spoken(value: datetime, *, reference: datetime | None = None) -> str:
     hour = value.hour % 12 or 12
     meridiem = "AM" if value.hour < 12 else "PM"
     minute = f":{value.minute:02d}" if value.minute else ""
-    return f"{value.strftime('%A, %B')} {value.day} at {hour}{minute} {meridiem}"
+    # The year is spoken only when it is not the current one. Month and day
+    # alone let a wrong-year date pass unnoticed — this system has already
+    # shipped one stale-year defect — and `check_availability` honours
+    # whatever `preferred_date` the model sends, so a slot a year out would
+    # be read as "Tuesday, October 6" and confirmed as such.
+    current_year = (reference or datetime.now(timezone.utc)).astimezone(value.tzinfo).year
+    year = "" if value.year == current_year else f", {value.year}"
+    return f"{value.strftime('%A, %B')} {value.day}{year} at {hour}{minute} {meridiem}"
+
+
+def _not_offered_with_options(offered_times: list[dict[str, str]]) -> dict[str, Any]:
+    """The SLOT_NOT_OFFERED refusal for a conversation that HAS been read
+    times — shared by `select_appointment_slot` and `book_appointment` so the
+    two cannot drift into contradicting each other in one tool round.
+
+    The advice deliberately inverts what it used to be. "Call
+    check_availability, read them the times it returns" is right only when
+    nothing has been offered yet; once times are on record it re-reads an
+    identical list to a caller who has already chosen from it, which is the
+    shape of the 2026-09-22 loop. Naming the recorded times instead lets the
+    model repair its own argument without another search, and `offered_times`
+    is given in the exact argument shape both tools take so it never has to
+    reconstruct a date at all."""
+    return {
+        "success": False,
+        "error": ToolErrors.SLOT_NOT_OFFERED,
+        "offered_times": offered_times,
+        "next_step": (
+            "That exact time is not one this caller was offered. The times "
+            "they have already been read are in \"offered_times\". Do NOT "
+            "call check_availability and do NOT read the same list out "
+            "again — ask the caller which of those times they meant, then "
+            "call select_appointment_slot with the matching \"date\" and "
+            "\"start_time\" copied exactly from \"offered_times\", and "
+            "book that."
+        ),
+    }
+
+
+def _same_wall_clock_but_for_the_year(candidate: datetime, requested: datetime) -> bool:
+    """Whether two local times differ in nothing but their year.
+
+    Month, day, hour and minute must all agree. Deliberately not a tolerance
+    window: "within an hour" would let 8:00 answer for 8:30 when both were
+    offered, which is the caller being booked into a time they did not pick.
+    Both sides are already converted to the business's zone by the caller."""
+    return (
+        candidate.month == requested.month
+        and candidate.day == requested.day
+        and candidate.hour == requested.hour
+        and candidate.minute == requested.minute
+    )
 
 
 def _zone_or_utc(name: str) -> ZoneInfo:
@@ -1194,6 +1530,15 @@ def _is_blank(value: Any) -> bool:
 
 def _clean(value: Any) -> str:
     return str(value).strip()
+
+
+def _text_or_none(value: Any) -> str | None:
+    """A model-supplied string argument, stripped, or None when blank. The
+    tool schemas type these as strings, but strict mode does not stop the
+    model sending "" for something it does not know."""
+    if _is_blank(value):
+        return None
+    return _clean(value)
 
 
 def _parse_date(value: Any) -> py_date | None:

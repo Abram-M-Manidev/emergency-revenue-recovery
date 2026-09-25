@@ -352,10 +352,17 @@ async def test_truncated_stream_raises_rather_than_persisting_partial(
 ):
     """M. A stream that dies mid-document must not yield a complete event —
     otherwise a half-formed outcome would be persisted. `json.loads` raises
-    `JSONDecodeError` (a `ValueError`) on the truncated document."""
+    `JSONDecodeError` (a `ValueError`) on the truncated document.
+
+    It now surfaces as `AIProviderUnavailableError`, with that `ValueError`
+    as its cause. As a raw exception it escaped the streaming turn AFTER the
+    caller had heard the reply and rolled back the request — including any
+    appointment or ticket the turn's tools had just created. As a domain
+    error the webhook speaks the fallback and commits instead."""
     truncated = _STREAM_DOC[: len(_STREAM_DOC) // 2]
-    with pytest.raises(ValueError):
+    with pytest.raises(AIProviderUnavailableError) as raised:
         await _collect_stream([truncated], monkeypatch)
+    assert isinstance(raised.value.__cause__, ValueError)
 
 
 @pytest.mark.asyncio

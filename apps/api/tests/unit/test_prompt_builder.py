@@ -316,3 +316,37 @@ def test_the_selection_contract_is_absent_until_tools_are_enabled():
 
     assert "select_appointment_slot" not in prompt
     assert "SLOT_NOT_SELECTED" not in prompt
+
+
+# --- The date the model would otherwise invent ---------------------------
+#
+# On 2026-09-22 a live caller chose 8:30 AM from three offered times and the
+# model sent date="2024-09-22" to book_appointment — the right day and
+# minute, two years stale. The prompt had never told it what year it was, so
+# it used the only one it knew. The booking was refused as never-offered and
+# the call looped on the same three options until the caller hung up.
+
+
+def test_the_prompt_states_todays_date_so_the_model_never_guesses_the_year():
+    prompt = _build(today=date(2026, 9, 22))
+
+    assert "Today's date is Tuesday, September 22, 2026" in prompt
+    # The year is the part that failed, so the instruction names it.
+    assert "never guess" in prompt
+
+
+def test_todays_date_is_stated_in_the_businesss_own_timezone():
+    """A bare date is ambiguous across zones, and the model builds booking
+    arguments from it — so the prompt says which zone it is reckoned in."""
+    prompt = _build(today=date(2026, 9, 22))
+
+    assert "America/Chicago" in prompt
+
+
+def test_the_date_line_survives_a_business_with_no_profile():
+    """Profile is optional everywhere else in this builder; the date must not
+    be the one field that makes a profile-less organization crash."""
+    prompt = _build(profile=None, today=date(2026, 9, 22))
+
+    assert "Today's date is Tuesday, September 22, 2026" in prompt
+    assert "(UTC)" in prompt

@@ -3,11 +3,13 @@ real LLM call. Mirrors `test_ai_brain_service.py`'s structure."""
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 
 import pytest
+from structlog.testing import capture_logs
 
 from app.application.services.dispatch_service import DispatchService
 from app.domain.entities.conversation_outcome import CallClassification, RecommendedAction
@@ -251,9 +253,11 @@ async def test_backfill_treats_empty_strings_as_missing():
 
 
 @pytest.mark.asyncio
-async def test_backfill_never_overwrites_a_value_already_on_the_ticket():
-    """An operator correction, or an earlier better transcription, must win
-    over whatever the model reports on a later turn."""
+async def test_a_lost_detail_never_blanks_a_value_already_on_the_ticket():
+    """Half of this case was reversed on 2026-09-22; this is the half that
+    stands. A later turn that simply *omits* a field the model reported
+    earlier must not erase it — the model dropping a detail is not the
+    caller retracting it."""
     service, _, _, outcomes = _make_service()
     conversation_id = uuid.uuid4()
     await _seed_outcome(
@@ -265,20 +269,98 @@ async def test_backfill_never_overwrites_a_value_already_on_the_ticket():
     )
     created = await service.sync_ticket_from_outcome(_ORG_ID, conversation_id)
 
-    # Later turn reports different (and partially lost) details.
     await _seed_outcome(
         outcomes,
         conversation_id,
-        customer_name="Jane",
+        customer_name="Jane Doe",
         customer_phone=None,
-        customer_address="somewhere else",
+        customer_address="   ",
     )
     updated = await service.sync_ticket_from_outcome(_ORG_ID, conversation_id)
 
-    assert updated.customer_name == "Jane Doe"
     assert updated.customer_phone == "+15551234567"
     assert updated.customer_address == "123 Main St"
     assert updated.id == created.id
+
+
+@pytest.mark.asyncio
+async def test_a_caller_correction_reaches_the_ticket():
+    """The reversed half, and the reason for it.
+
+    This used to assert the opposite: that a differing later value must
+    never overwrite, so "an operator correction, or an earlier better
+    transcription" would win. No endpoint lets an operator edit these three
+    fields on a ticket — `assign` and `status` are the only writes — so the
+    rule protected a workflow that does not exist, while discarding one
+    that happens on most calls.
+
+    Two real calls paid for it. A booked appointment carried "Sixteenth
+    Street, California" while the outcome had since learned "Sixteenth
+    Street, Lyle, California", and a caller who said "my name is John.
+    Actually, sorry, it's Jonathan" was recorded as "John". On an emergency
+    ticket that stale value is the address someone is dispatched to.
+
+    `conversation_outcomes` is already last-write-wins and is what the
+    dashboard reads, so the ticket holding an older value was never a
+    safeguard — just an inconsistency."""
+    service, _, _, outcomes = _make_service()
+    conversation_id = uuid.uuid4()
+    await _seed_outcome(
+        outcomes,
+        conversation_id,
+        customer_name="John",
+        customer_phone="+15551234567",
+        customer_address="Sixteenth Street",
+    )
+    created = await service.sync_ticket_from_outcome(_ORG_ID, conversation_id)
+
+    await _seed_outcome(
+        outcomes,
+        conversation_id,
+        customer_name="Jonathan Reyes",
+        customer_phone="+15551234567",
+        customer_address="Sixteenth Street, Lisle",
+    )
+    updated = await service.sync_ticket_from_outcome(_ORG_ID, conversation_id)
+
+    assert updated.id == created.id, "must correct in place, not open a second ticket"
+    assert updated.customer_name == "Jonathan Reyes"
+    assert updated.customer_address == "Sixteenth Street, Lisle"
+    assert updated.customer_phone == "+15551234567"
+
+
+@pytest.mark.asyncio
+async def test_an_overwrite_is_logged_with_field_names_and_never_values():
+    """Accepting a later value also accepts a model that *degrades* one, so
+    the write must not be silent. Caller PII never enters a log line, so the
+    record is which fields moved, not what they became."""
+    service, _, _, outcomes = _make_service()
+    conversation_id = uuid.uuid4()
+    await _seed_outcome(
+        outcomes, conversation_id, customer_name="John", customer_phone="+15551234567"
+    )
+    await service.sync_ticket_from_outcome(_ORG_ID, conversation_id)
+
+    await _seed_outcome(
+        outcomes,
+        conversation_id,
+        customer_name="Jonathan Reyes",
+        customer_phone="+15551234567",
+        customer_address="12 Oak Street, Lisle",
+    )
+    with capture_logs() as logs:
+        await service.sync_ticket_from_outcome(_ORG_ID, conversation_id)
+
+    synced = [entry for entry in logs if entry["event"] == "ticket_contact_details_synced"]
+    assert len(synced) == 1
+    assert synced[0]["fields"] == ["customer_address", "customer_name"]
+    # The address was blank before, the name was not — only the name is an
+    # overwrite, and that distinction is the point of the line.
+    assert synced[0]["overwritten"] == ["customer_name"]
+
+    blob = json.dumps(synced[0])
+    for secret in ("Jonathan", "Reyes", "John", "Oak Street", "Lisle", "+15551234567"):
+        assert secret not in blob, f"{secret!r} leaked into a log line"
 
 
 @pytest.mark.asyncio

@@ -15,8 +15,13 @@ import uuid
 
 import pytest
 
+from app.application.services.ai_brain_service import _phone_to_persist
 from app.application.services.customer_service import CustomerService
-from app.domain.entities.conversation_outcome import CallClassification, RecommendedAction
+from app.domain.entities.conversation_outcome import (
+    CUSTOMER_PHONE_MAX_LENGTH,
+    CallClassification,
+    RecommendedAction,
+)
 from app.shared.utils.phone import normalize_phone_number
 from tests.fakes import (
     FakeAppointmentRepository,
@@ -54,10 +59,31 @@ _ORG_ID = uuid.uuid4()
         ("   ", None),
         ("unknown", None),
         ("---", None),
+        # The 2026-09-24 PSTN call. The caller said their number aloud and
+        # the transcript held words, not digits. Unparseable is the correct
+        # answer — this function canonicalises formatting noise around
+        # digits the caller stated, and there are no digits here to find.
+        # Inventing "123456789" from the words would be a guess dressed as
+        # a dedupe key, and a wrong one the moment a caller says "oh" for
+        # zero or "double four".
+        ("one two three four five six seven eight nine", None),
+        ("six three zero five five five zero one eight four", None),
     ],
 )
 def test_normalization_cases(raw: str | None, expected: str | None):
     assert normalize_phone_number(raw) == expected
+
+
+def test_a_spoken_number_is_unparseable_rather_than_invented():
+    """Pinned separately from the table because the tempting "fix" for the
+    2026-09-24 outage was to teach this function English number words. That
+    would push the guess into `customers.phone_number`, which is matched
+    exactly for deduplication — so a misheard word would split one caller
+    across records, the exact defect this module exists to prevent."""
+    spoken = "one two three four five six seven eight nine"
+
+    assert normalize_phone_number(spoken) is None
+    assert normalize_phone_number(spoken) != "123456789"
 
 
 def test_every_spoken_variant_of_one_number_collapses_to_one_key():
@@ -177,3 +203,74 @@ async def test_a_missing_phone_number_still_creates_no_customer():
 
     assert await service.sync_customer_from_outcome(_ORG_ID, conversation_id) is None
     assert customers._customers == {}
+
+
+# --- What actually gets persisted ------------------------------------------
+#
+# `normalize_phone_number` deciding a value is unusable is only half the
+# story; the other half is what `_persist_turn` then writes. On 2026-09-24
+# it wrote the raw utterance, which did not fit `VARCHAR(32)` and took the
+# whole turn down with it. These pin the decision itself, with no database
+# involved — `tests/integration/test_spoken_phone_persistence.py` proves the
+# same thing against the real column.
+
+
+@pytest.mark.parametrize(
+    "spoken",
+    [
+        "one two three four five six seven eight nine",
+        "six three zero five five five zero one eight four",
+        "unknown",
+        "he didn't say",
+        "",
+        "   ",
+    ],
+)
+def test_an_unusable_report_is_never_persisted_verbatim(spoken: str):
+    """Whatever the transcript held, the structured field gets a real number
+    or nothing — never prose, and never a fabricated stand-in."""
+    persisted = _phone_to_persist(spoken, already_stored=None)
+
+    assert persisted is None
+    assert persisted != spoken
+
+
+def test_an_unusable_report_keeps_the_number_already_known():
+    """The model failing to hear a number is not the caller withdrawing one.
+    Blanking it would leave the business no way to call back."""
+    assert (
+        _phone_to_persist("one two three four five six seven eight nine",
+                          already_stored="6305550184")
+        == "6305550184"
+    )
+
+
+def test_a_usable_report_still_corrects_what_is_stored():
+    """The successful pilot path: a number that canonicalises wins, including
+    over an earlier one."""
+    assert _phone_to_persist("6 3 0 5 5 5 0 1 8 4", already_stored="123456789") == "6305550184"
+    assert _phone_to_persist("123456789", already_stored=None) == "123456789"
+
+
+def test_nothing_longer_than_the_column_is_ever_returned():
+    """The floor. A pathological transcript — a caller reciting an account
+    number and a phone number in one breath — degrades to "nothing learned"
+    rather than taking the turn down."""
+    absurd = " ".join(["1234567890"] * 10)
+
+    persisted = _phone_to_persist(absurd, already_stored="6305550184")
+
+    assert persisted == "6305550184"
+    assert len(persisted) <= CUSTOMER_PHONE_MAX_LENGTH
+
+
+def test_a_value_is_not_truncated_into_a_plausible_looking_number():
+    """Truncating would be worse than dropping: `"one two three four five"`
+    trimmed to 32 characters is indistinguishable downstream from a number
+    the caller actually gave."""
+    spoken = "one two three four five six seven eight nine"
+
+    persisted = _phone_to_persist(spoken, already_stored=None)
+
+    assert persisted is None
+    assert persisted != spoken[:CUSTOMER_PHONE_MAX_LENGTH]

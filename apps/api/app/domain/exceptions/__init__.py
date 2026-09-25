@@ -19,6 +19,7 @@ from app.domain.exceptions.base import (
     RegistrationDisabledError,
     SlotNotOfferedError,
     SlotNotSelectedError,
+    TurnPersistenceError,
     VoiceAssistantDisabledError,
     VoiceLineNotFoundError,
 )
@@ -44,6 +45,7 @@ __all__ = [
     "RegistrationDisabledError",
     "SlotNotOfferedError",
     "SlotNotSelectedError",
+    "TurnPersistenceError",
     "VoiceAssistantDisabledError",
     "VoiceLineNotFoundError",
 ]

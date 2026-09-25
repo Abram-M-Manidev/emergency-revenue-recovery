@@ -90,6 +90,8 @@ class TeamService:
         acting_user_id: uuid.UUID,
     ) -> User:
         target = await self._get_member(organization_id, target_user_id)
+        if self._is_owner(target):
+            await self._require_acting_owner(organization_id, acting_user_id)
 
         if not is_active:
             if target_user_id == acting_user_id:
@@ -114,6 +116,8 @@ class TeamService:
             )
 
         target = await self._get_member(organization_id, target_user_id)
+        if role_name == OWNER_ROLE_NAME or self._is_owner(target):
+            await self._require_acting_owner(organization_id, acting_user_id)
 
         if role_name != OWNER_ROLE_NAME and self._is_owner(target):
             await self._ensure_other_active_owner_exists(organization_id, target.id)
@@ -132,6 +136,27 @@ class TeamService:
             # ownership checks.
             raise EntityNotFoundError("User", str(user_id))
         return user
+
+    async def _require_acting_owner(
+        self, organization_id: uuid.UUID, acting_user_id: uuid.UUID
+    ) -> None:
+        """Only an Owner may create an Owner or act on one.
+
+        `users:manage` is held by Admins too, and this service checked
+        nothing beyond it — so an Admin could make themselves Owner, then
+        demote or deactivate the real Owner, and hold the organization:
+        `organization:manage` (the voice kill switch, the emergency alert
+        destination) is an Owner-only permission that this path handed to
+        anyone who could manage users. The last-owner guard did not help:
+        by the time it ran, the Admin was already an Owner."""
+        acting = await self._users.get_by_id(acting_user_id)
+        if acting is None or acting.organization_id != organization_id:
+            raise AuthorizationError("Only an Owner can change an Owner's role or status.")
+        if acting.is_superuser or self._is_owner(acting):
+            return
+        raise AuthorizationError(
+            "Only an Owner can grant the Owner role or change an Owner's role or status."
+        )
 
     @staticmethod
     def _is_owner(user: User) -> bool:

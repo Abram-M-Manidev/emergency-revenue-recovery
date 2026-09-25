@@ -12,6 +12,7 @@ contextvar propagation is precisely the correlation mechanism under test.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 
 import pytest
@@ -131,3 +132,93 @@ async def test_error_in_stream_is_not_reported_as_an_abort():
 
     assert _events(entries, "voice_stream_aborted") == []
     assert _events(entries, "voice_stream_completed") == []
+
+
+# --- Unexpected failures inside the turn generator ---------------------------
+#
+# Before these, an ordinary exception escaping the turn was invisible at this
+# layer: the abort clause catches only GeneratorExit/CancelledError and the
+# completion line is never reached, so the sole trace was uvicorn's
+# "Exception in ASGI application" — a bare traceback with none of the ids
+# bound to the turn. On 2026-09-24 a VARCHAR overflow rolled back a turn the
+# caller had already heard, and with no correlated log line the call looked
+# like the assistant forgetting the conversation.
+
+
+@pytest.mark.asyncio
+async def test_an_unexpected_exception_is_logged_with_the_turns_identifiers():
+    stats = _StreamStats()
+
+    async def producer() -> AsyncIterator[str]:
+        yield "I have 11:00, 11:30 and 12:00 available."
+        raise RuntimeError("value too long for type character varying(32)")
+
+    with capture_events() as entries, pytest.raises(RuntimeError):
+        async for _frame in _instrumented_stream(stats, producer()):
+            stats.content_frames += 1
+            stats.first_content_at = stats.first_content_at or 1.0
+
+    failures = _events(entries, "voice_stream_failed")
+    assert len(failures) == 1
+    assert failures[0]["error"] == "RuntimeError"
+    # The field that names the damage: the caller was spoken to, and then the
+    # transaction rolled back.
+    assert failures[0]["reached_first_content"] is True
+    assert failures[0]["content_frames"] == 1
+
+    # A failure is neither a clean end nor a caller hang-up.
+    assert _events(entries, "voice_stream_completed") == []
+    assert _events(entries, "voice_stream_aborted") == []
+
+
+@pytest.mark.asyncio
+async def test_the_exception_is_re_raised_untouched():
+    """Observability only — recovery behaviour must be exactly what it was,
+    so the caller still gets the spoken fallback the webhook already has."""
+    stats = _StreamStats()
+    original = ValueError("boom")
+
+    async def producer() -> AsyncIterator[str]:
+        raise original
+        yield  # pragma: no cover - unreachable, makes this a generator
+
+    with capture_events(), pytest.raises(ValueError) as raised:
+        async for _frame in _instrumented_stream(stats, producer()):
+            pass
+
+    assert raised.value is original
+
+
+@pytest.mark.asyncio
+async def test_a_failure_log_never_carries_the_exception_message():
+    """A driver error quotes the parameters that failed, and on this path
+    those are the caller's own name, number and address. The type is enough
+    to route an investigation; the message is not safe to keep."""
+    stats = _StreamStats()
+    pii = "Lucky, one two three four five six seven eight nine, Fifteenth Street"
+
+    async def producer() -> AsyncIterator[str]:
+        raise RuntimeError(pii)
+        yield  # pragma: no cover - unreachable, makes this a generator
+
+    with capture_events() as entries, pytest.raises(RuntimeError):
+        async for _frame in _instrumented_stream(stats, producer()):
+            pass
+
+    blob = json.dumps(_events(entries, "voice_stream_failed"))
+    assert "RuntimeError" in blob
+    for fragment in ("Lucky", "one two three", "Fifteenth Street"):
+        assert fragment not in blob, f"{fragment!r} leaked into a log line"
+
+
+@pytest.mark.asyncio
+async def test_a_clean_stream_still_reports_completion_only():
+    """The guard must not have changed the ordinary path."""
+    stats = _StreamStats()
+
+    with capture_events() as entries:
+        async for _frame in _instrumented_stream(stats, _frames("a", "b")):
+            pass
+
+    assert len(_events(entries, "voice_stream_completed")) == 1
+    assert _events(entries, "voice_stream_failed") == []

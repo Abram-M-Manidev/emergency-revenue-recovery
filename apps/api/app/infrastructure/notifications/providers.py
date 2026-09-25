@@ -25,6 +25,7 @@ from __future__ import annotations
 import httpx
 import structlog
 
+from app.core.config import Settings
 from app.domain.notifications.emergency import (
     DeliveryStatus,
     EmergencyAlert,
@@ -188,3 +189,18 @@ def _alert_payload(alert: EmergencyAlert) -> dict[str, object]:
         "customer_address": alert.customer_address,
         "created_at": alert.created_at.isoformat(),
     }
+
+
+def build_notification_provider(settings: Settings) -> NotificationPort:
+    """Which adapter backs emergency alerting, from configuration.
+
+    Shared by the request path (which records the provider on the outbox
+    row) and the outbox worker (which sends), so the two can never disagree.
+    Defaults to `none`, which reports NOT_CONFIGURED and so never licenses a
+    claim that a dispatcher was alerted. `logging` is refused in production
+    by `Settings._validate_production_safety`."""
+    if settings.NOTIFICATION_PROVIDER == "webhook":
+        return WebhookNotificationProvider(timeout_seconds=settings.NOTIFICATION_TIMEOUT_SECONDS)
+    if settings.NOTIFICATION_PROVIDER == "logging":
+        return LoggingNotificationProvider()
+    return NullNotificationProvider()

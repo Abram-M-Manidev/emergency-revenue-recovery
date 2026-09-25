@@ -2,7 +2,7 @@
 
 The unit suite proves the rules. This proves the parts only real SQL can:
 
-- `claim()` really is atomic. Its idempotency rests on INSERT ... ON CONFLICT
+- `enqueue()` really is atomic. Its idempotency rests on INSERT ... ON CONFLICT
   DO NOTHING against a unique index, and an in-memory fake enforces that by
   construction — so a missing or misspelled index would sail through every
   unit test while, in production, paging the on-call engineer twice for one
@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 import pytest_asyncio
@@ -90,28 +91,35 @@ async def _seed_org_and_ticket() -> tuple[uuid.UUID, uuid.UUID]:
     return organization_id, ticket_id
 
 
+async def _enqueue(repo, organization_id, ticket_id):
+    return await repo.enqueue(
+        organization_id,
+        ticket_id,
+        channel=NotificationChannel.WEBHOOK,
+        provider="webhook",
+        status=DeliveryStatus.PENDING,
+        next_attempt_at=datetime.now(timezone.utc),
+    )
+
+
 @pytest.mark.asyncio(loop_scope="session")
-async def test_claim_grants_the_send_to_exactly_one_caller(database_ready):
+async def test_enqueue_creates_exactly_one_outbox_row_per_ticket(database_ready):
     organization_id, ticket_id = await _seed_org_and_ticket()
 
     async with AsyncSessionLocal() as session:
         repo = SqlAlchemyNotificationDeliveryRepository(session)
-        first, first_is_ours = await repo.claim(
-            organization_id, ticket_id, channel=NotificationChannel.WEBHOOK, provider="webhook"
-        )
-        second, second_is_ours = await repo.claim(
-            organization_id, ticket_id, channel=NotificationChannel.WEBHOOK, provider="webhook"
-        )
+        first, first_created = await _enqueue(repo, organization_id, ticket_id)
+        second, second_created = await _enqueue(repo, organization_id, ticket_id)
         await session.commit()
 
-    assert first_is_ours is True
-    assert second_is_ours is False, "two callers both won the right to send"
+    assert first_created is True
+    assert second_created is False, "two writers both created the ticket's alert"
     assert first.id == second.id
     assert first.status is DeliveryStatus.PENDING
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_concurrent_claims_in_separate_transactions_yield_one_winner(database_ready):
+async def test_concurrent_enqueues_in_separate_transactions_yield_one_row(database_ready):
     """The production shape: separate sessions, as four uvicorn workers
     would have. This is the case an in-memory fake cannot exercise at all."""
     organization_id, ticket_id = await _seed_org_and_ticket()
@@ -119,20 +127,13 @@ async def test_concurrent_claims_in_separate_transactions_yield_one_winner(datab
     async def attempt() -> bool:
         async with AsyncSessionLocal() as session:
             repo = SqlAlchemyNotificationDeliveryRepository(session)
-            _, is_ours = await repo.claim(
-                organization_id,
-                ticket_id,
-                channel=NotificationChannel.WEBHOOK,
-                provider="webhook",
-            )
+            _, created = await _enqueue(repo, organization_id, ticket_id)
             await session.commit()
-            return is_ours
+            return created
 
     results = await asyncio.gather(attempt(), attempt(), attempt(), return_exceptions=True)
 
-    granted = [r for r in results if r is True]
-    assert len(granted) == 1, f"expected exactly one winner, got {results}"
-
+    assert [r for r in results if r is True] == [True], f"expected one creator, got {results}"
     async with AsyncSessionLocal() as session:
         rows = (
             await session.execute(
@@ -147,20 +148,20 @@ async def test_concurrent_claims_in_separate_transactions_yield_one_winner(datab
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_a_recorded_result_persists_and_reads_back(database_ready):
+async def test_a_recorded_attempt_persists_and_reads_back(database_ready):
     organization_id, ticket_id = await _seed_org_and_ticket()
 
     async with AsyncSessionLocal() as session:
         repo = SqlAlchemyNotificationDeliveryRepository(session)
-        await repo.claim(
-            organization_id, ticket_id, channel=NotificationChannel.WEBHOOK, provider="webhook"
-        )
-        await repo.record_result(
-            organization_id,
-            ticket_id,
+        await _enqueue(repo, organization_id, ticket_id)
+        locked = await repo.lock_next_due(now=datetime.now(timezone.utc), ticket_id=ticket_id)
+        assert locked is not None
+        await repo.record_attempt(
+            locked.id,
             status=DeliveryStatus.DELIVERED,
             error_code=None,
             provider="webhook",
+            next_attempt_at=None,
         )
         await session.commit()
 
@@ -175,24 +176,26 @@ async def test_a_recorded_result_persists_and_reads_back(database_ready):
     assert delivery.alerted_a_human is True
     assert delivery.attempts == 1
     assert delivery.delivered_at is not None
+    assert delivery.next_attempt_at is None
     assert leaked is None
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_a_failed_result_records_the_code_and_claims_nothing(database_ready):
+async def test_a_failed_attempt_records_the_code_and_claims_nothing(database_ready):
     organization_id, ticket_id = await _seed_org_and_ticket()
+    retry_at = datetime.now(timezone.utc)
 
     async with AsyncSessionLocal() as session:
         repo = SqlAlchemyNotificationDeliveryRepository(session)
-        await repo.claim(
-            organization_id, ticket_id, channel=NotificationChannel.WEBHOOK, provider="webhook"
-        )
-        delivery = await repo.record_result(
-            organization_id,
-            ticket_id,
+        await _enqueue(repo, organization_id, ticket_id)
+        locked = await repo.lock_next_due(now=datetime.now(timezone.utc), ticket_id=ticket_id)
+        assert locked is not None
+        delivery = await repo.record_attempt(
+            locked.id,
             status=DeliveryStatus.FAILED,
             error_code="http_500",
             provider="webhook",
+            next_attempt_at=retry_at,
         )
         await session.commit()
 
@@ -200,6 +203,7 @@ async def test_a_failed_result_records_the_code_and_claims_nothing(database_read
     assert delivery.alerted_a_human is False
     assert delivery.error_code == "http_500"
     assert delivery.delivered_at is None
+    assert delivery.is_queued is True
 
 
 @pytest.mark.asyncio(loop_scope="session")

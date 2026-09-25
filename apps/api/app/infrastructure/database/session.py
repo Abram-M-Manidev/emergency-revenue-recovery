@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 
+import structlog
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -18,6 +19,10 @@ from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.pool import NullPool
 
 from app.core.config import Settings, get_settings
+from app.domain.exceptions import DomainError
+from app.infrastructure.database.transactions import AFTER_COMMIT_KEY
+
+_logger = structlog.get_logger("app.database")
 
 
 class Base(DeclarativeBase):
@@ -66,8 +71,56 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         try:
             yield session
             await session.commit()
-        except Exception:
-            await session.rollback()
+        except Exception as exc:
+            session.info.pop(AFTER_COMMIT_KEY, None)
+            # Never silent. On a streamed voice turn this can run after the
+            # caller has heard the whole reply — a failed commit there means
+            # the backend has no record of something the caller was told —
+            # and until this line the only trace was an unattributed
+            # traceback. Bound request/call ids attach via contextvars. Type
+            # only: a driver error quotes its parameters, i.e. caller PII.
+            # A `DomainError` is an ordinary refusal (404, 409, ...) that
+            # already has its own log line, so it stays at info.
+            log = _logger.info if isinstance(exc, DomainError) else _logger.error
+            log("db_transaction_rolled_back", error=type(exc).__name__)
+            try:
+                await session.rollback()
+            except Exception as rollback_exc:
+                # The connection itself is broken — typically a query that
+                # was cancelled mid-flight, which leaves SQLAlchemy unable to
+                # roll back ("Can't reconnect until invalid transaction is
+                # rolled back"). Invalidate rather than close: close would
+                # return a connection still `idle in transaction` holding
+                # this request's locks; invalidation discards it, and
+                # Postgres aborts the transaction when it goes.
+                _logger.error(
+                    "db_connection_invalidated", error=type(rollback_exc).__name__
+                )
+                await session.invalidate()
             raise
         finally:
             await session.close()
+        await _run_after_commit(session)
+
+
+async def _run_after_commit(session: AsyncSession) -> None:
+    """Runs the callbacks registered for this request, now that its
+    transaction has committed.
+
+    Only reached on a clean commit: the `except` above clears them and
+    re-raises. Each callback is isolated — one failing must not stop the
+    next, and none may surface as an error for a request that has already
+    succeeded. They do their own database work on fresh sessions; this
+    request's session is closed by the time they run.
+
+    Awaited rather than spawned as a background task: on a streamed voice
+    turn this runs after the response body has been sent, so the caller
+    waits for nothing, and awaiting means the work cannot be lost when a
+    worker shuts down between the commit and a task being scheduled. Whatever
+    is still undone is picked up by the outbox poller."""
+    callbacks = session.info.pop(AFTER_COMMIT_KEY, None) or []
+    for callback in callbacks:
+        try:
+            await callback()
+        except Exception as exc:
+            _logger.error("after_commit_callback_failed", error=type(exc).__name__)

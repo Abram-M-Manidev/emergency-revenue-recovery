@@ -191,6 +191,7 @@ class _Harness:
             offered_slot_repository=self.offered_slots,
         )
         self.factory = VoiceToolExecutor(
+            clock=lambda: _NOW,
             appointment_service=self.appointment_service,
             dispatch_service=DispatchService(
                 emergency_ticket_repository=self.tickets,
@@ -704,9 +705,30 @@ async def test_case_g_a_selected_slot_that_has_since_passed_is_refused():
 
 
 @pytest.mark.asyncio
-async def test_case_g_a_wrong_year_is_not_offered_and_so_not_selectable():
-    """The model reaching for a date a year out — the shape of a date-grounding
-    slip. It was never offered, so it cannot be chosen, let alone booked."""
+async def test_case_g_a_wrong_year_resolves_to_the_offer_it_can_only_mean():
+    """Deliberately reversed on 2026-09-22, after the live call this file's
+    predecessor only predicted.
+
+    This case used to assert the opposite — that a year-out date is "never
+    offered, so it cannot be chosen". That reading treated the model's
+    `date` argument as a claim about which slot exists. It is not: it is the
+    model's rendering of a slot the caller already chose out loud, and the
+    year is the one component of it no caller ever says and no tool result
+    survives long enough to remind it of.
+
+    Enforcing the strict reading cost a real booking. On 2026-09-22 a caller
+    was offered 8:00, 8:30 and 9:00, said "eight thirty" three times, and
+    the model sent date="2024-09-22" every time. Each attempt was refused
+    SLOT_NOT_OFFERED, whose advice is "call check_availability" — which
+    re-offered the identical three times and rebuilt the identical wrong
+    instant. The caller hung up unbooked after four minutes.
+
+    Refusal bought no safety there, because there was never a second
+    candidate to protect against: exactly one offered slot starts at 08:00
+    on August 24. Consent is unchanged and still mechanical — the slot had
+    to be offered, and CASE H below still refuses a booking with no
+    selection behind it. What changed is only which offered slot an
+    ambiguous description resolves to."""
     harness = _Harness()
     conversation = uuid.uuid4()
     await harness.intake_and_offer(conversation)
@@ -716,6 +738,29 @@ async def test_case_g_a_wrong_year_is_not_offered_and_so_not_selectable():
     )
     booking = await harness.call(
         conversation, BOOK_APPOINTMENT.name, date="2025-08-24", start_time="08:00"
+    )
+
+    assert selection["success"] is True
+    assert selection["date"] == "2026-08-24"  # corrected, not echoed back
+    assert booking["success"] is True
+    assert await harness.appointment_time(conversation) == _MONDAY_8AM
+
+
+@pytest.mark.asyncio
+async def test_case_g_a_wrong_year_still_cannot_reach_an_unoffered_time():
+    """The half of the old assertion that was always right, kept. Repairing
+    a year may only ever land on a time this caller was read — it is not a
+    licence to book whatever the model names."""
+    harness = _Harness()
+    conversation = uuid.uuid4()
+    slots = await harness.intake_and_offer(conversation)
+    assert "14:00" not in {slot["start_time"] for slot in slots}
+
+    selection = await harness.call(
+        conversation, SELECT_APPOINTMENT_SLOT.name, date="2025-08-24", start_time="14:00"
+    )
+    booking = await harness.call(
+        conversation, BOOK_APPOINTMENT.name, date="2025-08-24", start_time="14:00"
     )
 
     assert selection["error"] == ToolErrors.SLOT_NOT_OFFERED

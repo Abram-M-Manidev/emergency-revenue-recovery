@@ -530,3 +530,113 @@ async def test_cancel_appointment_from_scheduled():
     canceled = await service.cancel_appointment(_ORG_ID, appointment.id, acting_user=owner)
 
     assert canceled.status is AppointmentStatus.CANCELED
+
+
+# --- Caller corrections reaching the appointment -----------------------------
+#
+# The row a technician is dispatched against. Before 2026-09-22 its contact
+# fields were write-once: the first version of a detail was permanent, so a
+# caller correcting themselves mid-call changed `conversation_outcomes` and
+# nothing else. Two real calls were dispatched on the worse value — one
+# appointment read "Sixteenth Street, California" while the outcome had
+# learned "Sixteenth Street, Lyle, California".
+
+
+async def _seed_contact(outcomes, conversation_id, **overrides):
+    fields = dict(
+        classification=CallClassification.NON_EMERGENCY,
+        confidence=0.9,
+        recommended_action=RecommendedAction.BOOK_APPOINTMENT,
+        matched_service_id=None,
+        customer_name="John",
+        customer_phone="+15551234567",
+        customer_address="Sixteenth Street",
+        summary="AC running but not cooling.",
+    )
+    fields.update(overrides)
+    await outcomes.upsert(conversation_id, **fields)
+
+
+@pytest.mark.asyncio
+async def test_a_caller_correction_reaches_the_appointment():
+    """S5, and the shape of both real calls: the caller gives a detail, then
+    improves it a turn later."""
+    service, appointments, _, outcomes = _make_service()
+    conversation_id = uuid.uuid4()
+    await _seed_contact(outcomes, conversation_id)
+    created = await service.sync_appointment_from_outcome(_ORG_ID, conversation_id)
+
+    await _seed_contact(
+        outcomes,
+        conversation_id,
+        customer_name="Jonathan Reyes",
+        customer_address="Sixteenth Street, Lisle",
+    )
+    updated = await service.sync_appointment_from_outcome(_ORG_ID, conversation_id)
+
+    assert updated.id == created.id, "must correct in place, not open a second appointment"
+    assert updated.customer_name == "Jonathan Reyes"
+    assert updated.customer_address == "Sixteenth Street, Lisle"
+    assert len(await appointments.list_for_organization(_ORG_ID, limit=10, offset=0)) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_lost_detail_never_blanks_the_appointment():
+    """The protection that predates the correction fix and still stands: the
+    model omitting a field it reported earlier is not the caller retracting
+    it, so a blank outcome value never erases a recorded one."""
+    service, _, _, outcomes = _make_service()
+    conversation_id = uuid.uuid4()
+    await _seed_contact(outcomes, conversation_id)
+    created = await service.sync_appointment_from_outcome(_ORG_ID, conversation_id)
+
+    await _seed_contact(
+        outcomes, conversation_id, customer_phone=None, customer_address="   "
+    )
+    updated = await service.sync_appointment_from_outcome(_ORG_ID, conversation_id)
+
+    assert updated.id == created.id
+    assert updated.customer_phone == "+15551234567"
+    assert updated.customer_address == "Sixteenth Street"
+
+
+@pytest.mark.asyncio
+async def test_a_correction_never_disturbs_real_scheduling_progress():
+    """The idempotency guard's original purpose. A later turn may fix a name
+    but must not touch the time, duration or status a booking established."""
+    service, appointments, _, outcomes = _make_service()
+    conversation_id = uuid.uuid4()
+    await _seed_contact(outcomes, conversation_id)
+    created = await service.sync_appointment_from_outcome(_ORG_ID, conversation_id)
+    scheduled_at = datetime(2026, 8, 24, 14, 0, tzinfo=timezone.utc)
+    await appointments.schedule(
+        _ORG_ID,
+        created.id,
+        scheduled_start_at=scheduled_at,
+        duration_minutes=90,
+        technician_user_id=None,
+        assigned_at=datetime.now(timezone.utc),
+    )
+
+    await _seed_contact(outcomes, conversation_id, customer_name="Jonathan Reyes")
+    after = await service.sync_appointment_from_outcome(_ORG_ID, conversation_id)
+
+    assert after.customer_name == "Jonathan Reyes"
+    assert after.scheduled_start_at == scheduled_at
+    assert after.duration_minutes == 90
+    assert after.status is AppointmentStatus.SCHEDULED
+
+
+@pytest.mark.asyncio
+async def test_an_unchanged_outcome_performs_no_write_at_all():
+    """Every voice turn calls this sync, so the no-op path is the common one
+    and must not churn the row."""
+    service, appointments, _, outcomes = _make_service()
+    conversation_id = uuid.uuid4()
+    await _seed_contact(outcomes, conversation_id)
+    await service.sync_appointment_from_outcome(_ORG_ID, conversation_id)
+    appointments.backfill_calls.clear()
+
+    await service.sync_appointment_from_outcome(_ORG_ID, conversation_id)
+
+    assert appointments.backfill_calls == []

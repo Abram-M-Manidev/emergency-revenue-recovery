@@ -116,10 +116,21 @@ class Settings(BaseSettings):
     # below the AI timeouts above. Exceeding it is a FAILED delivery the
     # assistant reports truthfully, never an exception.
     NOTIFICATION_TIMEOUT_SECONDS: float = 5.0
-    # Total attempts across the whole call, not per turn: the retry only
-    # fires when an earlier attempt actually FAILED, so two covers a
-    # transient blip without turning one emergency into a page storm.
-    NOTIFICATION_MAX_ATTEMPTS: int = 2
+    # Total send attempts per alert, made by the outbox after the ticket's
+    # transaction commits (see `EmergencyNotificationService`). Retries no
+    # longer happen inside a live call, so the budget can afford to outlast a
+    # real outage: with the backoff below, 8 attempts span roughly 45
+    # minutes. Only FAILED attempts are retried; a delivered alert is never
+    # sent again.
+    NOTIFICATION_MAX_ATTEMPTS: int = 8
+    # First retry delay; each later one is 3x the previous, capped at 15
+    # minutes.
+    NOTIFICATION_RETRY_BASE_SECONDS: float = 10.0
+    # How often each API worker checks the outbox for due alerts (retries,
+    # and anything a crash left unsent). The first attempt does not wait for
+    # this — it runs the moment the ticket's transaction commits. Set to 0 to
+    # disable the poller (tests do; they drive the outbox directly).
+    NOTIFICATION_OUTBOX_POLL_SECONDS: float = 10.0
 
     # --- AI Brain ---
     # Counts customer+assistant message pairs; a cheap guardrail against
@@ -176,7 +187,14 @@ class Settings(BaseSettings):
     SCHEDULING_DEFAULT_CAPACITY: int = 1
 
     # --- Feature flags ---
-    FEATURE_REGISTRATION_ENABLED: bool = True
+    # Self-service signup (`POST /auth/register`). Unset means "the safe
+    # default for this environment": OPEN in development and testing, where
+    # creating throwaway organizations is the point, and CLOSED in
+    # production, where an open signup lets anyone who finds the domain
+    # create a tenant and spend the deployment's LLM budget through the
+    # conversation simulator. Production opens it only when this is set
+    # explicitly to true. Read it through `registration_enabled`.
+    FEATURE_REGISTRATION_ENABLED: bool | None = None
     FEATURE_MULTI_TENANT_SIGNUP: bool = False
 
     # --- Rate limiting ---
@@ -215,6 +233,16 @@ class Settings(BaseSettings):
     def _split_cors_origins(cls, value: str | list[str]) -> list[str]:
         if isinstance(value, str):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
+        return value
+
+    @field_validator("FEATURE_REGISTRATION_ENABLED", mode="before")
+    @classmethod
+    def _empty_flag_is_unset(cls, value: object) -> object:
+        """`FEATURE_REGISTRATION_ENABLED=` in an env file is an empty string;
+        treat it as unset (the environment's default) rather than failing to
+        parse it as a boolean."""
+        if isinstance(value, str) and not value.strip():
+            return None
         return value
 
     @field_validator(
@@ -301,6 +329,15 @@ class Settings(BaseSettings):
                 "not be confirmed)."
             )
         return self
+
+    @property
+    def registration_enabled(self) -> bool:
+        """Whether `POST /auth/register` accepts new organizations: the
+        explicit setting when there is one, otherwise closed in production
+        and open everywhere else."""
+        if self.FEATURE_REGISTRATION_ENABLED is not None:
+            return self.FEATURE_REGISTRATION_ENABLED
+        return not self.is_production
 
     @property
     def is_production(self) -> bool:

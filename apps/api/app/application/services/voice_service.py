@@ -40,6 +40,7 @@ from app.domain.repositories.conversation_repository import ConversationReposito
 from app.domain.repositories.organization_repository import OrganizationRepository
 from app.domain.repositories.voice_call_repository import VoiceCallRepository
 from app.domain.repositories.voice_line_repository import VoiceLineRepository
+from app.domain.transactions import NullSavepoints, Savepoints
 
 logger = structlog.get_logger("app.voice")
 
@@ -198,6 +199,10 @@ class VoiceService:
         # switch simply cannot be consulted and calls proceed exactly as
         # they did before it existed.
         organization_repository: OrganizationRepository | None = None,
+        # Makes the fail-open kill-switch lookup genuinely fail open on
+        # Postgres, where a failed query would otherwise abort the turn's
+        # transaction even though the exception is caught.
+        savepoints: Savepoints | None = None,
     ) -> None:
         self._voice_lines = voice_line_repository
         self._voice_calls = voice_call_repository
@@ -206,6 +211,7 @@ class VoiceService:
         self._call_lock = call_lock or NullCallLock()
         self._supersession = supersession or _SUPERSESSION
         self._organizations = organization_repository
+        self._savepoints = savepoints or NullSavepoints()
 
     # --- Admin-facing reads ---
 
@@ -532,7 +538,22 @@ class VoiceService:
         voice_line: VoiceLine | None = None
         if assistant_id:
             voice_line = await self._voice_lines.get_by_vapi_assistant_id(assistant_id)
-        if voice_line is None and phone_number_id:
+            if voice_line is None and phone_number_id:
+                # Vapi named an assistant we have no mapping for. Falling back
+                # to "whoever owns this phone number" would answer with that
+                # organization's business knowledge for an assistant nobody
+                # provisioned to it — the wrong-tenant incident of 2026-09-23
+                # by another route (an assistant swapped on a number in Vapi
+                # without re-provisioning here). Fail closed and say why.
+                by_phone = await self._voice_lines.get_by_vapi_phone_number_id(phone_number_id)
+                if by_phone is not None:
+                    logger.error(
+                        "voice_line_assistant_mismatch",
+                        phone_line_organization_id=str(by_phone.organization_id),
+                    )
+        elif phone_number_id:
+            # No assistant id at all (e.g. a transient assistant): the phone
+            # number is the only routing key there is.
             voice_line = await self._voice_lines.get_by_vapi_phone_number_id(phone_number_id)
         if voice_line is None or not voice_line.is_active:
             logger.error(
@@ -579,7 +600,8 @@ class VoiceService:
         if self._organizations is None:
             return
         try:
-            organization = await self._organizations.get_by_id(organization_id)
+            async with self._savepoints.isolate():
+                organization = await self._organizations.get_by_id(organization_id)
         except Exception:
             logger.warning(
                 "voice_kill_switch_lookup_failed",

@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.entities.voice_line import VoiceLine, VoiceProvider
+from app.domain.exceptions import EntityNotFoundError
 from app.domain.repositories.voice_line_repository import VoiceLineRepository
 from app.infrastructure.database.models.voice_line import VoiceLineModel
 
@@ -69,3 +70,35 @@ class SqlAlchemyVoiceLineRepository(VoiceLineRepository):
         await self._session.flush()
         await self._session.refresh(model)
         return _to_entity(model)
+
+    async def list_all(self) -> list[VoiceLine]:
+        result = await self._session.execute(select(VoiceLineModel).order_by(VoiceLineModel.created_at))
+        return [_to_entity(model) for model in result.scalars().all()]
+
+    async def update(
+        self,
+        line_id: uuid.UUID,
+        *,
+        organization_id: uuid.UUID,
+        vapi_assistant_id: str,
+        vapi_phone_number_id: str | None,
+        phone_number: str | None,
+        is_active: bool,
+    ) -> VoiceLine:
+        model = await self._session.get(VoiceLineModel, line_id)
+        if model is None:
+            raise EntityNotFoundError("VoiceLine", str(line_id))
+        model.organization_id = organization_id
+        model.vapi_assistant_id = vapi_assistant_id
+        model.vapi_phone_number_id = vapi_phone_number_id
+        model.phone_number = phone_number
+        model.is_active = is_active
+        await self._session.flush()
+        await self._session.refresh(model)
+        return _to_entity(model)
+
+    async def delete(self, line_id: uuid.UUID) -> None:
+        model = await self._session.get(VoiceLineModel, line_id)
+        if model is not None:
+            await self._session.delete(model)
+            await self._session.flush()

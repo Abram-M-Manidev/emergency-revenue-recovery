@@ -250,3 +250,19 @@ class VoiceLineNotFoundError(DomainError):
 
     def __init__(self, message: str = "No organization is configured for this phone line.") -> None:
         super().__init__(message)
+
+
+class TurnPersistenceError(DomainError):
+    """A conversation turn was generated but could not be recorded.
+
+    A `DomainError` on purpose, so every transport already knows how to
+    speak it: on a live call the caller hears the fallback sentence and the
+    request still COMMITS, which keeps whatever the turn's tools already did
+    (a booked appointment, an emergency ticket a dispatcher was just paged
+    about). Letting the underlying database error escape instead rolled all
+    of that back after the caller had been told it happened."""
+
+    def __init__(
+        self, message: str = "The conversation turn could not be recorded."
+    ) -> None:
+        super().__init__(message)

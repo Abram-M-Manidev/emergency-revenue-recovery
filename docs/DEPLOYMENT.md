@@ -106,6 +106,14 @@ dropping real calls, which is why they are startup errors instead:
 | `OPENAI_API_KEY` | Unset ⇒ every turn fails and the caller hears the fallback sentence |
 | `NOTIFICATION_PROVIDER` | `logging` is refused: it reports success while notifying nobody |
 
+Two more settings are not startup errors but decide behaviour a paying
+customer will notice:
+
+| Setting | Production behaviour |
+|---|---|
+| `FEATURE_REGISTRATION_ENABLED` | **Leave unset.** Unset ⇒ `POST /auth/register` answers `403 REGISTRATION_DISABLED` in production (open in development/testing). Set `true` only to deliberately open self-service signup. Existing users, logins and Team invitations are unaffected either way. |
+| `NOTIFICATION_PROVIDER=webhook` | Required for any human to be paged about an emergency. With the default `none`, tickets are still created and the assistant tells callers the alert could not be confirmed — truthful, but nobody is paged. Each organization also needs its destination set in Settings → Emergency notifications. Alerts go through a transactional outbox (sent only after the ticket commits, retried with backoff — `NOTIFICATION_MAX_ATTEMPTS`, `NOTIFICATION_RETRY_BASE_SECONDS`, `NOTIFICATION_OUTBOX_POLL_SECONDS`). |
+
 Generate the JWT secret and the Vapi shared secret the same way as the
 database password. `DATABASE_URL` is set by the compose overlay — leave
 whatever is in `apps/api/.env`; the overlay's value wins.
@@ -161,18 +169,13 @@ In the Vapi dashboard, on the assistant serving the pilot business:
   `https://YOUR_DOMAIN/api/v1/voice/vapi/chat/completions`
 - **Server URL Secret** → the same value as `VAPI_SERVER_SECRET`
 
-Then confirm the mapping exists on our side. A `voice_lines` row must link
-the Vapi assistant id to the organization, and there is currently **no UI to
-create one** — insert it directly:
+Then map the assistant to the organization on our side with the operator
+CLI (see `docs/PILOT_LAUNCH.md` §5 for the refusal rules):
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres \
-  psql -U errs -d errs -c "
-    INSERT INTO voice_lines (id, organization_id, provider, vapi_assistant_id,
-                             phone_number, is_active, created_at, updated_at)
-    VALUES (gen_random_uuid(),
-            (SELECT id FROM organizations WHERE name = 'THE BUSINESS'),
-            'VAPI', 'asst_xxxxxxxx', '+15551234567', true, now(), now());"
+docker compose -f docker-compose.yml -f docker-compose.prod.yml exec api \
+  python -m app.cli.voice_lines assign --org-slug the-business \
+  --assistant-id <vapi assistant uuid> --phone-number +15551234567
 ```
 
 Verify the whole path with a real call to the pilot number, and watch:

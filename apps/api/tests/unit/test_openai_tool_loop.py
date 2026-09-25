@@ -626,14 +626,18 @@ async def test_a_genuinely_malformed_document_still_fails(
     anything — a truncated response has no valid reply in it and must still
     raise rather than reach the caller half-formed.
 
-    `ValueError` (via `JSONDecodeError`) is the pre-existing contract, also
-    asserted by `test_openai_provider.py`'s truncated-stream test; this
-    pins that `raw_decode` did not quietly widen it."""
+    The underlying `ValueError` (via `JSONDecodeError`) is still what
+    detects it, and is kept as the cause; it now reaches callers as
+    `AIProviderUnavailableError` so a live turn ends on the speakable
+    fallback instead of rolling back — see `test_openai_provider.py`'s
+    truncated-stream test. This pins that `raw_decode` did not quietly
+    widen what is accepted."""
     truncated = [_chunk(content='{"message_to_customer": "half a sen')]
     provider, _ = _provider([truncated], monkeypatch)
 
-    with pytest.raises(ValueError):
+    with pytest.raises(AIProviderUnavailableError) as raised:
         await _drain(provider, _request(None, with_tools=False))
+    assert isinstance(raised.value.__cause__, ValueError)
 
 
 # --- Provisional narration after a failed tool (the 2026-08-23 regression) ----

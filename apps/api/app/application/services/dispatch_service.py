@@ -15,10 +15,15 @@ calls into the AI Brain."""
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from decimal import Decimal
 
+import structlog
+
+from app.application.services.emergency_notification_service import (
+    EmergencyNotificationService,
+)
 from app.domain.entities.conversation_outcome import (
     CallClassification,
     ConversationOutcome,
@@ -41,6 +46,9 @@ from app.domain.repositories.role_repository import RoleRepository
 from app.domain.repositories.technician_profile_repository import TechnicianProfileRepository
 from app.domain.repositories.user_repository import UserRepository
 from app.infrastructure.security.password import hash_password
+from app.shared.utils.phone import storable_phone_number
+
+logger = structlog.get_logger("app.dispatch")
 
 # Legal status transitions: NEW -> ASSIGNED -> EN_ROUTE -> RESOLVED, and any
 # open state can be CANCELED. RESOLVED/CANCELED are terminal (no outgoing
@@ -87,6 +95,11 @@ class DispatchService:
         conversation_repository: ConversationRepository,
         user_repository: UserRepository,
         role_repository: RoleRepository,
+        # Queues the emergency alert in the SAME transaction as the ticket it
+        # is about (the outbox). Optional so existing construction sites keep
+        # working; without it a ticket is created with no alert queued, which
+        # the assistant then reports as "could not be confirmed".
+        emergency_notifications: EmergencyNotificationService | None = None,
     ) -> None:
         self._tickets = emergency_ticket_repository
         self._technicians = technician_profile_repository
@@ -94,6 +107,7 @@ class DispatchService:
         self._conversations = conversation_repository
         self._users = user_repository
         self._roles = role_repository
+        self._notifications = emergency_notifications
 
     # --- Automatic ticket creation (the AI Brain -> Dispatch seam) ---
 
@@ -110,6 +124,9 @@ class DispatchService:
             return None
 
         existing = await self._tickets.get_by_conversation_id(conversation_id)
+        outcome = await self._with_caller_id_fallback(
+            organization_id, conversation_id, outcome, existing
+        )
         if existing is not None:
             # Already ticketed on an earlier turn. Later turns must not
             # re-copy (possibly stale) AI fields onto a ticket that may
@@ -119,7 +136,7 @@ class DispatchService:
             # with nobody to call back. Fill in only what is still missing.
             return await self._backfill_contact_details(organization_id, existing, outcome)
 
-        return await self._tickets.create(
+        ticket = await self._tickets.create(
             organization_id=organization_id,
             conversation_id=conversation_id,
             matched_service_id=outcome.matched_service_id,
@@ -128,6 +145,44 @@ class DispatchService:
             customer_address=outcome.customer_address,
             summary=outcome.summary,
         )
+        if self._notifications is not None:
+            # Same transaction as the ticket: both commit, or neither does.
+            # Idempotent by ticket, so the race path in `create` (which
+            # returns the ticket another writer just created) is harmless.
+            await self._notifications.enqueue(ticket)
+        return ticket
+
+    async def _with_caller_id_fallback(
+        self,
+        organization_id: uuid.UUID,
+        conversation_id: uuid.UUID,
+        outcome: ConversationOutcome,
+        existing: EmergencyTicket | None,
+    ) -> ConversationOutcome:
+        """The outcome, with the call's own caller ID standing in for a
+        callback number nobody has stated yet.
+
+        An emergency ticket without a callback number is one a dispatcher
+        cannot act on. The tool path already falls back to the caller ID, but
+        a ticket is just as often opened by this outcome sync — when the model
+        classifies the emergency without calling the tool — and it had no
+        fallback. On a real-model run a caller reporting smoke who then
+        refused to give a number or an address left a ticket with neither,
+        while the number they were calling from sat unused on the call.
+
+        Only ever fills a blank: a number the caller stated always wins, and
+        this never overwrites one already on the ticket."""
+        if not _is_blank(outcome.customer_phone):
+            return outcome
+        if existing is not None and not _is_blank(existing.customer_phone):
+            return outcome
+        conversation = await self._conversations.get_by_id(organization_id, conversation_id)
+        caller_id = storable_phone_number(
+            conversation.caller_phone_number if conversation is not None else None
+        )
+        if caller_id is None:
+            return outcome
+        return replace(outcome, customer_phone=caller_id)
 
     async def _backfill_contact_details(
         self,
@@ -135,22 +190,41 @@ class DispatchService:
         ticket: EmergencyTicket,
         outcome: ConversationOutcome,
     ) -> EmergencyTicket:
-        """Copies contact details the AI has since learned onto a ticket
-        that was opened without them.
+        """Brings the ticket's contact details up to date with what the AI
+        currently understands. The exact mirror of
+        `AppointmentService._backfill_contact_details`, whose docstring
+        carries the full reasoning and the live evidence.
 
-        Strictly additive: a field is written only when the ticket's own
-        value is blank AND the outcome has something to put there. An
-        operator's correction therefore always wins over the AI, and a
-        later turn that *loses* a detail (the model omitting a field it
-        reported earlier) can never blank out a value already on the
-        ticket. When nothing is missing this performs no write at all."""
+        A blank outcome value never overwrites a recorded one, so a later
+        turn that omits a field the model reported earlier cannot erase it.
+        A different non-blank value does overwrite, because a caller
+        correcting their address mid-call is the normal case and this used
+        to keep their first attempt forever — on an emergency ticket, that
+        is the address someone is dispatched to.
+
+        When nothing has changed this performs no write at all."""
         updates = {
             field: getattr(outcome, field)
             for field in ("customer_name", "customer_phone", "customer_address")
-            if _is_blank(getattr(ticket, field)) and not _is_blank(getattr(outcome, field))
+            if not _is_blank(getattr(outcome, field))
+            and getattr(outcome, field) != getattr(ticket, field)
         }
         if not updates:
             return ticket
+
+        # Field NAMES only — never their values, which are caller PII.
+        # `overwritten` separates filling a blank from replacing a value the
+        # AI reported earlier: the second is how a caller's correction reaches
+        # the record, and also the only way a model that *degrades* a detail
+        # could reach it. Silent either way until this line existed.
+        logger.info(
+            "ticket_contact_details_synced",
+            organization_id=str(organization_id),
+            fields=sorted(updates),
+            overwritten=sorted(
+                field for field in updates if not _is_blank(getattr(ticket, field))
+            ),
+        )
 
         return await self._tickets.backfill_contact_details(
             organization_id, ticket.id, **updates

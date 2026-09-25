@@ -19,7 +19,7 @@ from typing import Any
 
 import structlog
 from openai import APIConnectionError, APIStatusError, APITimeoutError, AsyncOpenAI
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from app.core.config import ReasoningEffort, Settings
 from app.domain.ai.provider import (
@@ -723,8 +723,30 @@ def _assemble_reply(content: str) -> AIReply:
     `message_to_customer`, so the first document is by definition the one
     whose sentence reached the caller. Validation is unchanged — whatever is
     decoded still has to satisfy `_ReplyPayload`."""
-    document, _ = json.JSONDecoder().raw_decode(content.lstrip())
-    payload = _ReplyPayload.model_validate(document)
+    try:
+        document, _ = json.JSONDecoder().raw_decode(content.lstrip())
+        payload = _ReplyPayload.model_validate(document)
+    except (ValueError, ValidationError) as exc:
+        # `ValueError` covers `JSONDecodeError`: a response cut off by the
+        # token limit, or one that is not JSON at all. `ValidationError`
+        # covers a document with a missing or mistyped field. Both used to
+        # escape as raw exceptions — and on the streaming path that happens
+        # AFTER the caller has already heard `message_to_customer`, so the
+        # request's transaction rolled back, taking with it any appointment
+        # or emergency ticket this turn's tools had created while the caller
+        # was being told about it. As a domain error the turn instead ends
+        # on the speakable fallback and the tools' work is committed.
+        #
+        # Logged by shape only: the content is model output that may echo
+        # the caller's name, number or address.
+        logger.error(
+            "ai_reply_unparseable",
+            error=type(exc).__name__,
+            content_chars=len(content),
+        )
+        raise AIProviderUnavailableError(
+            "The AI Brain returned a response that could not be understood."
+        ) from exc
     return AIReply(
         message_to_customer=payload.message_to_customer,
         classification=payload.classification,

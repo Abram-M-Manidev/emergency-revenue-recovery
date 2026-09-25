@@ -37,6 +37,7 @@ from app.domain.repositories.caller_identity_repository import CallerIdentityRep
 from app.domain.repositories.conversation_outcome_repository import ConversationOutcomeRepository
 from app.domain.repositories.customer_repository import CustomerRepository
 from app.domain.repositories.emergency_ticket_repository import EmergencyTicketRepository
+from app.domain.transactions import NullSavepoints, Savepoints
 from app.shared.utils.phone import normalize_phone_number
 
 logger = structlog.get_logger("app.customers")
@@ -77,12 +78,16 @@ class CustomerService:
         # Optional: without it, P5 association capture is skipped and
         # C1 behaves exactly as before.
         caller_identity_repository: CallerIdentityRepository | None = None,
+        # Makes the best-effort association genuinely best-effort on
+        # Postgres; see `_associate_caller_number`.
+        savepoints: Savepoints | None = None,
     ) -> None:
         self._customers = customer_repository
         self._outcomes = conversation_outcome_repository
         self._tickets = emergency_ticket_repository
         self._appointments = appointment_repository
         self._caller_identities = caller_identity_repository
+        self._savepoints = savepoints or NullSavepoints()
 
     # --- Automatic customer sync (the AI Brain -> Customers seam) ---
 
@@ -169,9 +174,16 @@ class CustomerService:
         if self._caller_identities is None or not caller_number:
             return
         try:
-            await self._caller_identities.associate(
-                organization_id, customer_id=customer_id, caller_number=caller_number
-            )
+            # The savepoint is what makes the `except` below true. Catching
+            # a database error does not un-abort a Postgres transaction, so
+            # before it a failure here was "swallowed" and then failed the
+            # very next statement — or the commit, after the caller had
+            # already heard the whole turn. It sits inside the `try` so the
+            # failed block is rolled back before the exception is caught.
+            async with self._savepoints.isolate():
+                await self._caller_identities.associate(
+                    organization_id, customer_id=customer_id, caller_number=caller_number
+                )
         except Exception:
             # `caller_number` is deliberately absent from the log — it is a
             # phone number. The internal ids are enough to reconcile.

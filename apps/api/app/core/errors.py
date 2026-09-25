@@ -43,6 +43,7 @@ from app.domain.exceptions import (
     RegistrationDisabledError,
     SlotNotOfferedError,
     SlotNotSelectedError,
+    TurnPersistenceError,
     VoiceAssistantDisabledError,
     VoiceLineNotFoundError,
 )
@@ -82,6 +83,7 @@ _DOMAIN_ERROR_STATUS: dict[type[DomainError], int] = {
     SlotNotSelectedError: status.HTTP_409_CONFLICT,
     AvailabilityUnavailableError: status.HTTP_503_SERVICE_UNAVAILABLE,
     LastOwnerError: status.HTTP_409_CONFLICT,
+    TurnPersistenceError: status.HTTP_503_SERVICE_UNAVAILABLE,
 }
 
 

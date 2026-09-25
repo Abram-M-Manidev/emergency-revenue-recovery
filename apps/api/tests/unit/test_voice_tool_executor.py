@@ -149,14 +149,6 @@ class _Harness:
             booking_lock=self.booking_lock,
             offered_slot_repository=self.offered_slots,
         )
-        self.dispatch_service = DispatchService(
-            emergency_ticket_repository=self.tickets,
-            technician_profile_repository=self.technicians,
-            conversation_outcome_repository=self.outcomes,
-            conversation_repository=self.conversations,
-            user_repository=FakeUserRepository(),
-            role_repository=FakeRoleRepository(),
-        )
         self.customer_service = CustomerService(
             customer_repository=self.customers,
             conversation_outcome_repository=self.outcomes,
@@ -181,12 +173,25 @@ class _Harness:
                     {_ORG_ID: (NotificationChannel.WEBHOOK, "https://example.invalid/hook")}
                 ),
                 delivery_repository=self.notification_deliveries,
+                ticket_repository=self.tickets,
                 settings=self.settings,
             )
             if self.notification_provider is not None
             else None
         )
+        # Wired as production wires it: the dispatch service queues the alert
+        # in the ticket's own transaction (the outbox).
+        self.dispatch_service = DispatchService(
+            emergency_ticket_repository=self.tickets,
+            technician_profile_repository=self.technicians,
+            conversation_outcome_repository=self.outcomes,
+            conversation_repository=self.conversations,
+            user_repository=FakeUserRepository(),
+            role_repository=FakeRoleRepository(),
+            emergency_notifications=self.notifications,
+        )
         self.factory = VoiceToolExecutor(
+            clock=lambda: _NOW,
             appointment_service=self.appointment_service,
             dispatch_service=self.dispatch_service,
             customer_service=self.customer_service,
@@ -781,9 +786,15 @@ async def test_the_emergency_flow_keeps_its_emergency_behaviour():
     assert result["priority"] == "emergency"
     assert result["bookable"] is False
     assert result["service_request_type"] == "emergency_ticket"
-    assert result["dispatcher_alerted"] is True
-    assert "dispatcher has been alerted" in result["next_step"]
+    # The turn that opens the ticket only queues the alert (the outbox), so
+    # it may say the team is BEING alerted — never that it has been.
+    assert result["dispatcher_alerted"] is False
+    assert result["notification_status"] == "pending"
+    assert "being sent right now" in result["next_step"]
 
+    # Once the post-commit send has delivered it, the next turn may say so.
+    assert harness.notifications is not None
+    await harness.notifications.deliver_next_due()
     progress = await harness.factory.describe_progress(_ORG_ID, _CONVERSATION_ID)
     assert progress is not None
     assert "A dispatcher has been alerted" in progress

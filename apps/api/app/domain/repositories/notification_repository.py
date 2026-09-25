@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
+from datetime import datetime
 
 from app.domain.notifications.emergency import (
     DeliveryStatus,
@@ -129,46 +130,58 @@ class NotificationDeliveryRepository(ABC):
         ...
 
     @abstractmethod
-    async def claim(
+    async def enqueue(
         self,
         organization_id: uuid.UUID,
         ticket_id: uuid.UUID,
         *,
         channel: NotificationChannel | None,
         provider: str,
+        status: DeliveryStatus,
+        next_attempt_at: datetime | None,
     ) -> tuple[NotificationDelivery, bool]:
-        """Reserves the right to send for this ticket, returning the row and
-        whether this caller is the one that must now do the sending.
+        """Writes this ticket's outbox row, returning it and whether this call
+        created it.
 
-        The idempotency primitive, and the reason it lives in the repository
-        rather than in the service: the check and the reservation have to be
-        one statement. A ticket is created by the tool loop and then again by
-        the webhook's outcome sync, on a re-sent transcript, across four
-        uvicorn workers — a read-then-write in the service would let two of
-        those both observe "nothing sent yet" and both page the on-call
-        engineer for one gas leak.
+        Called inside the transaction that creates the ticket, so the two
+        commit or roll back together — the property the outbox exists for.
+        Performs no I/O beyond the insert: nothing leaves the system until
+        the transaction has committed.
 
-        Implemented as an INSERT ... ON CONFLICT DO NOTHING against a unique
-        index on the ticket, so exactly one caller gets `True`. A caller that
-        gets `False` has a row someone else owns: either already delivered,
-        or in flight, or previously failed — the returned row says which, and
-        the service decides whether a retry is warranted."""
+        Idempotent by ticket (INSERT ... ON CONFLICT DO NOTHING against the
+        unique index), so a ticket synced by both the tool loop and the
+        webhook's outcome sync gets exactly one row and so exactly one
+        alert."""
         ...
 
     @abstractmethod
-    async def record_result(
+    async def lock_next_due(
+        self, *, now: datetime, ticket_id: uuid.UUID | None = None
+    ) -> NotificationDelivery | None:
+        """Locks and returns one row whose alert is due, or None.
+
+        `FOR UPDATE SKIP LOCKED`: the row stays locked until the caller's
+        transaction ends, and every other worker skips it rather than waiting
+        — so two workers, or a retry racing the post-commit send, can never
+        both send the same alert. A worker that dies mid-send releases the
+        lock with its connection, and the row is simply due again.
+
+        Only `pending`/`failed` rows with a due `next_attempt_at` qualify, so
+        a delivered row can never be selected again. `ticket_id` narrows the
+        scan to one ticket, for the immediate post-commit send."""
+        ...
+
+    @abstractmethod
+    async def record_attempt(
         self,
-        organization_id: uuid.UUID,
-        ticket_id: uuid.UUID,
+        delivery_id: uuid.UUID,
         *,
         status: DeliveryStatus,
         error_code: str | None,
         provider: str,
+        next_attempt_at: datetime | None,
     ) -> NotificationDelivery:
-        """Writes the outcome of an attempt and increments the attempt count.
-
-        Separate from `claim` because the attempt happens in between and can
-        take seconds: holding a transaction open across an outbound HTTP call
-        would pin a database connection to the slowest thing in the request.
-        """
+        """Writes the outcome of one send attempt on a row this transaction
+        holds locked, incrementing the attempt count and setting (or
+        clearing) when it is next due."""
         ...

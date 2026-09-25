@@ -26,6 +26,14 @@ class VoiceLineResponse(BaseModel):
 
     id: uuid.UUID
     provider: VoiceProvider
+    # Which Vapi assistant (and phone number) routes to this organization.
+    # Shown to the organization's own users so an Owner can check the
+    # mapping against their Vapi dashboard — the check that would have caught
+    # the 2026-09-23 wrong-tenant incident in seconds. Identifiers, not
+    # credentials: knowing one does not let anyone call the webhook, which
+    # also requires `x-vapi-secret`.
+    vapi_assistant_id: str
+    vapi_phone_number_id: str | None
     phone_number: str | None
     is_active: bool
     created_at: datetime

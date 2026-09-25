@@ -27,6 +27,7 @@ from collections.abc import AsyncGenerator, AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
+import anyio
 import structlog
 from fastapi import APIRouter, Body, Depends, Response
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -36,7 +37,7 @@ from app.api.deps import (
     get_appointment_service,
     get_customer_service,
     get_dispatch_service,
-    get_emergency_notification_service,
+    get_savepoints,
     get_voice_service,
     verify_vapi_secret,
 )
@@ -44,17 +45,20 @@ from app.application.schemas.voice import VapiChatCompletionRequest
 from app.application.services.appointment_service import AppointmentService
 from app.application.services.customer_service import CustomerService
 from app.application.services.dispatch_service import DispatchService
-from app.application.services.emergency_notification_service import (
-    EmergencyNotificationService,
-)
 from app.application.services.voice_service import (
     ChatCompletionResult,
     VoiceService,
     VoiceTextDelta,
 )
-from app.domain.entities.emergency_ticket import EmergencyTicket
-from app.domain.exceptions import DomainError, VoiceAssistantDisabledError
+from app.domain.exceptions import (
+    ConversationCompletedError,
+    ConversationLimitExceededError,
+    DomainError,
+    VoiceAssistantDisabledError,
+)
+from app.domain.transactions import Savepoints
 from app.shared.logging.timing import elapsed_ms, now
+from app.shared.utils.phone import storable_phone_number
 
 router = APIRouter(
     prefix="/voice/vapi", tags=["voice-vapi-webhooks"], dependencies=[Depends(verify_vapi_secret)]
@@ -84,6 +88,36 @@ _ASSISTANT_DISABLED_MESSAGE = (
     "business hours and someone will help you."
 )
 
+# Spoken when a call reaches `AI_MAX_CONVERSATION_TURNS`. It used to get the
+# generic fallback with no `endCall`, so every further utterance hit the same
+# limit and heard the same "trouble connecting" sentence until Vapi hung up
+# on silence — an unending loop on a call that was, if anything, going well
+# enough to run long. This ends the call instead, and says so plainly rather
+# than implying an outage.
+_TURN_LIMIT_MESSAGE = (
+    "I'm sorry, I'm not able to continue this call. Please call back and "
+    "we'll pick up where we left off. Thank you for calling."
+)
+
+# Spoken when Vapi sends a turn for a conversation the AI Brain has already
+# closed — normally impossible, because the closing turn carries `endCall`.
+# If it happens anyway (the hang-up was lost, or the caller kept talking), the
+# old reply was "trouble connecting" with no `endCall`, repeated on every
+# utterance until Vapi gave up on silence. There is nothing more this call can
+# record, so it says so and ends.
+_ALREADY_COMPLETED_MESSAGE = (
+    "This call has already been completed. If you need anything else, "
+    "please call us back. Goodbye."
+)
+
+# Every column a Vapi-supplied value lands in has a fixed width. These values
+# are not ours to trust: a SIP caller ID is a URI, not a phone number, and
+# an over-long value is a failed write — on the first turn, the conversation
+# row itself, so every turn of that call would fail the same way.
+_CALLER_NUMBER_MAX_LENGTH = 32
+_ENDED_REASON_MAX_LENGTH = 64
+_RECORDING_URL_MAX_LENGTH = 1000
+
 
 @router.post("/chat/completions")
 async def vapi_chat_completions(
@@ -92,9 +126,7 @@ async def vapi_chat_completions(
     dispatch_service: DispatchService = Depends(get_dispatch_service),
     appointment_service: AppointmentService = Depends(get_appointment_service),
     customer_service: CustomerService = Depends(get_customer_service),
-    notifications: EmergencyNotificationService = Depends(
-        get_emergency_notification_service
-    ),
+    savepoints: Savepoints = Depends(get_savepoints),
 ) -> Response:
     # Bound before anything else so every later event in this turn — across
     # every layer — carries the call id without it being threaded through.
@@ -107,6 +139,7 @@ async def vapi_chat_completions(
         message_count=len(payload.messages),
         has_customer_number=bool(payload.call.customer and payload.call.customer.number),
     )
+    caller_number = _caller_number(payload)
 
     customer_utterance = _latest_customer_utterance(payload)
     if customer_utterance is None:
@@ -134,7 +167,8 @@ async def vapi_chat_completions(
                     dispatch_service=dispatch_service,
                     appointment_service=appointment_service,
                     customer_service=customer_service,
-                    notifications=notifications,
+                    savepoints=savepoints,
+                    caller_number=caller_number,
                 ),
             ),
             media_type="text/event-stream",
@@ -146,7 +180,7 @@ async def vapi_chat_completions(
             vapi_call_id=payload.call.id,
             assistant_id=payload.call.assistantId or payload.assistantId,
             phone_number_id=payload.call.phoneNumberId or payload.phoneNumberId,
-            customer_number=payload.call.customer.number if payload.call.customer else None,
+            customer_number=caller_number,
             customer_utterance=customer_utterance,
         )
     except DomainError as exc:
@@ -162,6 +196,16 @@ async def vapi_chat_completions(
             )
             return _completion_response(
                 _ASSISTANT_DISABLED_MESSAGE, should_end_call=True, stream=payload.stream
+            )
+        if isinstance(exc, ConversationLimitExceededError):
+            logger.warning("vapi_chat_completion_turn_limit_reached")
+            return _completion_response(
+                _TURN_LIMIT_MESSAGE, should_end_call=True, stream=payload.stream
+            )
+        if isinstance(exc, ConversationCompletedError):
+            logger.warning("vapi_chat_completion_after_completion")
+            return _completion_response(
+                _ALREADY_COMPLETED_MESSAGE, should_end_call=True, stream=payload.stream
             )
         # A misconfigured line (`VoiceLineNotFoundError`), a conversation
         # the AI Brain already ended (`ConversationCompletedError`), or the
@@ -179,58 +223,17 @@ async def vapi_chat_completions(
             _FALLBACK_MESSAGE, should_end_call=True, stream=payload.stream
         )
 
-    try:
-        ticket = await dispatch_service.sync_ticket_from_outcome(
-            result.organization_id, result.conversation_id
-        )
-        await _alert_dispatcher(
-            ticket, notifications, correlation={"vapi_call_id": payload.call.id}
-        )
-    except DomainError as exc:
-        # Same reasoning as the text-conversation endpoint: the call turn
-        # itself already succeeded and must still reach the caller.
-        logger.warning(
-            "dispatch_sync_failed",
-            error=exc.__class__.__name__,
-            message=exc.message,
-            vapi_call_id=payload.call.id,
-        )
-
-    try:
-        await appointment_service.sync_appointment_from_outcome(
-            result.organization_id, result.conversation_id
-        )
-    except DomainError as exc:
-        # Same reasoning as the dispatch sync above: the call turn itself
-        # already succeeded and must still reach the caller.
-        logger.warning(
-            "appointment_sync_failed",
-            error=exc.__class__.__name__,
-            message=exc.message,
-            vapi_call_id=payload.call.id,
-        )
-
-    try:
-        # Runs last, after dispatch/appointment sync, so it can link
-        # whichever ticket/appointment those two calls just created — see
-        # `CustomerService.sync_customer_from_outcome`'s docstring.
-        #
-        # `caller_number` (P5) records which telephony line this customer
-        # called from, so a later call is recognised. Association
-        # bookkeeping only — C1's field-level rules are untouched.
-        await customer_service.sync_customer_from_outcome(
-            result.organization_id,
-            result.conversation_id,
-            caller_number=payload.call.customer.number if payload.call.customer else None,
-        )
-    except DomainError as exc:
-        # Same reasoning as the dispatch/appointment syncs above.
-        logger.warning(
-            "customer_sync_failed",
-            error=exc.__class__.__name__,
-            message=exc.message,
-            vapi_call_id=payload.call.id,
-        )
+    # Same three syncs, same order and same isolation as the streaming path —
+    # one implementation, so the two transports cannot drift apart.
+    await _run_outcome_syncs(
+        result=result,
+        vapi_call_id=payload.call.id,
+        caller_number=caller_number,
+        dispatch_service=dispatch_service,
+        appointment_service=appointment_service,
+        customer_service=customer_service,
+        savepoints=savepoints,
+    )
 
     return _completion_response(
         result.reply_text, should_end_call=result.should_end_call, stream=payload.stream
@@ -284,6 +287,41 @@ async def _instrumented_stream(
             reached_first_content=stats.first_content_at is not None,
         )
         raise
+    except Exception as exc:
+        # Anything else escaping the turn generator. Observability only —
+        # the exception is re-raised untouched, so recovery behaviour is
+        # exactly what it was.
+        #
+        # Until this existed such a failure was completely silent *here*:
+        # the two clauses above cover the abort and the normal end, so an
+        # ordinary exception left the wrapper without logging either, and
+        # the only trace was uvicorn's "Exception in ASGI application" —
+        # a bare traceback carrying none of the correlation ids bound to
+        # this turn. On 2026-09-24 that cost hours: a `varchar(32)`
+        # overflow rolled back a turn the caller had already heard, and the
+        # call looked like conversational amnesia rather than a failed
+        # write.
+        #
+        # `reached_first_content` is the field that names the damage: true
+        # means the caller was spoken to and the transaction then rolled
+        # back, so the backend has no record of something the caller
+        # believes happened. `vapi_call_id`, `turn_id`, `conversation_id`
+        # and `organization_id` are already bound into the log context by
+        # the webhook and `VoiceService`, so they attach for free.
+        #
+        # The exception type and message are safe to record; neither is
+        # derived from caller speech. The raw exception is deliberately not
+        # formatted into the message, and `exc_info` is off, because a
+        # driver error can quote the offending parameters — which on this
+        # path are the caller's own name, number and address.
+        logger.error(
+            "voice_stream_failed",
+            elapsed_ms=elapsed_ms(stats.started_at),
+            content_frames=stats.content_frames,
+            reached_first_content=stats.first_content_at is not None,
+            error=type(exc).__name__,
+        )
+        raise
     logger.info(
         "voice_stream_completed",
         elapsed_ms=elapsed_ms(stats.started_at),
@@ -298,6 +336,71 @@ async def _instrumented_stream(
 
 
 async def _streamed_completion(
+    **turn: Any,
+) -> AsyncGenerator[str, None]:
+    """The streamed turn, decoupled from the caller's connection.
+
+    The turn itself (`_turn_frames`) runs in its own task and hands frames
+    over a queue; this generator only relays them. That separation is what a
+    caller hanging up needs. Starlette cancels the response task the moment
+    Vapi drops the stream, and when this generator WAS the turn, that
+    cancellation landed wherever the turn happened to be — including inside
+    an in-flight asyncpg query. SQLAlchemy then invalidated the connection in
+    the middle of the transaction: `get_db`'s commit raised
+    `PendingRollbackError`, the whole turn was lost, and the connection was
+    left `idle in transaction` holding the call's advisory lock (found by the
+    real-model matrix, 2026-09-25). A caller who reports sparks and smoke and
+    then hangs up to get out of the house lost their emergency ticket.
+
+    Now a hang-up cancels only this relay. The turn is allowed to finish —
+    its tool writes, its persistence, its syncs — under a shielded, bounded
+    wait, and `get_db` then commits it normally, exactly as H3 established
+    for a disconnect: the caller is gone, but the ticket and its queued alert
+    are not. If the turn outlives `_HANGUP_DRAIN_SECONDS` it is cancelled
+    after all, and `get_db` rolls back and discards the connection cleanly."""
+    frames: asyncio.Queue[str | None] = asyncio.Queue()
+
+    async def produce() -> None:
+        try:
+            async for frame in _turn_frames(**turn):
+                await frames.put(frame)
+        finally:
+            await frames.put(None)
+
+    producer = asyncio.create_task(produce())
+    try:
+        while True:
+            frame = await frames.get()
+            if frame is None:
+                break
+            yield frame
+        await producer
+    except BaseException:
+        if not producer.done():
+            logger.info("voice_turn_draining_after_hangup")
+            # Shielded: Starlette's cancel scope would otherwise cancel this
+            # wait too, at every await, and the whole point is to let the
+            # turn reach a clean end before the session is torn down.
+            with anyio.CancelScope(shield=True):
+                with anyio.move_on_after(_HANGUP_DRAIN_SECONDS):
+                    await asyncio.wait({producer})
+                if not producer.done():
+                    producer.cancel()
+                    await asyncio.wait({producer})
+                    logger.error("voice_turn_abandoned_after_hangup")
+                else:
+                    logger.info("voice_turn_completed_after_hangup")
+        raise
+
+
+# How long a turn may keep running after the caller has hung up before it is
+# abandoned. A turn is bounded by the realtime model timeout plus tool rounds;
+# this comfortably covers a normal one without letting a stuck turn pin a
+# connection indefinitely.
+_HANGUP_DRAIN_SECONDS = 30.0
+
+
+async def _turn_frames(
     *,
     stats: _StreamStats,
     payload: VapiChatCompletionRequest,
@@ -306,7 +409,8 @@ async def _streamed_completion(
     dispatch_service: DispatchService,
     appointment_service: AppointmentService,
     customer_service: CustomerService,
-    notifications: EmergencyNotificationService,
+    savepoints: Savepoints,
+    caller_number: str | None,
 ) -> AsyncGenerator[str, None]:
     """Emits the turn as OpenAI-compatible SSE while it is still being
     generated.
@@ -339,7 +443,7 @@ async def _streamed_completion(
             vapi_call_id=payload.call.id,
             assistant_id=payload.call.assistantId or payload.assistantId,
             phone_number_id=payload.call.phoneNumberId or payload.phoneNumberId,
-            customer_number=payload.call.customer.number if payload.call.customer else None,
+            customer_number=caller_number,
             customer_utterance=customer_utterance,
         ):
             if isinstance(event, VoiceTextDelta):
@@ -369,6 +473,21 @@ async def _streamed_completion(
         yield frames.finish("tool_calls")
         yield frames.done()
         return
+    except (ConversationLimitExceededError, ConversationCompletedError) as exc:
+        # Both raised before any model call, so nothing has been spoken yet,
+        # and both mean this call can record nothing more: end it plainly
+        # rather than answering every further utterance with a fault.
+        limit = isinstance(exc, ConversationLimitExceededError)
+        logger.warning(
+            "vapi_chat_completion_stream_turn_limit_reached"
+            if limit
+            else "vapi_chat_completion_stream_after_completion"
+        )
+        yield frames.content(_TURN_LIMIT_MESSAGE if limit else _ALREADY_COMPLETED_MESSAGE)
+        yield frames.tool_call(_end_call_tool_call())
+        yield frames.finish("tool_calls")
+        yield frames.done()
+        return
     except DomainError as exc:
         # Same contract as the non-streaming path: every domain failure must
         # still be speakable. Only decoded reply text is ever emitted, so a
@@ -386,6 +505,29 @@ async def _streamed_completion(
         yield frames.finish("stop")
         yield frames.done()
         return
+    except Exception as exc:
+        # Anything else — a lost database connection, a defect. Before this
+        # the exception escaped mid-stream: the SSE body ended without
+        # `[DONE]`, Vapi had nothing to speak, and the caller sat in silence
+        # until `silence-timed-out`. Now they hear the same speakable
+        # fallback as for a domain failure and can simply try again.
+        #
+        # Swallowing it here means the request's transaction still commits
+        # whatever the turn already did (a tool's booking or ticket, each in
+        # its own savepoint) — the same direction every other failure path
+        # takes. If the transaction itself is broken, the commit fails and is
+        # logged as `db_transaction_rolled_back`. Type only in the log: a
+        # driver error can quote caller details.
+        logger.error(
+            "voice_stream_failed",
+            error=type(exc).__name__,
+            partial_speech=spoke,
+            recovered=True,
+        )
+        yield frames.content(_FALLBACK_MESSAGE)
+        yield frames.finish("stop")
+        yield frames.done()
+        return
 
     if result is None:
         logger.error("vapi_chat_completion_stream_no_result", vapi_call_id=payload.call.id)
@@ -398,11 +540,11 @@ async def _streamed_completion(
     await _run_outcome_syncs(
         result=result,
         vapi_call_id=payload.call.id,
-        caller_number=payload.call.customer.number if payload.call.customer else None,
+        caller_number=caller_number,
         dispatch_service=dispatch_service,
         appointment_service=appointment_service,
         customer_service=customer_service,
-        notifications=notifications,
+        savepoints=savepoints,
     )
     # Runs after the caller is already hearing the reply, so this is not
     # latency they perceive — but it does delay `[DONE]`, and on a final
@@ -427,50 +569,57 @@ async def _run_outcome_syncs(
     dispatch_service: DispatchService,
     appointment_service: AppointmentService,
     customer_service: CustomerService,
-    notifications: EmergencyNotificationService,
+    savepoints: Savepoints,
 ) -> None:
-    """The three downstream syncs, in the order the non-streaming path runs
-    them and with the same isolate-and-continue behaviour."""
-    try:
-        ticket = await dispatch_service.sync_ticket_from_outcome(
+    """The three downstream syncs, in a fixed order, each isolated from the
+    others and from the turn.
+
+    Each runs in its own savepoint and any failure — not only a
+    `DomainError` — is logged and contained. These run after the caller has
+    heard the whole reply; an unexpected database error here used to escape
+    the generator, roll back the request, and take the turn with it: the
+    emergency ticket the caller had just been told was logged, the booking
+    they had just heard confirmed. Now a failed sync costs only its own
+    writes, which the next turn's sync repeats anyway."""
+
+    async def _dispatch() -> None:
+        # A ticket created here has its emergency alert queued in the same
+        # savepoint (the outbox); it is sent only after the request commits.
+        await dispatch_service.sync_ticket_from_outcome(
             result.organization_id, result.conversation_id
         )
-        await _alert_dispatcher(
-            ticket, notifications, correlation={"vapi_call_id": vapi_call_id}
-        )
-    except DomainError as exc:
-        logger.warning(
-            "dispatch_sync_failed",
-            error=exc.__class__.__name__,
-            message=exc.message,
-            vapi_call_id=vapi_call_id,
-        )
 
-    try:
+    async def _appointment() -> None:
         await appointment_service.sync_appointment_from_outcome(
             result.organization_id, result.conversation_id
         )
-    except DomainError as exc:
-        logger.warning(
-            "appointment_sync_failed",
-            error=exc.__class__.__name__,
-            message=exc.message,
-            vapi_call_id=vapi_call_id,
-        )
 
-    try:
+    async def _customer() -> None:
         # Last, so it can link whichever ticket/appointment the two calls
         # above just created. `caller_number` is P5 association capture.
         await customer_service.sync_customer_from_outcome(
             result.organization_id, result.conversation_id, caller_number=caller_number
         )
-    except DomainError as exc:
-        logger.warning(
-            "customer_sync_failed",
-            error=exc.__class__.__name__,
-            message=exc.message,
-            vapi_call_id=vapi_call_id,
-        )
+
+    for event, sync in (
+        ("dispatch_sync_failed", _dispatch),
+        ("appointment_sync_failed", _appointment),
+        ("customer_sync_failed", _customer),
+    ):
+        try:
+            async with savepoints.isolate():
+                await sync()
+        except DomainError as exc:
+            logger.warning(
+                event,
+                error=exc.__class__.__name__,
+                message=exc.message,
+                vapi_call_id=vapi_call_id,
+            )
+        except Exception as exc:
+            # Type only, never the message: a driver error quotes the
+            # offending parameters, which here are caller PII.
+            logger.error(event, error=type(exc).__name__, vapi_call_id=vapi_call_id)
 
 
 @router.post("/events")
@@ -485,6 +634,9 @@ async def vapi_events(
     treats as fire-and-forget never fails noisily here for an event type we
     don't act on."""
     message = payload.get("message", payload)
+    if not isinstance(message, dict):
+        logger.warning("vapi_event_malformed")
+        return {"status": "ok"}
     message_type = message.get("type")
 
     if message_type != "end-of-call-report":
@@ -492,19 +644,73 @@ async def vapi_events(
         return {"status": "ok"}
 
     call = message.get("call") or {}
-    vapi_call_id = call.get("id")
-    if not vapi_call_id:
+    vapi_call_id = call.get("id") if isinstance(call, dict) else None
+    if not vapi_call_id or not isinstance(vapi_call_id, str):
         logger.warning("vapi_end_of_call_report_missing_call_id")
         return {"status": "ok"}
 
-    duration_raw = _first_present(message, "durationSeconds", "duration")
     await service.handle_end_of_call_report(
         vapi_call_id=vapi_call_id,
-        ended_reason=message.get("endedReason"),
-        duration_seconds=int(duration_raw) if duration_raw is not None else None,
-        recording_url=_first_present(message, "recordingUrl", "stereoRecordingUrl"),
+        ended_reason=_bounded_text(message.get("endedReason"), _ENDED_REASON_MAX_LENGTH),
+        duration_seconds=_duration_seconds(
+            _first_present(message, "durationSeconds", "duration")
+        ),
+        recording_url=_recording_url(
+            _first_present(message, "recordingUrl", "stereoRecordingUrl")
+        ),
     )
     return {"status": "ok"}
+
+
+def _bounded_text(value: Any, max_length: int) -> str | None:
+    """A Vapi enum-ish string, cut to its column. `endedReason` values are
+    Vapi's own vocabulary and some of its error reasons run long; an
+    over-long one would fail the end-of-call write, leaving the call never
+    marked ended and its conversation never completed."""
+    if not isinstance(value, str):
+        return None
+    return value[:max_length]
+
+
+def _duration_seconds(value: Any) -> int | None:
+    """Vapi reports duration as a number, sometimes fractional; `int()` of
+    a string such as "12.5" raised and turned the report into a 500."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _recording_url(value: Any) -> str | None:
+    """Dropped rather than truncated when too long: a cut URL is a broken
+    link that looks like a working one."""
+    if not isinstance(value, str) or len(value) > _RECORDING_URL_MAX_LENGTH:
+        return None
+    return value
+
+
+def _caller_number(payload: VapiChatCompletionRequest) -> str | None:
+    """The caller ID, in a form every column it reaches can hold.
+
+    Kept verbatim whenever it fits, so the keys existing caller-identity
+    associations were recorded under still match. Only a value too long for
+    a phone column — a SIP URI rather than a number — is reduced to its
+    digits, and dropped if even that does not fit. Unlike a number the
+    caller states, this one is only ever a lookup hint, so losing it costs
+    recognition, never a record."""
+    raw = payload.call.customer.number if payload.call.customer else None
+    if raw is None:
+        return None
+    raw = raw.strip()
+    if not raw:
+        return None
+    if len(raw) <= _CALLER_NUMBER_MAX_LENGTH:
+        return raw
+    reduced = storable_phone_number(raw)
+    logger.warning("vapi_caller_number_too_long", reduced_to_digits=reduced is not None)
+    return reduced
 
 
 def _latest_customer_utterance(payload: VapiChatCompletionRequest) -> str | None:
@@ -622,31 +828,3 @@ def _first_present(data: dict[str, Any], *keys: str) -> Any | None:
         if data.get(key) is not None:
             return data[key]
     return None
-
-
-async def _alert_dispatcher(
-    ticket: EmergencyTicket | None,
-    notifications: EmergencyNotificationService,
-    *,
-    correlation: dict[str, str],
-) -> None:
-    """Sends the outbound emergency alert for a ticket the outcome sync just
-    created, on the paths that do not go through the tool loop.
-
-    The tool loop alerts inside `create_service_request`, because there the
-    assistant is about to speak and needs the answer. Here nobody is waiting
-    on it — the turn is already decided — but the alert still has to happen,
-    or a call that produced a ticket without using tools would leave a real
-    emergency with nobody told.
-
-    Idempotent by ticket, so the two paths overlapping (which they routinely
-    do: the tool loop creates the ticket and this sync then re-runs on the
-    same conversation) sends exactly one alert. Never raises: a turn that has
-    already reached the caller must not be failed by an alerting problem.
-    """
-    if ticket is None:
-        return
-    try:
-        await notifications.notify_ticket(ticket)
-    except Exception:
-        logger.error("emergency_notification_failed", exc_info=True, **correlation)
