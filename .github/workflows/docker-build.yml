@@ -18,6 +18,9 @@ jobs:
             context: apps/api
           - name: frontend
             context: apps/frontend
+          - name: backup
+            context: docker/backup
+            target: runtime
     steps:
       - uses: actions/checkout@v4
 
@@ -27,6 +30,6 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.context }}
-          target: production
+          target: ${{ matrix.target || 'production' }}
           push: false
           tags: errs-${{ matrix.name }}:ci

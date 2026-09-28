@@ -222,7 +222,7 @@ discovered on a real call.
 | Open registration | **Closed by default in production** | Unset `FEATURE_REGISTRATION_ENABLED` refuses signup in production with `403 REGISTRATION_DISABLED`, before the submitted address is looked up — so a closed deployment cannot be used to test whether an account exists. Set `true` only deliberately: then anyone who finds the domain can create an organization. |
 | Registration enumeration | Present | A duplicate email returns a distinguishable error, so account existence is discoverable. |
 | API docs | Not reachable in production | `/docs`, `/redoc` and `/openapi.json` are mounted at the **root**, not under `/api/v1`, so Caddy routes them to the frontend and they 404. Fine — arguably desirable on a public deployment — but it is accidental rather than chosen. |
-| Backups | Same host only | Survive a container rebuild, not the loss of the VM. |
+| Backups | Off-site, nightly | Uploaded to Backblaze B2, read back and sha256-verified, Object-Locked for 30 days; restorable onto a new VM (`docs/RUNBOOK.md` → Backups). Up to a day of writes can be lost — no point-in-time recovery. |
 | Alerting | None | Nothing pages you if the API dies or emergency alerts start failing. The `RUNBOOK.md` queries are the manual substitute. |
 | Rate limits | Per worker | 4 uvicorn workers each count separately, so the effective ceiling is roughly 4× the configured value. |
 | `secure` cookie | Requires HTTPS | The refresh cookie sets `secure=True` in production. Logging in over plain http will appear to succeed and then immediately bounce back to `/login`, because the browser silently drops the cookie. Always test over the real domain. |
@@ -279,7 +279,7 @@ essr logs -f api | grep -E 'voice_request_received|voice_line_resolved|voice_too
 
 ```bash
 essr restart api && sleep 30 && curl -sS https://YOUR_DOMAIN/api/v1/health/ready
-essr exec backup sh /usr/local/bin/errs-restore.sh --list   # a dump exists
+essr exec backup errs-offsite health                        # OK: verified off-site copy is fresh
 ```
 
 Data written before the restart must still be present afterwards.

@@ -13,8 +13,7 @@ project without `-f` flags.
 - `compose.env.example` — variables consumed by `docker-compose.yml` itself (as opposed to `apps/api/.env`, which the API container reads at runtime).
 - `compose.env.production.example` — the production equivalent: TLS hostname, database password, backup cadence.
 - `Caddyfile` — TLS termination and routing for the production stack. Validated by `caddy validate`.
-- `backup.sh` — the nightly `pg_dump` loop run by the `backup` service.
-- `restore.sh` — operator-invoked restore. Defaults to a NEW database and refuses to overwrite the live one without `--force-live`.
+- `backup/` — the `backup` service: image (FROM `postgres:16-alpine`, so `pg_dump` matches the server), `backup.sh` scheduler loop, `errs_offsite.py` (dump → validate → upload to Backblaze B2 → read-back verify → retention), `restore.sh` (defaults to a NEW database, refuses the live one without `--force-live`, restores from B2 with `--from-offsite`), and its test suite (`scripts/backup-tests.sh`).
 
 ## Local development
 
@@ -42,5 +41,5 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
 
 The production overlay adds TLS (Caddy + Let's Encrypt), a one-shot
 `migrate` service that gates the API, health checks, restart policies,
-resource limits, and nightly backups. Only Caddy publishes ports — Postgres,
+resource limits, and nightly off-site backups to Backblaze B2. Only Caddy publishes ports — Postgres,
 the API and the frontend are reachable on the compose network only.

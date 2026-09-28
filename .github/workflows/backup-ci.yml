@@ -1,0 +1,28 @@
+name: Backup CI
+
+# The backup pipeline against real servers: PostgreSQL 16 and an S3 server
+# that enforces Object Lock (versitygw), with fault injection for dropped
+# connections, bad credentials, corruption and killed processes. No cloud
+# credentials: the live-B2 tests skip themselves here and are run from the
+# deployment host with `scripts/backup-tests.sh --live`.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "docker/backup/**"
+      - "scripts/backup-tests.sh"
+      - ".github/workflows/backup-ci.yml"
+  pull_request:
+    paths:
+      - "docker/backup/**"
+      - "scripts/backup-tests.sh"
+      - ".github/workflows/backup-ci.yml"
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # pytest, then ruff and mypy, all inside the backup image's test target.
+      - name: Backup test suite
+        run: bash scripts/backup-tests.sh

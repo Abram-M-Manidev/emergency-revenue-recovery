@@ -146,28 +146,132 @@ essr exec postgres psql -U errs -d errs -c "
 
 ## Backups
 
-Taken by the `backup` service: one immediately on start, then every
-`BACKUP_INTERVAL_SECONDS` (default nightly), pruned after
-`BACKUP_RETENTION_DAYS` (default 14). Format is `pg_dump -Fc`, so
-`pg_restore` can restore selectively.
+### What runs, and what it guarantees
 
-```bash
-# what exists
-essr exec backup sh /usr/local/bin/errs-restore.sh --list
+The `backup` service (`docker/backup/`) runs one cycle immediately on start,
+then every `BACKUP_INTERVAL_SECONDS` (default **nightly**). Each cycle:
 
-# force one right now (before a risky change)
-essr exec backup sh -c 'BACKUP_INTERVAL_SECONDS=1 timeout 120 sh /usr/local/bin/errs-backup.sh'
+1. `pg_dump -Fc` (compressed custom format) from one consistent snapshot —
+   **no downtime**, the API keeps reading and writing throughout.
+2. **Validates** the archive by reading all of it with `pg_restore`, and
+   records its sha256 beside it (`<dump>.meta.json`).
+3. **Uploads** it to Backblaze B2 with Content-MD5 (the server rejects a
+   body damaged in transit), SSE-B2 encryption and an **Object Lock**
+   retention of `BACKUP_OBJECT_LOCK_DAYS` (default 30, GOVERNANCE mode).
+4. **Verifies** remotely: HEAD confirms size, sha256, encryption and lock;
+   then the whole object is downloaded again and its sha256 recomputed.
+   Only now is `<dump>.offsite.json` written and the cycle a success.
+5. **Prunes local** dumps older than `BACKUP_RETENTION_DAYS` (default 7) —
+   only those whose off-site copy is verified.
 
-# is the backup service healthy?
-essr logs --since 48h backup | grep -E 'backup_completed|backup_failed'
+| | |
+|---|---|
+| Frequency | Nightly, relative to container start. After a failure, the pending upload is retried every `BACKUP_RETRY_SECONDS` (1h) without taking extra dumps. |
+| Remote object | `B2_BUCKET/errs/postgres/<db>/<yyyy>/<mm>/errs-<yyyymmddThhmmssZ>.dump` — time-sortable, nothing from credentials or tenant data |
+| Remote retention | Locked 30 days (cannot be deleted or overwritten by anyone, including this key). Hidden by the lifecycle rule on day 31, deleted on day 32. About 30 daily restore points. |
+| Local retention | 7 days on the `postgres_backups` volume, for fast restores; never deleted before its off-site copy is verified |
+| Deletion by the app | **Never.** The uploader issues no delete calls (tested); expiry is Object Lock + lifecycle only |
+| Concurrency | One cycle at a time (`flock`); a second run exits `75` and touches nothing |
+| Failure signal | Container health (`essr ps` shows `unhealthy` once the newest verified off-site copy is older than interval + 3h), structured logs, and optional `BACKUP_HEARTBEAT_URL` dead-man's switch |
+
+### One-time Backblaze B2 setup
+
+**Bucket** (`ERRS-production-backups`): Private · Default encryption SSE-B2 ·
+Object Lock enabled. A default retention on the bucket is optional — every
+upload sets its own.
+
+**Lifecycle rule** (B2 web UI → Buckets → Lifecycle Settings → custom rules).
+This is what expires backups; the application never does:
+
+```json
+[
+  {"fileNamePrefix": "errs/postgres/", "daysFromUploadingToHiding": 31,
+   "daysFromHidingToDeleting": 1, "daysFromStartingToCancelingUnfinishedLargeFiles": 1},
+  {"fileNamePrefix": "restore-drill/", "daysFromUploadingToHiding": 2,
+   "daysFromHidingToDeleting": 1, "daysFromStartingToCancelingUnfinishedLargeFiles": 1}
+]
 ```
 
-> **Known limitation, stated plainly:** dumps live in the `postgres_backups`
-> Docker volume **on the same host as the database**. They survive a
-> container rebuild, an image change and a `docker compose down`. They do
-> **not** survive losing the host. Copying them off-host is deliberately
-> deferred — do not describe these backups as disaster recovery until that
-> exists.
+Hiding (day 31) comes after the 30-day lock has expired, so B2 never has to
+refuse the lifecycle's own deletion. If you raise `BACKUP_OBJECT_LOCK_DAYS`,
+raise `daysFromUploadingToHiding` with it.
+
+**Application key** — dedicated, restricted to this bucket, with only what the
+uploader uses. The web UI's "Read and Write" preset also grants `deleteFiles`
+and `shareFiles`, which a backup key should not have; create it with the
+[B2 CLI](https://www.backblaze.com/docs/cloud-storage-command-line-tools)
+instead, from a machine where you are logged in with your master key:
+
+```bash
+b2 key create --bucket ERRS-production-backups errs-backup-uploader \
+  listBuckets,listFiles,readFiles,writeFiles,readFileRetentions,writeFileRetentions,readBucketEncryption,readBucketRetentions,readBucketLifecycleRules
+```
+
+| Capability | Why |
+|---|---|
+| `writeFiles` | upload |
+| `readFiles`, `listFiles` | read-back verification, `list`, restore |
+| `writeFileRetentions`, `readFileRetentions` | set and verify each upload's Object Lock |
+| `listBuckets` | S3 API bucket resolution, `check` |
+| `readBucketEncryption`, `readBucketRetentions`, `readBucketLifecycleRules` | optional — lets `check` confirm SSE, Object Lock and the lifecycle rule on the bucket |
+| **not** `deleteFiles`, `bypassGovernance`, `writeBucketRetentions`, `writeBuckets`, `shareFiles`, `writeBucketLifecycleRules`, `writeBucketReplications`, `writeBucketEncryption`, `writeBucketNotifications` | a stolen backup key must not be able to destroy or publish backups |
+
+Put the key ID and key in the root `.env` on the deployment host
+(`B2_APPLICATION_KEY_ID`, `B2_APPLICATION_KEY`, `B2_BUCKET`; see
+`docker/compose.env.production.example`). The production stack refuses to
+start without them. Then:
+
+```bash
+essr up -d --build backup
+essr exec backup errs-offsite check      # every line must be PASS
+```
+
+`check` prints PASS/FAIL for: key authorizes, key restricted to this bucket,
+required capabilities present, destructive capabilities absent, bucket
+private, SSE-B2 default, Object Lock enabled, and an **unauthenticated** GET
+of a real backup being refused. It never prints a credential.
+
+### Everyday
+
+```bash
+# the latest successful backup (from the service's own record)
+essr exec backup errs-offsite status
+
+# is it healthy? (unhealthy = no verified off-site copy for > interval + 3h)
+essr ps backup
+essr exec backup errs-offsite health
+
+# what is actually in B2, newest first — the authority during an incident
+essr exec backup errs-offsite list
+
+# local dumps on this host
+essr exec backup sh /usr/local/bin/errs-restore.sh --list
+
+# take one right now (before a risky change); exit 0 only once it is
+# verified off-site, 75 if a scheduled cycle is already running
+essr exec backup errs-offsite run-once
+
+# history
+essr logs --since 48h backup | grep -E 'backup_cycle_(succeeded|failed)|offsite_upload_(verified|failed)'
+```
+
+### Failure behaviour
+
+| Situation | What happens |
+|---|---|
+| `pg_dump` fails | `backup_failed`; the `.partial` is removed; cycle fails; retried in 1h |
+| B2 unreachable / 5xx / timeouts | retried with backoff (4 attempts); then `offsite_upload_failed`, cycle fails, dump kept locally and re-uploaded by every later cycle until it succeeds |
+| Credentials rejected (401/403) | not retried (it cannot succeed); `fatal: true` in the log, cycle fails; the key never appears in output |
+| Upload cut mid-body | S3 PUT is atomic, so nothing is stored; retried; verified afterwards |
+| Local dump changed since it was taken | refused (`refusing to upload a changed or corrupted backup`), kept for inspection, never marked uploaded |
+| Remote key exists with other content | refused, never overwritten |
+| Remote object corrupt at restore time | `download` refuses (sha256 mismatch) and deletes its partial file; the restore script stops before touching a database |
+| Truncated/broken archive | rejected at dump time; at restore time `pg_restore --exit-on-error --single-transaction` fails and leaves the target empty |
+| Two cycles at once | second exits `75`, no second dump, no duplicate upload |
+| Killed mid-dump or mid-upload (restart, deploy, crash) | `.partial` ignored; unverified dump has no marker, so the next cycle uploads it; the lock dies with the process |
+| Disk filling with un-uploaded dumps | logged every cycle as `local_prune_blocked_not_offsite` — fix B2 access; never "solved" by deleting the only copy |
+
+Each row is a test in `docker/backup/tests/` (`scripts/backup-tests.sh`).
 
 ### Restore a backup
 
@@ -177,8 +281,10 @@ would need if the backup turned out to be bad.
 
 ```bash
 # 1. RESTORE into a new database (live is untouched; the script refuses
-#    --target errs without an explicit --force-live)
+#    --target errs without an explicit --force-live). Either the newest
+#    local dump, or the newest OFF-SITE one:
 essr exec backup sh /usr/local/bin/errs-restore.sh --latest --target errs_restored
+essr exec backup sh /usr/local/bin/errs-restore.sh --from-offsite latest --target errs_restored
 
 # 2. VERIFY — the script prints schema revision and row counts. Compare them
 #    against what you expect. Optionally point the API at the copy:
@@ -203,6 +309,47 @@ backup did not contain.
 `DROP`/`RENAME DATABASE` fails while anything holds a connection — that is
 why `api` is stopped first, and the failure is a useful guard rather than an
 obstacle.
+
+### Restore after losing the whole VM
+
+Nothing from the old host is needed except what is in B2 and your secrets
+(the root `.env` and `apps/api/.env` — keep a copy in your password manager,
+not in B2 next to the data they protect).
+
+```bash
+# on the new host, per docs/DEPLOYMENT.md: clone, restore both .env files, then
+essr up -d --build                      # empty database, migrated to head
+essr exec backup errs-offsite list      # pick the restore point
+essr exec backup sh /usr/local/bin/errs-restore.sh --from-offsite latest --target errs_restored
+# (or --from-offsite <key> for an older point)
+# then VERIFY and SWAP exactly as above
+```
+
+`--from-offsite` downloads into the backups volume, refuses anything whose
+sha256 differs from the value recorded at backup time, re-validates the
+archive, and only then restores. The new host's own first backup cycle runs
+on the (empty) database at startup. That is harmless — it cannot overwrite or
+delete any existing off-site backup — and `--from-offsite latest` skips
+backups that recorded zero organizations (it logs
+`offsite_latest_skipped_empty`), so "latest" still means the newest backup
+with real data. Check the key it prints against `list` before you swap.
+
+### Restore drill (monthly, and after any change to backups)
+
+```bash
+scripts/backup-restore-drill.sh
+```
+
+Dumps the running database (read-only), uploads it to B2 under
+`restore-drill/<run>/` with a 1-day lock, then on a **brand-new, isolated**
+PostgreSQL container: downloads it, restores it with the production script,
+and compares **every table's row count and full-row digest**, every foreign
+key (all validated), index, enum and sequence against the source; checks the
+Alembic revision and `alembic check`; starts the API against it
+(`/health/ready`) and loads every ORM model. Everything it creates is removed
+on exit. It never writes to the source and never restores over anything.
+`--local-s3` runs the same drill against a throwaway S3 server when B2 is not
+configured (a pipeline check, not proof of B2).
 
 ---
 
@@ -290,6 +437,7 @@ Rotate one at a time and verify between each.
 | `JWT_SECRET_KEY` | Edit `apps/api/.env`, `essr up -d api` | **Every user is signed out.** All access and refresh tokens become invalid. Do it deliberately. |
 | `VAPI_SERVER_SECRET` | Update the Vapi assistant's Server URL Secret **first**, then `apps/api/.env`, then `essr up -d api` | Calls fail while the two disagree — keep the gap short |
 | `POSTGRES_PASSWORD` | `ALTER USER errs WITH PASSWORD '…';` then update `.env` **and** `apps/api/.env`, then `essr up -d` | API and backup service both need the new value |
+| `B2_APPLICATION_KEY` | Create the new key (same capabilities, see Backups), update `.env`, `essr up -d backup`, `essr exec backup errs-offsite check`, **then** delete the old key in B2 | None if done in that order; existing backups stay locked and readable |
 | `OPENAI_API_KEY` | Edit `apps/api/.env`, `essr up -d api` | Calls in flight fail; new ones use the new key |
 | A tenant's webhook URL | Dashboard → Settings → Emergency alerts → paste the new one (replaces) | That tenant's alerts only |
 
@@ -302,7 +450,8 @@ and `docker/compose.env.production.example` are the templates.
 
 Stated so nobody discovers it during an incident:
 
-- **Backups do not survive host loss.** Same-host volume only.
+- **Backups are daily, not continuous.** A restore loses up to a day of
+  writes (no WAL archiving / point-in-time recovery).
 - **No alerting.** Nothing pages you when the API goes down, a migration
   fails, or emergency notifications start failing. You find out by looking.
   Checking the `emergency_notification_attempted` query above daily is the

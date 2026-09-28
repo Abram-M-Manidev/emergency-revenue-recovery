@@ -1,0 +1,62 @@
+# Backup test harness: a throwaway PostgreSQL 16, a real S3 server with
+# Object Lock (versitygw), and the backup image's test target.
+#
+# Run through scripts/backup-tests.sh, which generates fresh random
+# credentials for the throwaway services on every run — nothing here is a
+# real secret, and none is written to disk.
+#
+# Set ERRS_B2_LIVE=1 (and the B2_* variables) to also run the tests that
+# talk to the real Backblaze bucket.
+name: errs-backup-test
+
+services:
+  pg:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: errs
+      POSTGRES_PASSWORD: ${TEST_PG_PASSWORD:?run via scripts/backup-tests.sh}
+      POSTGRES_DB: errs
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U errs"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # versitygw rather than MinIO: MinIO's images were withdrawn from public
+  # registries. versitygw implements what these tests need to be honest —
+  # Object Lock that actually refuses deletes, versioning, Content-MD5
+  # validation, and 403 for anonymous reads.
+  s3:
+    image: versity/versitygw:v1.8.0
+    entrypoint: ["sh", "-c", "exec versitygw posix --versioning-dir /vers /data"]
+    environment:
+      ROOT_ACCESS_KEY: ${TEST_S3_ACCESS:?run via scripts/backup-tests.sh}
+      ROOT_SECRET_KEY: ${TEST_S3_SECRET:?run via scripts/backup-tests.sh}
+    tmpfs:
+      - /data
+      - /vers
+
+  tests:
+    build:
+      context: .
+      target: test
+    environment:
+      PGHOST: pg
+      PGUSER: errs
+      PGPASSWORD: ${TEST_PG_PASSWORD}
+      PGDATABASE: errs
+      TEST_S3_ENDPOINT: http://s3:7070
+      TEST_S3_ACCESS: ${TEST_S3_ACCESS}
+      TEST_S3_SECRET: ${TEST_S3_SECRET}
+      ERRS_B2_LIVE: ${ERRS_B2_LIVE:-0}
+      B2_APPLICATION_KEY_ID: ${B2_APPLICATION_KEY_ID:-}
+      B2_APPLICATION_KEY: ${B2_APPLICATION_KEY:-}
+      B2_BUCKET: ${B2_BUCKET:-}
+      B2_S3_ENDPOINT: ${B2_S3_ENDPOINT:-}
+    depends_on:
+      pg:
+        condition: service_healthy
+      s3:
+        condition: service_started

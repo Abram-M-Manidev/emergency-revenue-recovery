@@ -13,7 +13,7 @@
 #          -> api      :8000  (/api/*, /docs, /health)
 #     -> postgres            internal only, never published to the host
 #     -> migrate             one-shot, runs to completion before api starts
-#     -> backup              nightly pg_dump into a named volume
+#     -> backup              nightly pg_dump -> Backblaze B2 (verified), 7d local copy
 #
 # Why this shape, and not something bigger
 # ----------------------------------------
@@ -209,16 +209,21 @@ services:
 
   # --- backups -------------------------------------------------------------
   #
-  # Runs in the same postgres image, so `pg_dump` matches the server version
-  # exactly — a mismatched client is the most common reason a restore fails
-  # at the moment it is needed. No new image, no cron daemon: a shell loop
-  # is enough for one nightly dump and has no scheduler state to corrupt.
+  # Nightly pg_dump, validated, uploaded to Backblaze B2 and read back before
+  # it counts. Everything is in docker/backup/ (image, scheduler, uploader,
+  # restore script, tests); docs/RUNBOOK.md "Backups" is the operator view.
   #
-  # Retention is enforced on every run rather than by a separate sweeper, so
-  # a host that was powered off for a week does not accumulate unbounded
-  # dumps the first time it comes back.
+  # The image is FROM postgres:16-alpine, so pg_dump/pg_restore match the
+  # server version exactly — a mismatched client is the most common reason a
+  # restore fails at the moment it is needed.
+  #
+  # Off-site is REQUIRED here: the three B2 variables use `:?`, so a
+  # production stack without them refuses to start instead of quietly
+  # keeping its only backups on the machine they are meant to survive.
   backup:
-    image: postgres:16-alpine
+    build:
+      context: ./docker/backup
+      target: runtime
     restart: unless-stopped
     environment:
       PGHOST: postgres
@@ -226,15 +231,32 @@ services:
       PGPASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       PGDATABASE: ${POSTGRES_DB:-errs}
       BACKUP_INTERVAL_SECONDS: ${BACKUP_INTERVAL_SECONDS:-86400}
-      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-14}
+      BACKUP_RETRY_SECONDS: ${BACKUP_RETRY_SECONDS:-3600}
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-7}
+      BACKUP_OFFSITE: required
+      B2_APPLICATION_KEY_ID: ${B2_APPLICATION_KEY_ID:?B2_APPLICATION_KEY_ID must be set (off-site backups)}
+      B2_APPLICATION_KEY: ${B2_APPLICATION_KEY:?B2_APPLICATION_KEY must be set (off-site backups)}
+      B2_BUCKET: ${B2_BUCKET:?B2_BUCKET must be set (off-site backups)}
+      # Optional: discovered from the key via b2_authorize_account when empty.
+      B2_S3_ENDPOINT: ${B2_S3_ENDPOINT:-}
+      BACKUP_REMOTE_PREFIX: ${BACKUP_REMOTE_PREFIX:-errs/postgres}
+      BACKUP_OBJECT_LOCK_MODE: ${BACKUP_OBJECT_LOCK_MODE:-GOVERNANCE}
+      BACKUP_OBJECT_LOCK_DAYS: ${BACKUP_OBJECT_LOCK_DAYS:-30}
+      BACKUP_HEARTBEAT_URL: ${BACKUP_HEARTBEAT_URL:-}
     volumes:
-      - ./docker/backup.sh:/usr/local/bin/errs-backup.sh:ro
-      # Mounted into the same container so an operator can restore with
-      # `docker compose exec backup ...` — the tooling is where the dumps
-      # are, and where pg_restore matches the server version.
-      - ./docker/restore.sh:/usr/local/bin/errs-restore.sh:ro
       - postgres_backups:/backups
-    entrypoint: ["/bin/sh", "/usr/local/bin/errs-backup.sh"]
+    # Unhealthy once the newest verified OFF-SITE copy is older than
+    # interval + 3h — i.e. a missed night shows in `docker compose ps` the
+    # next morning. start_period covers the first dump + upload on boot.
+    healthcheck:
+      test: ["CMD", "errs-offsite", "health"]
+      interval: 10m
+      timeout: 30s
+      retries: 1
+      start_period: 1h
+    # A dump or upload in flight is simply abandoned on stop — the next
+    # cycle redoes it (see backup.sh) — so no long grace period is needed.
+    stop_grace_period: 20s
     depends_on:
       postgres:
         condition: service_healthy

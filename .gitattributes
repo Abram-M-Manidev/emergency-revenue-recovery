@@ -1,0 +1,4 @@
+# Shell scripts run inside Linux containers (COPY into docker/backup, bind
+# mounts): a CRLF checkout on Windows (core.autocrlf=true) would break them
+# with a carriage-return error. Pin them to LF regardless of the client setting.
+*.sh text eol=lf

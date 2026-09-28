@@ -26,8 +26,8 @@ benefit at that size. Everything here is upgradeable in place — see
                   └────┬────┘ └──────────┘
                        │
                   ┌────▼─────┐        ┌──────────┐
-                  │ postgres │◀───────│  backup  │  nightly pg_dump
-                  │ internal │        │          │  → postgres_backups
+                  │ postgres │◀───────│  backup  │  nightly pg_dump → B2 (locked,
+                  │ internal │        │          │  read back + sha256) + 7d local
                   │   only   │        └──────────┘
                   └────▲─────┘
                        │ runs once, before api starts
@@ -84,6 +84,14 @@ Set `ERRS_DOMAIN`, `ERRS_TLS_EMAIL`, and generate `POSTGRES_PASSWORD`:
 ```bash
 python3 -c "import secrets; print(secrets.token_urlsafe(32))"
 ```
+
+Set the off-site backup key: `B2_APPLICATION_KEY_ID`, `B2_APPLICATION_KEY`
+and `B2_BUCKET`. The stack refuses to start without them. Create the bucket,
+the restricted key and the lifecycle rule first; `docs/RUNBOOK.md` →
+**Backups → One-time Backblaze B2 setup** has the exact settings and the
+`b2 key create` command. Keep a copy of both `.env` files outside this host
+(a password manager): after losing the VM they are the only thing, besides
+B2, that a rebuild needs.
 
 ### 3. Configure the API
 
@@ -154,9 +162,17 @@ curl -sS -o /dev/null -w '%{http_code}\n' https://YOUR_DOMAIN/login   # 200
 # Postgres is NOT reachable from outside
 nc -zv YOUR_DOMAIN 5432    # must fail
 
-# the first backup has already been taken (the service takes one on start)
-docker compose -f docker-compose.yml -f docker-compose.prod.yml \
-  exec backup sh /usr/local/bin/errs-restore.sh --list
+# the first backup has already been taken, uploaded and verified off-site
+# (the service runs one cycle on start), and the B2 setup is correct
+docker compose -f docker-compose.yml -f docker-compose.prod.yml exec backup errs-offsite status
+docker compose -f docker-compose.yml -f docker-compose.prod.yml exec backup errs-offsite check
+```
+
+Then run the restore drill once, before any real tenant data exists, so the
+first time a restore is attempted is not during an incident:
+
+```bash
+scripts/backup-restore-drill.sh
 ```
 
 ### 6. Point Vapi at the stable URL
@@ -208,9 +224,10 @@ git rev-parse --short HEAD          # ← write this down
 docker compose -f docker-compose.yml -f docker-compose.prod.yml \
   exec api alembic current          # ← and this
 
-# 2. Take a backup before any migration runs
+# 2. Take a backup before any migration runs — exits 0 only once it is
+#    verified off-site (75 = a scheduled cycle is running; wait and re-run)
 docker compose -f docker-compose.yml -f docker-compose.prod.yml \
-  exec backup sh -c 'BACKUP_INTERVAL_SECONDS=1 timeout 120 sh /usr/local/bin/errs-backup.sh'
+  exec backup errs-offsite run-once
 
 # 3. Fetch and build
 git fetch origin && git checkout <new-ref>
@@ -282,6 +299,6 @@ Each of these is a contained change, not a rewrite:
 |---|---|
 | Database needs HA / point-in-time recovery | Delete the `postgres` service, point `DATABASE_URL` at a managed instance. The `backup` service can stay or be replaced by the provider's snapshots. |
 | Deploys must be zero-downtime | Add a second `api` replica; Caddy load-balances `reverse_proxy` upstreams already. |
-| Backups must survive host loss | Ship `postgres_backups` off-host (S3/B2 sync sidecar). **Today they live on the same host as the database** — see the honest limitation in `docs/RUNBOOK.md`. |
+| Restore points finer than a day | Nightly dumps lose up to a day of writes. Add WAL archiving (e.g. WAL-G to the same B2 bucket) for point-in-time recovery, or move to a managed database. |
 | Rate limits must be shared across workers | Replace the in-process limiter with Redis. Currently each of the 4 workers counts separately, so the real ceiling is ~4× the configured limit. |
 | More than one host | This is the point to consider a PaaS or an orchestrator, not before. |

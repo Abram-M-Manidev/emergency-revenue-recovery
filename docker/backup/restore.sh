@@ -27,6 +27,11 @@
 #   docker compose exec backup sh /usr/local/bin/errs-restore.sh \
 #       --file /backups/errs-20260910T020000Z.dump --target errs_verify
 #
+#   # host lost: fetch the newest OFF-SITE backup from B2 (sha256-verified
+#   # before anything touches a database) and restore it into errs_restored
+#   docker compose exec backup sh /usr/local/bin/errs-restore.sh --list-offsite
+#   docker compose exec backup sh /usr/local/bin/errs-restore.sh --from-offsite latest
+#
 # See docs/RUNBOOK.md for the full BACKUP -> RESTORE -> VERIFY -> SWAP
 # procedure, including how to point the API at a restored copy.
 
@@ -37,6 +42,7 @@ LIVE_DB="${PGDATABASE:-errs}"
 TARGET="errs_restored"
 DUMP=""
 FORCE_LIVE="no"
+OFFSITE_KEY=""
 
 usage() {
 	cat <<'USAGE'
@@ -45,6 +51,9 @@ errs-restore.sh — restore an ESSR backup into a database
   --list                 show available dumps, newest first
   --latest               restore the newest dump
   --file <path>          restore this specific dump
+  --list-offsite         show backups in the B2 bucket, newest first
+  --from-offsite <key>   download this B2 backup (or 'latest'), verify its
+                         sha256, then restore it
   --target <dbname>      database to restore INTO (default: errs_restored)
   --force-live           allow --target to be the live database
                          (destroys current live data — only when live is
@@ -78,6 +87,8 @@ while [ $# -gt 0 ]; do
 			done
 			exit 0
 			;;
+		--list-offsite) exec errs-offsite list ;;
+		--from-offsite) shift; OFFSITE_KEY="${1:-}" ;;
 		--latest) DUMP="$(list_dumps | head -n 1)" ;;
 		--file) shift; DUMP="${1:-}" ;;
 		--target) shift; TARGET="${1:-}" ;;
@@ -88,8 +99,21 @@ while [ $# -gt 0 ]; do
 	shift
 done
 
+if [ -n "$OFFSITE_KEY" ]; then
+	# Downloaded beside the local dumps but under a `restore-` name, so it is
+	# never mistaken for (or pruned as) one of the backup service's own.
+	DUMP="$BACKUP_DIR/restore-$(date -u +%Y%m%dT%H%M%SZ).dump"
+	# `download` refuses — and deletes its partial file — unless the bytes
+	# match the sha256 recorded at backup time and pg_restore can read the
+	# whole archive. Nothing below runs on an unverified file.
+	if ! errs-offsite download "$OFFSITE_KEY" "$DUMP"; then
+		log restore_aborted "off-site download of '$OFFSITE_KEY' failed verification or could not be fetched"
+		exit 1
+	fi
+fi
+
 if [ -z "$DUMP" ]; then
-	printf 'Nothing to restore: pass --latest or --file <path>.\n\n' >&2
+	printf 'Nothing to restore: pass --latest, --file <path> or --from-offsite <key>.\n\n' >&2
 	usage >&2
 	exit 2
 fi
@@ -133,13 +157,17 @@ psql -q -d postgres -v ON_ERROR_STOP=1 \
 # --no-owner/--no-privileges so a dump taken as one role restores cleanly
 # under another. Without them a restore onto a fresh host fails on every
 # GRANT for a role that does not exist there yet.
-if pg_restore --no-owner --no-privileges --dbname "$TARGET" "$DUMP"; then
+#
+# --exit-on-error --single-transaction: a restore either loads everything or
+# leaves the target empty. This used to log "finished with warnings" and
+# carry on, which let a half-restored database print plausible row counts
+# below; a restore that is not complete must not look like one that is.
+if pg_restore --no-owner --no-privileges --exit-on-error --single-transaction \
+	--dbname "$TARGET" "$DUMP"; then
 	log restore_completed "target=$TARGET"
 else
-	# pg_restore exits non-zero on warnings as well as errors, so this is
-	# reported rather than treated as certain failure — and the verification
-	# step below is what actually decides.
-	log restore_finished_with_warnings "target=$TARGET — verify before trusting it"
+	log restore_failed "target=$TARGET — pg_restore failed; the target database is NOT usable"
+	exit 1
 fi
 
 # Verification, printed rather than merely asserted: an operator mid-incident
