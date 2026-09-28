@@ -26,11 +26,18 @@ Nothing to change in the code. For reference, these are the endpoints Vapi
 will call, both mounted under the `/voice/vapi` router and both gated by the
 same shared-secret dependency:
 
-| Purpose | URL |
-|---|---|
-| Custom LLM (every conversational turn) | `https://YOUR_DOMAIN/api/v1/voice/vapi/chat/completions` |
-| Server URL (lifecycle events) | `https://YOUR_DOMAIN/api/v1/voice/vapi/events` |
-| Auth header on both | `x-vapi-secret: <VAPI_SERVER_SECRET>` |
+| Purpose | URL | Vapi sends `x-vapi-secret` from |
+|---|---|---|
+| Custom LLM (every conversational turn) | `https://YOUR_DOMAIN/api/v1/voice/vapi/chat/completions` | `assistant.model.headers["x-vapi-secret"]` |
+| Server URL (lifecycle events) | `https://YOUR_DOMAIN/api/v1/voice/vapi/events` | `assistant.server.headers["x-vapi-secret"]` |
+
+Both endpoints require the header, and both expect the value of
+`VAPI_SERVER_SECRET` from `apps/api/.env`. They are **two separate fields on
+the assistant** — so the secret lives in three places that must always
+agree: `apps/api/.env`, `assistant.model.headers`, `assistant.server.headers`.
+Configuring only the Server URL secret leaves the Custom LLM unauthenticated:
+every turn is rejected with 401 and every call fails, while the dashboard's
+webhook screen still looks correct.
 
 The secret is compared in constant time and **fails closed**: an unset
 `VAPI_SERVER_SECRET` rejects every request rather than accepting all of them.
@@ -50,7 +57,9 @@ On the assistant that will serve the pilot business:
 | Model → Custom LLM URL | `https://YOUR_DOMAIN/api/v1/voice/vapi/chat/completions` | Every turn goes here |
 | Model → streaming | **enabled** | The API streams SSE; Caddy is configured with `flush_interval -1` so tokens are not buffered. Without streaming the caller waits for the whole turn in silence. |
 | Server URL | `https://YOUR_DOMAIN/api/v1/voice/vapi/events` | Lifecycle events (status, transcript, end-of-call) |
-| Server URL Secret | the same value as `VAPI_SERVER_SECRET` | Sent as `x-vapi-secret` |
+| Model → Custom LLM → headers | `x-vapi-secret: <VAPI_SERVER_SECRET>` (stored as `assistant.model.headers`) | **Required for every turn.** Not set by the Server URL Secret below — without it every call fails with `custom-llm-401-unauthorized` |
+| Server URL Secret | the same value as `VAPI_SERVER_SECRET` (stored as `assistant.server.headers` / `server.credentialId`) | Authenticates lifecycle events **only** |
+| End call message (`endCallMessage`) | **empty** | Spoken before every hangup regardless of outcome; a fixed sentence like "your appointment is booked" becomes a false statement to emergency callers |
 | First message | the business's greeting | Spoken before the first model turn; ESSR does not supply it |
 | End call function | **enabled** | The API emits an `endCall` tool call when a turn should hang up (completion gate, or a disabled assistant) |
 

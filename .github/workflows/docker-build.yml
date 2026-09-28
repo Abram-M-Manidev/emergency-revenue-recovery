@@ -8,6 +8,13 @@ on:
   push:
     branches: [main]
 
+# A placeholder origin, not a real domain: the frontend image must be built
+# with an explicit API URL (the Dockerfile refuses to build without one), and
+# the bundle check below proves that URL — not a localhost fallback — is what
+# ends up inlined.
+env:
+  CI_API_BASE_URL: https://errs-ci.example.invalid/api/v1
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -32,4 +39,28 @@ jobs:
           context: ${{ matrix.context }}
           target: ${{ matrix.target || 'production' }}
           push: false
+          # Loaded into the runner's Docker so the bundle can be inspected.
+          load: true
+          build-args: |
+            NEXT_PUBLIC_API_BASE_URL=${{ env.CI_API_BASE_URL }}
           tags: errs-${{ matrix.name }}:ci
+
+      # Regression guard for the production API URL. NEXT_PUBLIC_* is inlined
+      # at build time; when it was only a runtime variable the shipped bundle
+      # called http://localhost:8000/api/v1 from every visitor's browser, and
+      # neither the image build nor the container healthcheck noticed.
+      - name: Frontend bundle uses the configured API origin, never localhost
+        if: matrix.name == 'frontend'
+        run: |
+          docker run --rm --entrypoint sh -e EXPECTED="$CI_API_BASE_URL" errs-frontend:ci -c '
+            cd /app/.next
+            if grep -rl "localhost:8000/api/v1" .; then
+              echo "::error::production frontend bundle contains localhost:8000/api/v1"
+              exit 1
+            fi
+            if ! grep -rqF "$EXPECTED" .; then
+              echo "::error::production frontend bundle does not contain the configured API origin"
+              exit 1
+            fi
+            echo "bundle OK: configured API origin present, no localhost API URL"
+          '

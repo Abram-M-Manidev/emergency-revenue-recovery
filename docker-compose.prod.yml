@@ -113,6 +113,14 @@ services:
     env_file:
       - ./apps/api/.env
     environment:
+      # Forced here, not left to apps/api/.env: every production safety check
+      # in app/core/config.py runs only when ENVIRONMENT=production, and the
+      # .env.example template defaults to development + DEBUG=true. An
+      # operator who forgot that one line got a production stack running in
+      # development mode — open registration, non-Secure cookies, tracebacks —
+      # with no startup refusal at all. `environment:` beats `env_file:`.
+      ENVIRONMENT: production
+      DEBUG: "false"
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-errs}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-errs}
     # Bypasses docker-entrypoint.sh's `exec "$@"` chain deliberately: that
     # entrypoint validates Settings() and then hands off, which is what the
@@ -132,6 +140,9 @@ services:
     restart: unless-stopped
     volumes: !reset []
     environment:
+      # Forced for the same reason as in `migrate` above.
+      ENVIRONMENT: production
+      DEBUG: "false"
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-errs}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-errs}
       # 4 workers, each with its own DB connection pool
       # (DATABASE_POOL_SIZE + DATABASE_MAX_OVERFLOW) — that total x 4 must
@@ -176,16 +187,21 @@ services:
   frontend:
     build:
       target: production
+      # Same-origin: the browser reaches the API through Caddy on the public
+      # domain, so there is no cross-origin request to configure CORS for and
+      # no second hostname to certificate. NEXT_PUBLIC_* is inlined into the
+      # bundle by `next build`, so it MUST be a build arg: the runtime
+      # `environment:` entry below alone left the bundle pointing at
+      # http://localhost:8000/api/v1. The Dockerfile refuses to build without it.
+      args:
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-https://${ERRS_DOMAIN:?ERRS_DOMAIN must be set for production TLS}/api/v1}
     restart: unless-stopped
     volumes: !reset []
     ports: !reset []
     environment:
-      # Same-origin: the browser reaches the API through Caddy on the public
-      # domain, so there is no cross-origin request to configure CORS for and
-      # no second hostname to certificate. NEXT_PUBLIC_* is inlined at build
-      # time, which is why this must be set for the image build and not only
-      # at runtime.
-      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-https://${ERRS_DOMAIN}/api/v1}
+      # Kept identical to the build arg so the running container's environment
+      # never disagrees with what the bundle was built with.
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-https://${ERRS_DOMAIN:?ERRS_DOMAIN must be set for production TLS}/api/v1}
       NODE_ENV: production
       # Next.js standalone binds to $HOSTNAME, which Docker sets to the
       # container id — so the server ends up listening only on the address

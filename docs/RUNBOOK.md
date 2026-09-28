@@ -416,8 +416,13 @@ essr logs --since 1h api | grep voice_request_received     # nothing → not rea
 essr logs --since 1h caddy | grep '/api/v1/voice'          # nothing → not reaching Caddy
 ```
 
-- Requests reaching Caddy but rejected by the API (`401`) → `VAPI_SERVER_SECRET`
-  does not match the assistant's Server URL Secret.
+- Requests reaching Caddy but rejected by the API (`401`) → the `x-vapi-secret`
+  Vapi sent does not match `VAPI_SERVER_SECRET`. Check **which endpoint** 401s:
+  `/chat/completions` reads `assistant.model.headers["x-vapi-secret"]`,
+  `/events` reads `assistant.server.headers["x-vapi-secret"]`. A 401 on
+  `/chat/completions` (Vapi: `custom-llm-401-unauthorized`) while `/events`
+  succeeds means only the Server URL secret was set — the dashboard's webhook
+  screen never updates the model header.
 - Reaching the API but `voice_line_not_found` → no `voice_lines` row maps that
   assistant id to an organization (see `docs/DEPLOYMENT.md` step 6).
 - Nothing at Caddy at all → the Vapi assistant's Server URL is wrong, or DNS
@@ -434,8 +439,8 @@ Rotate one at a time and verify between each.
 
 | Secret | Procedure | Blast radius |
 |---|---|---|
-| `JWT_SECRET_KEY` | Edit `apps/api/.env`, `essr up -d api` | **Every user is signed out.** All access and refresh tokens become invalid. Do it deliberately. |
-| `VAPI_SERVER_SECRET` | Update the Vapi assistant's Server URL Secret **first**, then `apps/api/.env`, then `essr up -d api` | Calls fail while the two disagree — keep the gap short |
+| `JWT_SECRET_KEY` | Edit `apps/api/.env`, `essr up -d api` (recreates the container; a plain `restart` keeps the old value) | Every **access** token (15 min) becomes invalid, including any forged with a leaked secret. Refresh tokens are opaque and stored hashed, so they are unaffected: signed-in users silently get new access tokens on their next refresh. |
+| `VAPI_SERVER_SECRET` | **Three places, same value:** update `assistant.model.headers["x-vapi-secret"]` (Custom LLM) **and** `assistant.server.headers["x-vapi-secret"]` (Server URL) on the Vapi assistant, then `apps/api/.env`, then `essr up -d api` | Calls fail while any of the three disagree — keep the gap short. Updating only the Server URL secret breaks every call (Custom LLM 401) |
 | `POSTGRES_PASSWORD` | `ALTER USER errs WITH PASSWORD '…';` then update `.env` **and** `apps/api/.env`, then `essr up -d` | API and backup service both need the new value |
 | `B2_APPLICATION_KEY` | Create the new key (same capabilities, see Backups), update `.env`, `essr up -d backup`, `essr exec backup errs-offsite check`, **then** delete the old key in B2 | None if done in that order; existing backups stay locked and readable |
 | `OPENAI_API_KEY` | Edit `apps/api/.env`, `essr up -d api` | Calls in flight fail; new ones use the new key |

@@ -106,8 +106,8 @@ dropping real calls, which is why they are startup errors instead:
 
 | Setting | Why it is mandatory in production |
 |---|---|
-| `ENVIRONMENT=production` | Turns on every check in this table |
-| `DEBUG=false` | Tracebacks would reach callers |
+| `ENVIRONMENT=production` | Turns on every check in this table. **Forced by `docker-compose.prod.yml`** for `api` and `migrate` (overrides whatever `apps/api/.env` says), so a forgotten edit can no longer boot production in development mode |
+| `DEBUG=false` | Tracebacks would reach callers. Also **forced by the production compose** |
 | `JWT_SECRET_KEY` | The `.env.example` placeholder is rejected outright |
 | `CORS_ORIGINS=https://YOUR_DOMAIN` | Explicit, no `*`, and no cleartext `http://` |
 | `VAPI_SERVER_SECRET` | Unset ⇒ every inbound webhook rejected ⇒ the phone line silently answers nothing |
@@ -121,6 +121,7 @@ customer will notice:
 |---|---|
 | `FEATURE_REGISTRATION_ENABLED` | **Leave unset.** Unset ⇒ `POST /auth/register` answers `403 REGISTRATION_DISABLED` in production (open in development/testing). Set `true` only to deliberately open self-service signup. Existing users, logins and Team invitations are unaffected either way. |
 | `NOTIFICATION_PROVIDER=webhook` | Required for any human to be paged about an emergency. With the default `none`, tickets are still created and the assistant tells callers the alert could not be confirmed — truthful, but nobody is paged. Each organization also needs its destination set in Settings → Emergency notifications. Alerts go through a transactional outbox (sent only after the ticket commits, retried with backoff — `NOTIFICATION_MAX_ATTEMPTS`, `NOTIFICATION_RETRY_BASE_SECONDS`, `NOTIFICATION_OUTBOX_POLL_SECONDS`). |
+| `NOTIFICATION_MAX_ATTEMPTS` | **Leave unset** (default **8**, backoff spanning ~45 minutes). Older copies of `.env.example` set it to `2`; remove that line — with 2 attempts, an alert receiver that is down for a few seconds loses the emergency page. |
 
 Generate the JWT secret and the Vapi shared secret the same way as the
 database password. `DATABASE_URL` is set by the compose overlay — leave
@@ -179,11 +180,32 @@ scripts/backup-restore-drill.sh
 
 **This is an external change and is not automated by this repository.**
 
-In the Vapi dashboard, on the assistant serving the pilot business:
+Vapi calls **two different endpoints**, and each one reads its secret from a
+**different field** of the assistant. Both must be set:
 
-- **Server URL / Custom LLM URL** →
-  `https://YOUR_DOMAIN/api/v1/voice/vapi/chat/completions`
-- **Server URL Secret** → the same value as `VAPI_SERVER_SECRET`
+| What | Endpoint | Where the `x-vapi-secret` header comes from |
+|---|---|---|
+| **Custom LLM** — every conversational turn | `https://YOUR_DOMAIN/api/v1/voice/vapi/chat/completions` | `assistant.model.headers["x-vapi-secret"]` |
+| **Server URL** — lifecycle events | `https://YOUR_DOMAIN/api/v1/voice/vapi/events` | `assistant.server.headers["x-vapi-secret"]` |
+
+Both headers carry the same value as `VAPI_SERVER_SECRET` in `apps/api/.env`.
+That makes **three places that must agree**: `apps/api/.env`,
+`assistant.model.headers`, and `assistant.server.headers`.
+
+> **Setting only the Server URL secret is not enough.** The dashboard's
+> Server URL / webhook secret screen edits `assistant.server.*` only; it never
+> touches `assistant.model.headers`. With the model header missing or stale,
+> the dashboard looks correct, lifecycle events arrive, and **every call
+> fails** — Vapi logs `pipeline-error-custom-llm-401-unauthorized` and the
+> caller is dropped. Set the Custom LLM header explicitly (model → custom LLM
+> → headers, or `PATCH /assistant/{id}` with `model.headers`).
+>
+> If the Server URL uses a Vapi credential (`server.credentialId`) instead of
+> a header, its secret is not returned on read and cannot be checked; verify
+> with a real call instead of trusting that it exists.
+
+Full dashboard checklist (streaming, End call function, `endCallMessage`):
+`docs/PILOT_LAUNCH.md` §B.
 
 Then map the assistant to the organization on our side with the operator
 CLI (see `docs/PILOT_LAUNCH.md` §5 for the refusal rules):

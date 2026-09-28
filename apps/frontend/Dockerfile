@@ -17,6 +17,16 @@ RUN npm install
 
 # --- production build ---
 FROM base AS builder
+# NEXT_PUBLIC_* values are inlined into the JavaScript bundle by
+# `next build`; setting them only at container runtime has no effect. Without
+# this ARG the bundle silently fell back to http://localhost:8000/api/v1 (see
+# src/lib/constants.ts), so every browser called its own machine. The build
+# refuses to proceed without a value rather than ship that fallback again.
+ARG NEXT_PUBLIC_API_BASE_URL
+ENV NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_BASE_URL
+RUN test -n "$NEXT_PUBLIC_API_BASE_URL" || { \
+      echo "NEXT_PUBLIC_API_BASE_URL build arg is required for the production frontend image" >&2; \
+      exit 1; }
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build
