@@ -530,3 +530,53 @@ async def test_a_successful_booking_sets_no_failed_state():
         complete.result.conversation_id
     )
     assert appointment is not None and appointment.scheduled_start_at is not None
+
+
+# --- Human transfer: the call leaves through the transfer, never an endCall ---
+
+
+class _AcceptedTransferProvider(ScriptedToolAIProvider):
+    """A provider whose turn reports an ACCEPTED transfer — the state the real
+    provider derives from a successful `transfer_to_human` result."""
+
+    def _transfer_initiated(self, since: int) -> bool:
+        return True
+
+
+@pytest.mark.asyncio
+async def test_an_accepted_transfer_never_ends_the_call_even_if_the_model_says_complete():
+    provider = _AcceptedTransferProvider()
+    provider.queue_reply(default_reply(message_to_customer="", is_conversation_complete=True))
+    harness = _Harness(provider)
+
+    _, complete = await harness.stream_turn("Can I talk to a person?")
+
+    # An endCall now would hang the caller up in the middle of their human exit.
+    assert complete.result.should_end_call is False
+    assert (
+        await harness.conversation_status(complete.result.conversation_id)
+        is ConversationStatus.ACTIVE
+    )
+
+
+@pytest.mark.asyncio
+async def test_without_a_transfer_the_same_reply_still_completes():
+    provider = ScriptedToolAIProvider()
+    provider.queue_reply(default_reply(message_to_customer="Goodbye!", is_conversation_complete=True))
+    harness = _Harness(provider)
+
+    _, complete = await harness.stream_turn("That's all, thanks.")
+
+    assert complete.result.should_end_call is True
+
+
+@pytest.mark.asyncio
+async def test_an_accepted_transfer_is_gated_identically_on_the_non_streaming_transport():
+    provider = _AcceptedTransferProvider()
+    provider.queue_reply(default_reply(message_to_customer="", is_conversation_complete=True))
+    harness = _Harness(provider)
+
+    result = await harness.json_turn("Can I talk to a person?")
+
+    assert result.should_end_call is False
+    assert await harness.conversation_status(result.conversation_id) is ConversationStatus.ACTIVE

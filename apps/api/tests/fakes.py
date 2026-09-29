@@ -25,7 +25,7 @@ from app.domain.ai.provider import (
     AITextDelta,
     AIToolPhase,
 )
-from app.domain.ai.tools import BOOK_APPOINTMENT, ToolInvocation, ToolResult
+from app.domain.ai.tools import BOOK_APPOINTMENT, TRANSFER_TO_HUMAN, ToolInvocation, ToolResult
 from app.domain.entities.analytics import BucketCount, DailyCount, DailyRevenue
 from app.domain.entities.appointment import Appointment, AppointmentStatus
 from app.domain.entities.business_hours import HoursException, WeeklyHours
@@ -1335,9 +1335,19 @@ class ScriptedToolAIProvider(AIProvider):
             state = not result.content.get("success")
         return state
 
+    def _transfer_initiated(self, since: int) -> bool:
+        """Mirrors `OpenAIProvider._run_tools`: set only by a SUCCESSFUL
+        `transfer_to_human` result in this turn, never by the scripted reply."""
+        return any(
+            r.name == TRANSFER_TO_HUMAN.name and bool(r.content.get("success"))
+            for r in self.results[since:]
+        )
+
     def _finalise(self, reply: AIReply, since: int) -> AIReply:
         return replace(
-            reply, booking_failed_unrecovered=self._booking_failed_unrecovered(since)
+            reply,
+            booking_failed_unrecovered=self._booking_failed_unrecovered(since),
+            transfer_initiated=self._transfer_initiated(since),
         )
 
     async def generate_reply(self, request: AIRequest) -> AIReply:

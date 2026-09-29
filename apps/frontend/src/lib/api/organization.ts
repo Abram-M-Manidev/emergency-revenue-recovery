@@ -1,5 +1,7 @@
 import { apiRequest } from "@/lib/api/client";
 import type {
+  CallTransferSettings,
+  ConfigureCallTransferPayload,
   ConfigureNotificationsPayload,
   NotificationSettings,
   Organization,
@@ -8,6 +10,7 @@ import type {
 
 const BASE = "/organizations/current";
 const NOTIFICATIONS = `${BASE}/notifications`;
+const CALL_TRANSFER = `${BASE}/call-transfer`;
 
 export function fetchCurrentOrganization(): Promise<Organization> {
   return apiRequest<Organization>(BASE);
@@ -44,4 +47,19 @@ export function setNotificationsEnabled(isEnabled: boolean): Promise<Notificatio
 
 export function deleteNotificationSettings(): Promise<void> {
   return apiRequest<void>(NOTIFICATIONS, { method: "DELETE" });
+}
+
+/** Null when this organization has never configured human transfer. */
+export function fetchCallTransferSettings(): Promise<CallTransferSettings | null> {
+  return apiRequest<CallTransferSettings | null>(CALL_TRANSFER);
+}
+
+export function configureCallTransferSettings(
+  payload: ConfigureCallTransferPayload,
+): Promise<CallTransferSettings> {
+  return apiRequest<CallTransferSettings>(CALL_TRANSFER, { method: "PUT", body: payload });
+}
+
+export function deleteCallTransferSettings(): Promise<void> {
+  return apiRequest<void>(CALL_TRANSFER, { method: "DELETE" });
 }

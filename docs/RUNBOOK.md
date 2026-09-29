@@ -164,6 +164,79 @@ and let it lapse.
 
 ---
 
+## Human transfer (the caller's human exit)
+
+Every caller can get to a person. The assistant calls its `transfer_to_human`
+tool when the caller asks for a person (in any words — before intake, during
+an emergency, at any point), is clearly frustrated, or needs something it
+can't handle (billing, pricing disputes, complaints, judgement calls, or it has
+failed to finish their request twice — for these it *offers* first).
+
+**Where the call goes** (Owner → Settings → Human transfer; per tenant):
+
+| Business is… | Destination | If that number is missing |
+|---|---|---|
+| Open (weekly hours / dated exceptions, tenant timezone) | Office number | On-call number |
+| Hours not configured | Office number | On-call number |
+| Closed | On-call number | **Nobody** — the closed office is never rung |
+
+A destination that equals the tenant's AI voice-line number is refused, at save
+time and again at call time (a loop straight back into the assistant).
+
+**How it works:** ERRS POSTs a Vapi Live Call Control `transfer` command to the
+call's `controlUrl`. Only a **2xx** from Vapi counts as *initiated*. The
+handoff sentence ("I'm connecting you with someone at the office now." / "…with
+our on-call team now.") is spoken **by Vapi as part of the accepted transfer**,
+so the caller never hears "connecting you" for a transfer that was refused.
+Nothing in ERRS — or Vapi — can confirm that a person answered, so nothing ever
+claims it (Vapi documents that even `assistant-forwarded-call` "does not
+confirm that the downstream telephony provider completed it").
+
+**States** (`call_transfer_attempts`): `requested` → `destination_resolved` →
+`initiated` | `failed`, or `requested` → `unavailable`.
+
+| Outcome | error_code | What the caller hears |
+|---|---|---|
+| Initiated | — | Vapi's handoff sentence; the call is moved. No `endCall` is sent. |
+| Not configured / disabled | `TRANSFER_NOT_CONFIGURED`, `TRANSFER_DISABLED` | "I can't connect you to a person right now" + offer to take details for a callback |
+| After hours, no on-call number | `NO_DESTINATION_NOW` | same |
+| Number is the AI line | `DESTINATION_IS_AI_LINE` | same |
+| No `controlUrl` (dashboard/text channel, or `monitorPlan.controlEnabled` off) | `CALL_CONTROL_UNAVAILABLE` | same |
+| Vapi refused / timed out (5 s) / network error, or caller already hung up | `PROVIDER_REJECTED`, `PROVIDER_TIMEOUT`, `PROVIDER_ERROR` | same |
+| Emergency-policy transfer before the ticket exists | `EMERGENCY_TICKET_REQUIRED` | none — the assistant records the emergency first, then transfers |
+
+**Emergencies:** the emergency ticket and its alert outbox are unchanged and
+come first. A transfer never replaces, suppresses or rolls back a ticket (each
+tool runs in its own savepoint). With "Connect emergency callers to a person"
+on, the assistant transfers *after* the ticket is recorded. A caller who asks
+for a person during an emergency is transferred regardless.
+
+**Persistence:** the attempt row is written before Vapi is called and updated
+after, inside the turn; the hang-up drain commits it even when Vapi drops the
+stream as the call moves. A second transfer request in the same call does not
+re-dial.
+
+```bash
+# what happened on recent transfers (numbers are masked in logs)
+essr logs --since 24h api | grep call_transfer_attempted
+essr exec postgres psql -U errs -d errs -c "
+  SELECT status, error_code, reason, destination_kind, created_at
+    FROM call_transfer_attempts ORDER BY created_at DESC LIMIT 20;"
+```
+
+**Fire-drill (before go-live, then after any Vapi change):** call the pilot
+number and say "Can I speak to a person?" — once in business hours (the office
+phone should ring) and once after hours (the on-call phone). Then switch human
+transfer off in Settings and repeat: the assistant must say it can't connect
+you and offer a callback, and must not say "connecting you".
+
+**Limitations:** no warm transfer or whisper to the answering person (blind
+transfer only); no confirmation that anyone answered; if the destination does
+not pick up, what happens next is the carrier's/destination's voicemail — ERRS
+is no longer on the call. Transfer destinations are PSTN numbers only (no SIP).
+
+---
+
 ## Emergency alerts: checking what actually reached a human
 
 The single most important operational question in this system. A ticket

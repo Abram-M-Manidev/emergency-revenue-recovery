@@ -72,6 +72,10 @@ _PROGRESS_PHRASES: dict[str, str] = {
     "select_appointment_slot": "Absolutely. I'll book that time for you now. One moment.",
     "check_availability": "Let me check our schedule for you. One moment.",
     "create_service_request": "Let me get that logged for you. One moment.",
+    # Deliberately commits to nothing: whether a transfer happens is decided
+    # by the provider, and "connecting you" is spoken only by the provider,
+    # as part of a transfer it has accepted.
+    "transfer_to_human": "One moment.",
 }
 
 _DEFAULT_PROGRESS_PHRASE = "One moment while I take care of that."
@@ -90,6 +94,7 @@ def _progress_phrase(tool_names: tuple[str, ...]) -> str:
         "select_appointment_slot",
         "check_availability",
         "create_service_request",
+        "transfer_to_human",
     ):
         if name in tool_names:
             return _PROGRESS_PHRASES[name]

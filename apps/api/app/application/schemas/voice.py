@@ -69,6 +69,17 @@ class VapiCustomer(BaseModel):
     number: str | None = None
 
 
+class VapiMonitor(BaseModel):
+    """Vapi's live-call handles. `controlUrl` is present only when the
+    assistant has `monitorPlan.controlEnabled = true`; it is what lets the
+    backend move this call to a person (see `vapi_call_control.py`). It is a
+    capability over the live call: never logged, persisted, or echoed."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    controlUrl: str | None = Field(default=None, repr=False)
+
+
 class VapiCall(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -76,6 +87,7 @@ class VapiCall(BaseModel):
     assistantId: str | None = None
     phoneNumberId: str | None = None
     customer: VapiCustomer | None = None
+    monitor: VapiMonitor | None = None
 
 
 class VapiChatCompletionRequest(BaseModel):

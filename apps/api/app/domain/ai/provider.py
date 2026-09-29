@@ -93,6 +93,12 @@ class AIReply:
     # Defaults False, so every existing construction site and every provider
     # that runs no tools behaves exactly as before.
     booking_failed_unrecovered: bool = False
+    # True when this turn's `transfer_to_human` was ACCEPTED by the voice
+    # provider: the call is being handed to a person. The turn must then not
+    # end the call — an `endCall` would hang the caller up mid-transfer — so
+    # `AIBrainService` withholds completion, exactly like a failed booking.
+    # Set from the tool result, never from the model's own assertion.
+    transfer_initiated: bool = False
 
 
 @dataclass(frozen=True, slots=True)

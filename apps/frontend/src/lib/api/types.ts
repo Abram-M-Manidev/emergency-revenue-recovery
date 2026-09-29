@@ -418,3 +418,20 @@ export interface ConfigureNotificationsPayload {
   destination: string;
   is_enabled?: boolean;
 }
+
+/** Where calls may be handed to a person (Owner-only). */
+export interface CallTransferSettings {
+  business_hours_number: string | null;
+  after_hours_number: string | null;
+  transfer_emergencies: boolean;
+  is_enabled: boolean;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface ConfigureCallTransferPayload {
+  business_hours_number: string | null;
+  after_hours_number: string | null;
+  transfer_emergencies: boolean;
+  is_enabled: boolean;
+}

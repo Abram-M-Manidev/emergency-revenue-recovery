@@ -548,13 +548,24 @@ class AIBrainService:
         # `silence-timed-out`. Only an actual failed attempt gates it, so
         # emergency, FAQ, callback, escalation, and no-availability
         # completions are all untouched.
-        withhold_completion = reply.is_conversation_complete and reply.booking_failed_unrecovered
-        if reply.is_conversation_complete and not withhold_completion:
+        #
+        # Also withheld — unconditionally — when this turn's transfer to a
+        # person was accepted. Completion is what makes the voice transport
+        # emit `endCall`, and an `endCall` issued while the provider is moving
+        # the call would hang the caller up in the middle of their human exit.
+        # The call leaves the assistant through the transfer, not through a
+        # hang-up.
+        withhold_reason: str | None = None
+        if reply.transfer_initiated:
+            withhold_reason = "transfer_initiated"
+        elif reply.is_conversation_complete and reply.booking_failed_unrecovered:
+            withhold_reason = "booking_failed_unrecovered"
+        if reply.is_conversation_complete and withhold_reason is None:
             conversation = await self._conversations.complete(conversation_id)
-        elif withhold_completion:
+        elif withhold_reason is not None and reply.is_conversation_complete:
             logger.info(
                 "conversation_completion_withheld",
-                reason="booking_failed_unrecovered",
+                reason=withhold_reason,
                 conversation_id=str(conversation_id),
             )
 
@@ -572,7 +583,8 @@ class AIBrainService:
             conversation_complete=reply.is_conversation_complete,
             # What the model asserted vs. what we honoured — the two differ
             # only on a withheld turn, and an incident review needs both.
-            completion_withheld=withhold_completion,
+            completion_withheld=withhold_reason is not None and reply.is_conversation_complete,
+            transfer_initiated=reply.transfer_initiated,
         )
 
         return ConversationTurnResult(

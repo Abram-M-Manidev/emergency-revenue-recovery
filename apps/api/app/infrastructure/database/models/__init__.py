@@ -7,6 +7,10 @@ from app.infrastructure.database.models.business_hours import (
     WeeklyHoursModel,
 )
 from app.infrastructure.database.models.business_profile import BusinessProfileModel
+from app.infrastructure.database.models.call_transfer import (
+    CallTransferAttemptModel,
+    OrganizationCallTransferSettingsModel,
+)
 from app.infrastructure.database.models.conversation import ConversationModel
 from app.infrastructure.database.models.conversation_message import ConversationMessageModel
 from app.infrastructure.database.models.conversation_outcome import ConversationOutcomeModel
@@ -40,6 +44,7 @@ from app.infrastructure.database.models.voice_line import VoiceLineModel
 __all__ = [
     "AppointmentModel",
     "BusinessProfileModel",
+    "CallTransferAttemptModel",
     "ConversationMessageModel",
     "ConversationModel",
     "ConversationOutcomeModel",
@@ -51,6 +56,7 @@ __all__ = [
     "FAQEntryModel",
     "HoursExceptionModel",
     "OfferedSlotModel",
+    "OrganizationCallTransferSettingsModel",
     "OrganizationModel",
     "OrganizationNotificationSettingsModel",
     "PermissionModel",

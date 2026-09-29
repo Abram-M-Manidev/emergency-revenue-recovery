@@ -14,9 +14,14 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from app.api.deps import (
+    get_call_transfer_settings_service,
     get_notification_settings_service,
     get_organization_service,
     require_permission,
+)
+from app.application.schemas.call_transfer import (
+    CallTransferSettingsResponse,
+    ConfigureCallTransferRequest,
 )
 from app.application.schemas.notification_settings import (
     ConfigureNotificationsRequest,
@@ -24,10 +29,14 @@ from app.application.schemas.notification_settings import (
     SetNotificationsEnabledRequest,
 )
 from app.application.schemas.organization import OrganizationResponse, UpdateOrganizationRequest
+from app.application.services.call_transfer_settings_service import (
+    CallTransferSettingsService,
+)
 from app.application.services.notification_settings_service import (
     NotificationSettingsService,
 )
 from app.application.services.organization_service import OrganizationService
+from app.domain.call_transfer.settings import InvalidTransferNumberError
 from app.domain.entities.rbac import Permissions
 from app.domain.entities.user import User
 from app.domain.notifications.settings import InvalidNotificationDestinationError
@@ -160,4 +169,58 @@ async def delete_notification_settings(
     the caller's intent — "this organization should have no destination
     stored" — is satisfied either way."""
     await service.remove(user.organization_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# --- Human fallback (call transfer) configuration ------------------------------
+#
+# Same authority and the same tenant rule as notification settings above:
+# `organization:manage`, tenant taken only from the caller's own JWT.
+
+
+@router.get("/current/call-transfer", response_model=CallTransferSettingsResponse | None)
+async def get_call_transfer_settings(
+    user: User = Depends(_manage_user),
+    service: CallTransferSettingsService = Depends(get_call_transfer_settings_service),
+) -> CallTransferSettingsResponse | None:
+    """Where this organization's calls may be handed to a person, or null if
+    never set (in which case every transfer is reported unavailable and the
+    assistant offers a callback instead)."""
+    settings = await service.get(user.organization_id)
+    return CallTransferSettingsResponse.model_validate(settings) if settings else None
+
+
+@router.put("/current/call-transfer", response_model=CallTransferSettingsResponse)
+async def configure_call_transfer_settings(
+    payload: ConfigureCallTransferRequest,
+    user: User = Depends(_manage_user),
+    service: CallTransferSettingsService = Depends(get_call_transfer_settings_service),
+) -> CallTransferSettingsResponse:
+    """Sets the office (business hours) and on-call (after hours) numbers.
+    Refuses non-E.164 numbers and the business's own AI voice line, which
+    would loop the caller straight back into the assistant."""
+    try:
+        settings = await service.configure(
+            user.organization_id,
+            business_hours_number=payload.business_hours_number,
+            after_hours_number=payload.after_hours_number,
+            transfer_emergencies=payload.transfer_emergencies,
+            is_enabled=payload.is_enabled,
+        )
+    except InvalidTransferNumberError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+    return CallTransferSettingsResponse.model_validate(settings)
+
+
+@router.delete(
+    "/current/call-transfer", status_code=status.HTTP_204_NO_CONTENT, response_model=None
+)
+async def delete_call_transfer_settings(
+    user: User = Depends(_manage_user),
+    service: CallTransferSettingsService = Depends(get_call_transfer_settings_service),
+) -> Response:
+    """Removes human-transfer configuration. Idempotent."""
+    await service.delete(user.organization_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

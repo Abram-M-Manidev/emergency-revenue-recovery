@@ -50,6 +50,7 @@ from app.application.services.voice_service import (
     VoiceService,
     VoiceTextDelta,
 )
+from app.domain.call_transfer.port import current_call_control
 from app.domain.exceptions import (
     ConversationCompletedError,
     ConversationLimitExceededError,
@@ -133,8 +134,16 @@ async def vapi_chat_completions(
     # `turn_id` distinguishes the several requests Vapi can send for one
     # spoken utterance, which `vapi_call_id` alone cannot.
     bind_contextvars(vapi_call_id=payload.call.id, turn_id=uuid.uuid4().hex[:12])
+    # The live call's control handle, for the `transfer_to_human` tool. Set
+    # before the turn runs (the streaming producer task copies this context)
+    # and read only by that tool; None when the assistant has no
+    # monitorPlan.controlEnabled, which makes every transfer honestly
+    # "unavailable". Only presence is logged — the URL is a capability.
+    call_control = payload.call.monitor.controlUrl if payload.call.monitor else None
+    current_call_control.set(call_control)
     logger.info(
         "voice_request_received",
+        has_call_control=call_control is not None,
         streaming=payload.stream,
         message_count=len(payload.messages),
         has_customer_number=bool(payload.call.customer and payload.call.customer.number),

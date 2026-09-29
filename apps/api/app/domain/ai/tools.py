@@ -387,11 +387,54 @@ SELECT_APPOINTMENT_SLOT = ToolDefinition(
     },
 )
 
+TRANSFER_TO_HUMAN = ToolDefinition(
+    name="transfer_to_human",
+    description=(
+        "Hand this live call to a person at the business (the office during "
+        "business hours, the on-call line after hours). Call it when: the "
+        "caller asks for a person, a human, a manager, the office, or to stop "
+        "talking to a machine (reason caller_requested) — always honour this, "
+        "even before you have their details; the caller is clearly upset or "
+        "frustrated with you (caller_frustrated); or what they need is "
+        "something you cannot handle — pricing disputes, billing, complaints, "
+        "judgement calls, or you have failed to complete their request twice "
+        "(out_of_scope). Use emergency_policy only when the instructions say "
+        "this business transfers emergencies, and only AFTER "
+        "create_service_request has succeeded for the emergency. If the caller "
+        "changes their mind before you call this, do not call it. Before this "
+        "returns, do not tell the caller you are connecting them: whether a "
+        "transfer happened is decided by the result, and a success means the "
+        "caller has ALREADY been told they are being connected."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "reason": {
+                "type": "string",
+                "enum": [
+                    "caller_requested",
+                    "caller_frustrated",
+                    "out_of_scope",
+                    "emergency_policy",
+                ],
+                "description": "Why the call is being handed to a person.",
+            },
+            "is_emergency": {
+                "type": "boolean",
+                "description": "True when the caller has described an emergency on this call.",
+            },
+        },
+        "required": ["reason", "is_emergency"],
+        "additionalProperties": False,
+    },
+)
+
 VOICE_TOOLS: tuple[ToolDefinition, ...] = (
     CREATE_SERVICE_REQUEST,
     CHECK_AVAILABILITY,
     SELECT_APPOINTMENT_SLOT,
     BOOK_APPOINTMENT,
+    TRANSFER_TO_HUMAN,
 )
 """The tool set offered on conversations that can transact. Ordered the way
 the flow runs, so the listing itself hints at the sequence."""

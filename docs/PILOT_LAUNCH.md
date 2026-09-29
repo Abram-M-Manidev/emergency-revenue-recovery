@@ -60,6 +60,7 @@ On the assistant that will serve the pilot business:
 | Model → Custom LLM → headers | `x-vapi-secret: <VAPI_SERVER_SECRET>` (stored as `assistant.model.headers`) | **Required for every turn.** Not set by the Server URL Secret below — without it every call fails with `custom-llm-401-unauthorized` |
 | Server URL Secret | the same value as `VAPI_SERVER_SECRET` (stored as `assistant.server.headers` / `server.credentialId`) | Authenticates lifecycle events **only** |
 | End call message (`endCallMessage`) | **empty** | Spoken before every hangup regardless of outcome; a fixed sentence like "your appointment is booked" becomes a false statement to emergency callers |
+| Monitor plan → **control enabled** (`monitorPlan.controlEnabled = true`) | **on** | Human transfer. With it, Vapi includes `call.monitor.controlUrl` in each Custom-LLM request, and ERRS moves the call to a person by POSTing a `transfer` command to that URL. Without it every transfer is reported *unavailable* (the caller is offered a callback instead). **Do not** add Vapi's own `transferCall` tool or static transfer destinations — ERRS chooses the number per tenant from its own settings |
 | First message | the business's greeting | Spoken before the first model turn; ESSR does not supply it |
 | End call function | **enabled** | The API emits an `endCall` tool call when a turn should hang up (completion gate, or a disabled assistant) |
 
@@ -210,6 +211,20 @@ Then confirm the API agrees (this is the read path a call actually uses):
 ```
 GET /api/v1/voice/line      # as that org's Owner — must return the row
 ```
+
+### 5b. Human transfer — UI (Settings → Human transfer) or API
+
+```
+PUT /api/v1/organizations/current/call-transfer
+  { business_hours_number, after_hours_number, transfer_emergencies, is_enabled }
+```
+
+The office number (used during business hours) and the on-call number
+(after hours), in full international form. The API refuses a number that is
+not E.164 and refuses the business's **own AI voice line** (that would send
+the caller straight back to the assistant). Without this, a caller who asks
+for a person is told honestly that nobody can be connected right now and is
+offered a callback. See `docs/RUNBOOK.md` → **Human transfer** for the rules.
 
 ### 6. Confirm the kill switch is on
 

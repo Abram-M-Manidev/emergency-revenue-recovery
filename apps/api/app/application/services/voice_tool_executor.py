@@ -40,6 +40,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import structlog
 
 from app.application.services.appointment_service import AppointmentService
+from app.application.services.call_transfer_service import CallTransferService
 from app.application.services.customer_service import CustomerService
 from app.application.services.dispatch_service import DispatchService
 from app.application.services.emergency_notification_service import (
@@ -51,12 +52,15 @@ from app.domain.ai.tools import (
     CHECK_AVAILABILITY,
     CREATE_SERVICE_REQUEST,
     SELECT_APPOINTMENT_SLOT,
+    TRANSFER_TO_HUMAN,
     ToolErrors,
     ToolExecutor,
     ToolExecutorFactory,
     ToolInvocation,
     ToolResult,
 )
+from app.domain.call_transfer.attempt import TransferFailure, TransferReason, TransferStatus
+from app.domain.call_transfer.port import current_call_control
 from app.domain.entities.appointment import Appointment
 from app.domain.entities.availability import AvailabilityQuery, AvailabilitySlot
 from app.domain.entities.conversation_outcome import (
@@ -137,6 +141,10 @@ class VoiceToolExecutor(ToolExecutorFactory):
         # decide whether a date needs its year read out. Injectable so tests
         # that pin the availability engine's clock pin this one too.
         clock: Callable[[], datetime] | None = None,
+        # Human fallback. Optional so every existing construction site keeps
+        # working; absent, `transfer_to_human` reports "unavailable" and the
+        # assistant offers a callback instead — never a pretend transfer.
+        call_transfer_service: CallTransferService | None = None,
     ) -> None:
         self._appointments = appointment_service
         self._dispatch = dispatch_service
@@ -150,6 +158,7 @@ class VoiceToolExecutor(ToolExecutorFactory):
         self._conversations = conversation_repository
         self._savepoints = savepoints or NullSavepoints()
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._call_transfers = call_transfer_service
 
     def bind(
         self,
@@ -162,9 +171,40 @@ class VoiceToolExecutor(ToolExecutorFactory):
     async def describe_progress(
         self, organization_id: uuid.UUID, conversation_id: uuid.UUID
     ) -> str | None:
-        """See `ToolExecutorFactory.describe_progress`. Reads the records
-        this call has already produced and states them as instructions, so
-        the model resumes rather than restarts."""
+        """See `ToolExecutorFactory.describe_progress`. The business records
+        of this call, plus — when relevant — where its human fallback stands
+        (already transferred; or this business's policy of handing recorded
+        emergencies to a person)."""
+        records = await self._describe_records(organization_id, conversation_id)
+        if self._call_transfers is None:
+            return records
+        # Isolated on its own: the transfer note is an addition, and a failure
+        # reading it must never cost the model the emergency/booking facts
+        # above — which it would, if it failed the enclosing lookup.
+        try:
+            async with self._savepoints.isolate():
+                ticket = await self._dispatch.get_ticket_for_conversation(
+                    organization_id, conversation_id
+                )
+                note = await self._call_transfers.progress_note(
+                    organization_id=organization_id,
+                    conversation_id=conversation_id,
+                    has_emergency_ticket=ticket is not None,
+                )
+        except Exception:
+            logger.warning("call_transfer_progress_lookup_failed", exc_info=True)
+            note = None
+        if note is None:
+            return records
+        if records is None:
+            return "Progress on this call (from the business's records):\n" + note
+        return records + "\n" + note
+
+    async def _describe_records(
+        self, organization_id: uuid.UUID, conversation_id: uuid.UUID
+    ) -> str | None:
+        """Reads the records this call has already produced and states them
+        as instructions, so the model resumes rather than restarts."""
         ticket = await self._dispatch.get_ticket_for_conversation(
             organization_id, conversation_id
         )
@@ -773,6 +813,41 @@ class VoiceToolExecutor(ToolExecutorFactory):
             ),
         }
 
+    async def _transfer_to_human(
+        self,
+        organization_id: uuid.UUID,
+        conversation_id: uuid.UUID,
+        arguments: dict[str, Any],
+        _turn_index: int,
+    ) -> dict[str, Any]:
+        """Hand the live call to a person — see `CallTransferService`.
+
+        The live call's control handle comes from the voice transport for this
+        turn (`current_call_control`), never from the model's arguments: the
+        model chooses only *why*, never *where* or *which call*."""
+        try:
+            reason = TransferReason(arguments.get("reason"))
+        except ValueError:
+            return {"success": False, "error": ToolErrors.INVALID_ARGUMENTS}
+        is_emergency = bool(arguments.get("is_emergency"))
+        if self._call_transfers is None:
+            return {
+                "success": False,
+                "error": TransferFailure.NOT_CONFIGURED,
+                "transfer_status": TransferStatus.UNAVAILABLE.value,
+                "next_step": (
+                    "No transfer happened. Tell the caller honestly that you can't connect them "
+                    "to a person right now, and offer to take their details for a callback."
+                ),
+            }
+        return await self._call_transfers.transfer(
+            organization_id=organization_id,
+            conversation_id=conversation_id,
+            reason=reason,
+            is_emergency=is_emergency,
+            call_control=current_call_control.get(),
+        )
+
     async def _book_appointment(
         self,
         organization_id: uuid.UUID,
@@ -1209,6 +1284,7 @@ class _BoundToolExecutor(ToolExecutor):
         CHECK_AVAILABILITY.name: "_check_availability",
         SELECT_APPOINTMENT_SLOT.name: "_select_appointment_slot",
         BOOK_APPOINTMENT.name: "_book_appointment",
+        TRANSFER_TO_HUMAN.name: "_transfer_to_human",
     }
 
     def __init__(

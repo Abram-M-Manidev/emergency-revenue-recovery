@@ -234,6 +234,14 @@ request is logged but that it could not confirm anyone was alerted.** That is
 correct behaviour, not a bug — but it is also not what a pilot wants, so
 treat this step as part of onboarding rather than optional.
 
+### 7b. Configure each business's human transfer
+
+Owner → **Settings → Human transfer**: the office number (business hours) and
+the on-call number (after hours). And on the Vapi assistant, turn on
+`monitorPlan.controlEnabled` (`docs/PILOT_LAUNCH.md` §B) — without it no
+transfer can be performed and callers are offered a callback instead. Test
+it with the fire-drill in `docs/RUNBOOK.md` → **Human transfer**.
+
 ### 8. Turn on external monitoring
 
 **Not optional for a phone line that takes emergency calls.** Every check in

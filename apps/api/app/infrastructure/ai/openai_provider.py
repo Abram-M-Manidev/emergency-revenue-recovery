@@ -32,7 +32,7 @@ from app.domain.ai.provider import (
     AITextDelta,
     AIToolPhase,
 )
-from app.domain.ai.tools import BOOK_APPOINTMENT, ToolErrors, ToolInvocation
+from app.domain.ai.tools import BOOK_APPOINTMENT, TRANSFER_TO_HUMAN, ToolErrors, ToolInvocation
 from app.domain.entities.conversation_outcome import CallClassification, RecommendedAction
 from app.domain.exceptions import AIProviderUnavailableError
 from app.infrastructure.ai.streaming_json import StreamingStringFieldExtractor
@@ -164,6 +164,7 @@ class OpenAIProvider(AIProvider):
         messages = self._messages_for(request)
         max_rounds = self._tool_rounds_for(request)
         booking_failed_unrecovered = False
+        transfer_initiated = False
 
         # `extra_body` carries `reasoning_effort` rather than the SDK's own
         # parameter: openai==1.59.6 predates GPT-5 and types that parameter
@@ -207,6 +208,7 @@ class OpenAIProvider(AIProvider):
                 booking_failed_unrecovered = _updated_booking_state(
                     booking_failed_unrecovered, outcome
                 )
+                transfer_initiated = transfer_initiated or outcome.transfer_initiated
                 continue
 
             if message.content is None:
@@ -219,6 +221,7 @@ class OpenAIProvider(AIProvider):
             return replace(
                 _assemble_reply(message.content),
                 booking_failed_unrecovered=booking_failed_unrecovered,
+                transfer_initiated=transfer_initiated,
             )
 
         raise AIProviderUnavailableError(_TOOL_ROUNDS_EXHAUSTED)
@@ -258,6 +261,9 @@ class OpenAIProvider(AIProvider):
         # the same turn succeeds. Attached to the reply so `AIBrainService`
         # can withhold completion for this turn only.
         booking_failed_unrecovered = False
+        # Turn-scoped like the booking flag: once a transfer is accepted the
+        # call is moving, whatever later rounds say.
+        transfer_initiated = False
         logger.info(
             "ai_stream_started",
             model=config.model,
@@ -406,6 +412,7 @@ class OpenAIProvider(AIProvider):
                     booking_failed_unrecovered = _updated_booking_state(
                         booking_failed_unrecovered, outcome
                     )
+                    transfer_initiated = transfer_initiated or outcome.transfer_initiated
                     continue
 
                 content = "".join(raw)
@@ -420,6 +427,7 @@ class OpenAIProvider(AIProvider):
                 reply = replace(
                     _assemble_reply(content),
                     booking_failed_unrecovered=booking_failed_unrecovered,
+                    transfer_initiated=transfer_initiated,
                 )
                 if held_content:
                     # No further tool round followed, so the failure this
@@ -544,6 +552,7 @@ class OpenAIProvider(AIProvider):
         any_failed = False
         booking_failed = False
         booking_succeeded = False
+        transfer_initiated = False
         for call in calls:
             invocation = _decode_invocation(call)
             if invocation is None:
@@ -574,12 +583,15 @@ class OpenAIProvider(AIProvider):
                     booking_succeeded = True
                 else:
                     booking_failed = True
+            if invocation.name == TRANSFER_TO_HUMAN.name and succeeded:
+                transfer_initiated = True
             messages.append(_tool_result_message(result.id, result.content))
         return _ToolRoundOutcome(
             messages=messages,
             any_failed=any_failed,
             booking_failed=booking_failed,
             booking_succeeded=booking_succeeded,
+            transfer_initiated=transfer_initiated,
         )
 
 
@@ -597,6 +609,8 @@ class _ToolRoundOutcome:
     any_failed: bool
     booking_failed: bool
     booking_succeeded: bool
+    # A `transfer_to_human` in this round was accepted by the provider.
+    transfer_initiated: bool = False
 
 
 @dataclass

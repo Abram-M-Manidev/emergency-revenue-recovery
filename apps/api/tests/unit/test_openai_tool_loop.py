@@ -34,6 +34,7 @@ from app.domain.ai.provider import (
 from app.domain.ai.tools import (
     CHECK_AVAILABILITY,
     CREATE_SERVICE_REQUEST,
+    TRANSFER_TO_HUMAN,
     ToolErrors,
     ToolExecutor,
     ToolInvocation,
@@ -902,3 +903,73 @@ async def test_the_non_streaming_path_also_bounds_its_rounds(
         await provider.generate_reply(_request(executor))
 
     assert len(executor.invocations) == 2
+
+
+# --- Human transfer: the provider flag the completion gate relies on --------
+
+
+_TRANSFER_ROUND = [
+    _chunk(tool_calls=[_tool_call_delta(0, call_id="call_t1", name="transfer_to_human")]),
+    _chunk(tool_calls=[_tool_call_delta(0, arguments='{"reason": "caller_requested", "is_emergency": false}')]),
+]
+_EMPTY_AFTER_TRANSFER_DOC = json.dumps(
+    {
+        "message_to_customer": "",
+        "classification": "non_emergency",
+        "confidence": 0.9,
+        "recommended_action": "escalate_to_human",
+        "matched_service_name": None,
+        "customer_name": None,
+        "customer_phone": None,
+        "customer_address": None,
+        # The model may well claim completion; the gate, not the model, decides.
+        "is_conversation_complete": True,
+        "summary": "Caller asked for a person; transferred.",
+    }
+)
+
+
+def _transfer_request(executor: ToolExecutor) -> AIRequest:
+    return AIRequest(
+        system_prompt="You are the after-hours assistant.",
+        history=(),
+        latest_customer_message="Can I just talk to a real person?",
+        profile=AIModelProfile.REALTIME,
+        tools=(TRANSFER_TO_HUMAN,),
+        tool_executor=executor,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [True, False])
+async def test_an_accepted_transfer_marks_the_reply_transfer_initiated(monkeypatch, streamed):
+    provider, _ = _provider([_TRANSFER_ROUND, [_chunk(content=_EMPTY_AFTER_TRANSFER_DOC)]], monkeypatch)
+    executor = _RecordingExecutor({"success": True, "transfer_status": "initiated"})
+    if streamed:
+        deltas, phases, reply = await _drain(provider, _transfer_request(executor))
+        assert phases and phases[0].tool_names == ("transfer_to_human",)
+        assert "".join(deltas) == ""  # nothing spoken over the provider's handoff
+    else:
+        reply = await provider.generate_reply(_transfer_request(executor))
+    assert [i.name for i in executor.invocations] == ["transfer_to_human"]
+    assert reply is not None and reply.transfer_initiated is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streamed", [True, False])
+async def test_a_refused_transfer_never_marks_the_reply(monkeypatch, streamed):
+    provider, _ = _provider([_TRANSFER_ROUND, [_chunk(content=_EMPTY_AFTER_TRANSFER_DOC)]], monkeypatch)
+    executor = _RecordingExecutor({"success": False, "error": "TRANSFER_NOT_CONFIGURED"})
+    if streamed:
+        _, _, reply = await _drain(provider, _transfer_request(executor))
+    else:
+        reply = await provider.generate_reply(_transfer_request(executor))
+    assert reply is not None and reply.transfer_initiated is False
+
+
+@pytest.mark.asyncio
+async def test_the_model_cannot_claim_a_transfer_without_the_tool(monkeypatch):
+    # A reply that merely SAYS it is transferring, with no tool call, is not a transfer.
+    provider, _ = _provider([[_chunk(content=_EMPTY_AFTER_TRANSFER_DOC)]], monkeypatch)
+    _, _, reply = await _drain(provider, _transfer_request(_RecordingExecutor()))
+    assert reply is not None and reply.transfer_initiated is False

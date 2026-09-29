@@ -15,6 +15,10 @@ from app.application.services.analytics_service import AnalyticsService
 from app.application.services.appointment_service import AppointmentService
 from app.application.services.auth_service import AuthService
 from app.application.services.business_knowledge_service import BusinessKnowledgeService
+from app.application.services.call_transfer_service import CallTransferService
+from app.application.services.call_transfer_settings_service import (
+    CallTransferSettingsService,
+)
 from app.application.services.customer_service import CustomerService
 from app.application.services.dispatch_service import DispatchService
 from app.application.services.emergency_notification_service import (
@@ -64,6 +68,10 @@ from app.infrastructure.database.repositories import (
     SqlAlchemyVoiceCallRepository,
     SqlAlchemyVoiceLineRepository,
 )
+from app.infrastructure.database.repositories.call_transfer_repository_impl import (
+    SqlAlchemyCallTransferAttemptRepository,
+    SqlAlchemyCallTransferSettingsRepository,
+)
 from app.infrastructure.database.session import get_db
 from app.infrastructure.database.transactions import SessionAfterCommit, SqlAlchemySavepoints
 from app.infrastructure.notifications.outbox import EmergencyAlertOutbox
@@ -76,6 +84,7 @@ from app.infrastructure.scheduling.database_availability_provider import (
 )
 from app.infrastructure.security.jwt import decode_access_token
 from app.infrastructure.security.vapi_secret import is_valid_vapi_secret
+from app.infrastructure.telephony.vapi_call_control import VapiCallControlTransfer
 
 _bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -264,6 +273,30 @@ def get_voice_tool_executor(
         # One savepoint per tool: a failed tool must not take down what the
         # turn's earlier tools already did.
         savepoints=SqlAlchemySavepoints(db),
+        # Human fallback: the `transfer_to_human` tool.
+        call_transfer_service=get_call_transfer_service(db),
+    )
+
+
+def get_call_transfer_service(db: AsyncSession) -> CallTransferService:
+    """Built from the request's session so the transfer attempt is written in
+    the same transaction (and tool savepoint) as the rest of the turn."""
+    return CallTransferService(
+        settings_repository=SqlAlchemyCallTransferSettingsRepository(db),
+        attempt_repository=SqlAlchemyCallTransferAttemptRepository(db),
+        business_profile_repository=SqlAlchemyBusinessProfileRepository(db),
+        business_hours_repository=SqlAlchemyBusinessHoursRepository(db),
+        voice_line_repository=SqlAlchemyVoiceLineRepository(db),
+        emergency_ticket_repository=SqlAlchemyEmergencyTicketRepository(db),
+        transfer_port=VapiCallControlTransfer(),
+    )
+
+
+def get_call_transfer_settings_service(
+    db: AsyncSession = Depends(get_db),
+) -> CallTransferSettingsService:
+    return CallTransferSettingsService(
+        SqlAlchemyCallTransferSettingsRepository(db), SqlAlchemyVoiceLineRepository(db)
     )
 
 
