@@ -12,7 +12,7 @@ import httpx
 import pytest
 from openai import APIConnectionError, APIStatusError, APITimeoutError
 
-from app.core.config import get_settings
+from app.core.config import Settings, get_settings
 from app.domain.ai.provider import (
     AIModelProfile,
     AIReplyComplete,
@@ -174,8 +174,32 @@ async def test_quality_profile_sends_configured_model_and_reasoning_effort(
 
     assert kwargs["model"] == settings.OPENAI_MODEL
     assert kwargs["extra_body"] == {"reasoning_effort": settings.OPENAI_REASONING_EFFORT}
-    assert settings.OPENAI_MODEL == "gpt-5"
-    assert settings.OPENAI_REASONING_EFFORT == "low"
+    assert settings.OPENAI_MODEL == "gpt-5.6-sol"
+    assert settings.OPENAI_REASONING_EFFORT == "none"
+
+
+@pytest.mark.asyncio
+async def test_quality_reasoning_effort_none_is_sent_not_omitted(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """gpt-5.6-sol with function tools on /v1/chat/completions accepts only
+    reasoning_effort="none". Omitting the parameter means the model default
+    (medium), which the API rejects with the same 400 as "low" — so the
+    string "none" must reach the wire, and must never be confused with the
+    unset (None) case that the REALTIME profile relies on."""
+    kwargs = await _capture_request_kwargs(AIModelProfile.QUALITY, monkeypatch)
+
+    assert kwargs["extra_body"] == {"reasoning_effort": "none"}
+    assert kwargs["extra_body"] is not None
+
+
+def test_reasoning_effort_none_string_survives_settings_parsing(monkeypatch: pytest.MonkeyPatch):
+    """The .env empty-value normaliser turns `FOO=` into None (omit). It
+    must not also swallow the literal string "none" (send)."""
+    monkeypatch.setenv("OPENAI_REASONING_EFFORT", "none")
+    assert Settings().OPENAI_REASONING_EFFORT == "none"
+    monkeypatch.setenv("OPENAI_REASONING_EFFORT", "")
+    assert Settings().OPENAI_REASONING_EFFORT is None
 
 
 @pytest.mark.asyncio

@@ -22,8 +22,8 @@ class AIModelProfile(str, Enum):
     """Which trade-off the caller of this provider needs, expressed as
     intent rather than as a model name.
 
-    The domain deliberately does not know that "quality" means gpt-5 or
-    that "realtime" means gpt-4.1-mini — that mapping is configuration,
+    The domain deliberately does not know that "quality" means gpt-5.6-sol
+    or that "realtime" means gpt-4.1-mini — that mapping is configuration,
     owned by the infrastructure layer (`OpenAIProvider`), exactly like the
     SDK and request shapes already are. Adding a provider or renaming a
     model must never require a change here."""

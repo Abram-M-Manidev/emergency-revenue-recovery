@@ -168,10 +168,11 @@ class OpenAIProvider(AIProvider):
         # `extra_body` carries `reasoning_effort` rather than the SDK's own
         # parameter: openai==1.59.6 predates GPT-5 and types that parameter
         # as Literal["low", "medium", "high"], which would reject the valid
-        # "minimal" value. `extra_body` is merged into the request JSON
-        # verbatim, so the wire format is identical either way. Omitted
+        # "minimal"/"none" values. `extra_body` is merged into the request
+        # JSON verbatim, so the wire format is identical either way. Omitted
         # entirely when unset, because sending it to a non-reasoning model
-        # (gpt-4.1-mini) is a 400.
+        # (gpt-4.1-mini) is a 400. The string "none" is NOT unset: it is sent,
+        # and gpt-5.6-sol requires exactly that whenever tools are offered.
         for round_index in range(max_rounds + 1):
             allow_tools = request.tools_enabled and round_index < max_rounds
             with _translated_api_errors():

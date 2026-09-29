@@ -21,7 +21,12 @@ Environment = Literal["development", "testing", "production"]
 # call. Note the installed SDK (1.59.6) predates `"minimal"` and still types
 # its own parameter as Literal["low", "medium", "high"] — see
 # `openai_provider.py` for why the value is sent via `extra_body`.
-ReasoningEffort = Literal["minimal", "low", "medium", "high"]
+#
+# "none" (the string) is not the same as leaving the setting unset (None):
+# None omits the parameter entirely, which a GPT-5.6 model reads as its
+# default effort (medium); "none" is sent explicitly and turns reasoning off.
+# gpt-5.6-sol accepts none/low/medium/high/xhigh/max but NOT "minimal".
+ReasoningEffort = Literal["none", "minimal", "low", "medium", "high"]
 
 # Which outbound notification adapter backs emergency alerting.
 # "none" is the default and reports NOT_CONFIGURED, so a deployment that
@@ -85,8 +90,20 @@ class Settings(BaseSettings):
     # prompt: gpt-5 default effort 19.8-23.3s, gpt-5 low 8.6s,
     # gpt-4.1-mini 3.3s — all four reached the same
     # emergency/create_emergency_ticket outcome.
-    OPENAI_MODEL: str = "gpt-5"
-    OPENAI_REASONING_EFFORT: ReasoningEffort | None = "low"
+    #
+    # QUALITY moved from gpt-5 to gpt-5.6-sol on 2026-09-29: OpenAI shuts
+    # gpt-5 (gpt-5-2025-08-07) down on 2026-12-11 and names gpt-5.6-sol as
+    # the replacement. Effort is "none", not the previous "low", and that is
+    # forced rather than chosen: on /v1/chat/completions gpt-5.6-sol rejects
+    # function tools with any reasoning_effort other than "none" (HTTP 400,
+    # "use /v1/responses or set reasoning_effort to 'none'"), and omitting
+    # the parameter means medium — also a 400. Both profiles offer tools, so
+    # anything but "none" would fail every dashboard turn. Measured on the
+    # same schema+tools emergency request: gpt-5 low 8.6-11.2s with ~384
+    # reasoning tokens; gpt-5.6-sol none 1.7-2.3s, 0 reasoning tokens, the
+    # same valid create_service_request call.
+    OPENAI_MODEL: str = "gpt-5.6-sol"
+    OPENAI_REASONING_EFFORT: ReasoningEffort | None = "none"
     OPENAI_REALTIME_MODEL: str = "gpt-4.1-mini"
     # gpt-4.1-mini is not a reasoning model; sending the parameter to one
     # that doesn't support it is a 400, so this stays unset by default.
