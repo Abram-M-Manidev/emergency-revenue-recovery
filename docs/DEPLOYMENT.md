@@ -234,6 +234,33 @@ request is logged but that it could not confirm anyone was alerted.** That is
 correct behaviour, not a bug — but it is also not what a pilot wants, so
 treat this step as part of onboarding rather than optional.
 
+### 8. Turn on external monitoring
+
+**Not optional for a phone line that takes emergency calls.** Every check in
+step 5 runs on this VM, so none of them can report the VM itself dying. On an
+external monitoring service (your account, not configured by this repo):
+
+1. **Uptime monitor:** HTTPS GET `https://YOUR_DOMAIN/api/v1/health/ready`,
+   expect **200**, 10 s timeout, every 1 minute, alert after 2–3 consecutive
+   failures, TLS-expiry warning on.
+2. **Backup heartbeat (dead-man's switch):** a heartbeat check with a
+   **1-day** period and **4-hour** grace. Put its ping URL in the root `.env`
+   as `BACKUP_HEARTBEAT_URL`, then:
+
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d backup
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec backup errs-offsite run-once
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml logs --since 10m backup | grep backup_heartbeat_sent
+   ```
+
+   The backup service pings it only after a backup that was uploaded to B2
+   **and verified**; any failure, a stopped container, or a dead VM sends
+   nothing, and the monitor alerts.
+
+Send both alerts to a channel that works when this VM is gone (phone/SMS or
+mobile push). Full settings, rationale and an alert fire-drill:
+`docs/RUNBOOK.md` → **External monitoring**.
+
 ---
 
 ## Deploying a new version

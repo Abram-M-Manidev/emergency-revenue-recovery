@@ -77,6 +77,93 @@ immediately — the notification destination in particular is a credential.
 
 ---
 
+## External monitoring (required before going live)
+
+Everything in "Is ESSR healthy?" above runs **on the VM**. The container
+healthchecks, `essr ps`, the logs, and the backup service's own `unhealthy`
+status all stop existing at the exact moment the host dies, loses its
+network, or is deleted — so none of them can ever tell you that happened.
+Two checks must therefore run **somewhere else**: on an external monitoring
+service, with alerts to a channel that does not depend on this VM (phone/SMS
+or a mobile push app — an emergency line going dark is an emergency).
+
+Neither is configured by this repository. The operator creates both on a
+monitoring service of their choice (uptime monitors and cron/heartbeat
+monitors are offered by services such as Healthchecks.io, Better Stack,
+UptimeRobot or Cronitor), and only the heartbeat URL is ever put on the host.
+
+### 1. Uptime monitor — is the service answering?
+
+| Setting | Value |
+|---|---|
+| Check | **HTTPS GET** `https://YOUR_DOMAIN/api/v1/health/ready` |
+| Success | HTTP **200** (optionally also: body contains `"ready"`) — anything else, including a redirect, timeout or TLS error, is a failure |
+| Timeout | 10 seconds |
+| Frequency | every 1 minute (5 minutes if the plan does not allow 1) |
+| Alert when | **2–3 consecutive failures** — a deploy restarts the API for a few seconds (`docs/DEPLOYMENT.md`), and one missed check should not page anyone |
+| Also enable | TLS certificate expiry warning (≥ 14 days), if the service offers it |
+| Request | no auth header, no body — the endpoint is public and read-only |
+
+Why `/health/ready` and not `/health`: `/ready` runs `SELECT 1`, so a 200
+proves the whole path a customer uses — DNS → TLS → Caddy → API → PostgreSQL.
+`/health` only proves the Python process is alive. What it does **not**
+prove: that Vapi can reach the voice endpoints, or that OpenAI is answering.
+Those show up in logs and in the go-live smoke test (`docs/PILOT_LAUNCH.md`),
+not in any health endpoint.
+
+### 2. Backup heartbeat — did last night's backup reach B2?
+
+A **dead-man's switch**: a monitor that alerts when it *stops* hearing from
+something. The backup service pings it; silence is the alarm.
+
+**How ERRS uses it** (already implemented in `docker/backup/errs_offsite.py`):
+
+- Set `BACKUP_HEARTBEAT_URL` in the root `.env` on the host to the check's
+  ping URL, then `essr up -d backup`.
+- After each backup cycle **succeeds** — a new dump was taken, uploaded to
+  B2, read back, and its sha256 and Object Lock verified — the service sends
+  one `GET` to that URL (15 s timeout) and logs `backup_heartbeat_sent`.
+- A cycle that fails anywhere (dump, upload, verification) sends **nothing**.
+  The same is true if the container is stopped, crash-looping, or the whole
+  VM is gone — which is precisely what the switch detects.
+- If the monitoring service itself is unreachable, the backup still counts;
+  `backup_heartbeat_failed` is logged and the next success pings again.
+- The URL is treated as a secret (anyone holding it can mark your backups
+  healthy): it is redacted from every log line and never written to the
+  status files. Keep it only in the host's `.env`.
+
+**Monitor settings:**
+
+| Setting | Value |
+|---|---|
+| Type | heartbeat / cron / dead-man's-switch check, accepting a plain `GET` |
+| Expected period | **1 day** (= `BACKUP_INTERVAL_SECONDS`, default 86400) |
+| Grace | **4 hours** — covers a slow dump plus the hourly retries after a failed upload (`BACKUP_RETRY_SECONDS`), and matches the container going `unhealthy` at interval + 3 h |
+| Alert when | no ping within period + grace |
+
+If you change `BACKUP_INTERVAL_SECONDS`, change the monitor's period to match.
+The schedule is relative to container start, so a restart simply sends the
+next ping early — harmless.
+
+### Verifying both
+
+```bash
+# Uptime: from any machine that is NOT the VM
+curl -sS -o /dev/null -w '%{http_code}\n' https://YOUR_DOMAIN/api/v1/health/ready   # 200
+
+# Heartbeat: force a cycle and confirm it pinged (exit 0 = verified off-site)
+essr exec backup errs-offsite run-once
+essr logs --since 10m backup | grep -E 'backup_cycle_succeeded|backup_heartbeat_(sent|failed)'
+```
+
+Then check the monitoring service shows the ping. Finally **prove the alerts
+reach a human** once: pause the uptime check's target (e.g. `essr stop caddy`
+for 3–4 minutes during a quiet hour, then `essr start caddy`) and confirm the
+page arrived. For the heartbeat, temporarily set a short period on the check
+and let it lapse.
+
+---
+
 ## Emergency alerts: checking what actually reached a human
 
 The single most important operational question in this system. A ticket
@@ -172,7 +259,7 @@ then every `BACKUP_INTERVAL_SECONDS` (default **nightly**). Each cycle:
 | Local retention | 7 days on the `postgres_backups` volume, for fast restores; never deleted before its off-site copy is verified |
 | Deletion by the app | **Never.** The uploader issues no delete calls (tested); expiry is Object Lock + lifecycle only |
 | Concurrency | One cycle at a time (`flock`); a second run exits `75` and touches nothing |
-| Failure signal | Container health (`essr ps` shows `unhealthy` once the newest verified off-site copy is older than interval + 3h), structured logs, and optional `BACKUP_HEARTBEAT_URL` dead-man's switch |
+| Failure signal | Container health (`essr ps` shows `unhealthy` once the newest verified off-site copy is older than interval + 3h), structured logs, and the `BACKUP_HEARTBEAT_URL` dead-man's switch — the only one that still alerts when the whole VM is gone (see **External monitoring**) |
 
 ### One-time Backblaze B2 setup
 
@@ -457,10 +544,12 @@ Stated so nobody discovers it during an incident:
 
 - **Backups are daily, not continuous.** A restore loses up to a day of
   writes (no WAL archiving / point-in-time recovery).
-- **No alerting.** Nothing pages you when the API goes down, a migration
-  fails, or emergency notifications start failing. You find out by looking.
-  Checking the `emergency_notification_attempted` query above daily is the
-  minimum viable substitute during a pilot.
+- **Alerting is external and only as good as its setup.** API-down and
+  missed-backup alerts exist only once the two monitors in **External
+  monitoring** are configured. Nothing pages you when a migration fails or
+  when emergency notifications start failing for one tenant; checking the
+  `emergency_notification_attempted` query above daily is the minimum viable
+  substitute during a pilot.
 - **No zero-downtime deploys.** A deploy drops in-flight calls for a few
   seconds.
 - **Rate limits are per worker**, so the effective ceiling is roughly 4× the
