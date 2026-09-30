@@ -35,6 +35,13 @@ ReasoningEffort = Literal["none", "minimal", "low", "medium", "high"]
 # refused in production (see `_validate_production_safety`).
 NotificationProvider = Literal["none", "logging", "webhook"]
 
+# Which adapter sends emergency pages (SMS / automated voice) to the on-call
+# recipient. "none" is the default and reports every page as not configured,
+# so nothing ever claims a technician was paged. "logging" reports acceptance
+# while paging nobody and is refused in production. "twilio" sends for real
+# and needs the TWILIO_* settings below.
+PagingProviderName = Literal["none", "logging", "twilio"]
+
 # The literal placeholder shipped in `.env.example` — if this is still the
 # configured value in production, the secret was never actually generated.
 _PLACEHOLDER_JWT_SECRET_KEY = "changeme-generate-a-real-64-byte-secret-for-local-dev"
@@ -108,10 +115,11 @@ class Settings(BaseSettings):
     # gpt-4.1-mini is not a reasoning model; sending the parameter to one
     # that doesn't support it is a 400, so this stays unset by default.
     OPENAI_REALTIME_REASONING_EFFORT: ReasoningEffort | None = None
-    # VAPI_API_KEY/TWILIO_*: unused by application code as of Milestone 4.
-    # Provisioning (creating the Vapi assistant, importing the Twilio
-    # number) is an ops-side step done outside this app — these remain
-    # placeholders for whoever does that manually. VAPI_SERVER_SECRET is
+    # VAPI_API_KEY: unused by application code. Provisioning (creating the
+    # Vapi assistant, importing the Twilio number) is an ops-side step done
+    # outside this app. TWILIO_*: read only by emergency paging, and only
+    # when PAGING_PROVIDER=twilio (TWILIO_PHONE_NUMBER is the sender of every
+    # page SMS and call). VAPI_SERVER_SECRET is
     # the one Vapi-related setting the backend actually reads: it verifies
     # inbound webhook requests really came from our Vapi account (see
     # `app/api/deps.py`'s `verify_vapi_secret`).
@@ -148,6 +156,30 @@ class Settings(BaseSettings):
     # this — it runs the moment the ticket's transaction commits. Set to 0 to
     # disable the poller (tests do; they drive the outbox directly).
     NOTIFICATION_OUTBOX_POLL_SECONDS: float = 10.0
+
+    # --- Emergency paging (on-call SMS / voice, acknowledgement, escalation) ---
+    # Who is paged, on which channels, and how long they have to acknowledge
+    # are per tenant (Settings -> Emergency paging). These are the process-
+    # wide mechanics. Paging is driven by the same outbox poller cadence as
+    # alerts (NOTIFICATION_OUTBOX_POLL_SECONDS).
+    PAGING_PROVIDER: PagingProviderName = "none"
+    # One provider request (send an SMS / place a call). Not inside a voice
+    # turn — pages are sent after the ticket's transaction commits — so this
+    # can be longer than NOTIFICATION_TIMEOUT_SECONDS.
+    PAGING_SEND_TIMEOUT_SECONDS: float = 10.0
+    # Attempts per notification (one recipient on one channel). A rejected
+    # page (invalid number, bad credentials) is never retried.
+    PAGING_MAX_ATTEMPTS: int = Field(default=3, ge=1, le=10)
+    # First retry delay; doubles each time, capped at 5 minutes. Kept short
+    # because the tenant's acknowledgement window (default 5 minutes) is the
+    # real budget: a page still failing after it has been escalated anyway.
+    PAGING_RETRY_BASE_SECONDS: float = Field(default=20.0, gt=0)
+    # Public base URL of the dashboard, e.g. https://essr.example.com. Used to
+    # put a signed acknowledgement link in each page's text message. Unset:
+    # the text asks the recipient to acknowledge in the dashboard instead.
+    PAGING_ACK_BASE_URL: str | None = None
+    # How long an acknowledgement link keeps working after the page starts.
+    PAGING_ACK_LINK_TTL_HOURS: int = Field(default=24, ge=1, le=168)
 
     # --- AI Brain ---
     # Counts customer+assistant message pairs; a cheap guardrail against
@@ -252,6 +284,14 @@ class Settings(BaseSettings):
             return [origin.strip() for origin in value.split(",") if origin.strip()]
         return value
 
+    @field_validator("PAGING_ACK_BASE_URL", mode="before")
+    @classmethod
+    def _empty_ack_base_url_is_unset(cls, value: object) -> object:
+        if isinstance(value, str):
+            value = value.strip().rstrip("/")
+            return value or None
+        return value
+
     @field_validator("FEATURE_REGISTRATION_ENABLED", mode="before")
     @classmethod
     def _empty_flag_is_unset(cls, value: object) -> object:
@@ -344,6 +384,30 @@ class Settings(BaseSettings):
                 "used when ENVIRONMENT=production. Use 'webhook', or 'none' to "
                 "run without emergency alerting (callers will be told it could "
                 "not be confirmed)."
+            )
+        if self.PAGING_PROVIDER == "logging":
+            # Same falsehood as the logging notification provider: it would
+            # let the assistant tell a caller the on-call technician had been
+            # paged when only a log line was written.
+            raise ValueError(
+                "PAGING_PROVIDER='logging' pages nobody and must not be used when "
+                "ENVIRONMENT=production. Use 'twilio', or 'none' to run without paging."
+            )
+        if self.PAGING_PROVIDER == "twilio":
+            missing = [
+                name
+                for name in ("TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_PHONE_NUMBER")
+                if not (getattr(self, name) or "").strip()
+            ]
+            if missing:
+                raise ValueError(
+                    "PAGING_PROVIDER='twilio' needs " + ", ".join(missing) + " when "
+                    "ENVIRONMENT=production; without them every page would fail."
+                )
+        if self.PAGING_ACK_BASE_URL and not self.PAGING_ACK_BASE_URL.startswith("https://"):
+            raise ValueError(
+                "PAGING_ACK_BASE_URL must be an https:// URL when ENVIRONMENT=production — "
+                "the acknowledgement link is a credential."
             )
         return self
 

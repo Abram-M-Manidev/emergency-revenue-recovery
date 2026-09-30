@@ -435,3 +435,72 @@ export interface ConfigureCallTransferPayload {
   transfer_emergencies: boolean;
   is_enabled: boolean;
 }
+
+// --- Emergency paging ---
+
+export type PagingChannel = "sms" | "voice";
+export type PageStatus = "paging_primary" | "paging_backup" | "acknowledged" | "unresolved";
+export type PageNotificationStatus =
+  | "queued"
+  | "sending"
+  | "sent"
+  | "retrying"
+  | "failed"
+  | "canceled";
+export type RecipientRole = "primary" | "backup";
+
+export interface PagingSettings {
+  is_enabled: boolean;
+  primary_number: string | null;
+  backup_number: string | null;
+  sms_enabled: boolean;
+  voice_enabled: boolean;
+  ack_timeout_seconds: number;
+  created_at: string | null;
+  updated_at: string | null;
+}
+
+export interface ConfigurePagingPayload {
+  is_enabled: boolean;
+  primary_number: string | null;
+  backup_number: string | null;
+  sms_enabled: boolean;
+  voice_enabled: boolean;
+  ack_timeout_seconds: number;
+}
+
+export interface PageNotification {
+  role: RecipientRole;
+  channel: PagingChannel;
+  /** Masked, e.g. "+1••••••0101". */
+  destination_hint: string;
+  status: PageNotificationStatus;
+  attempts: number;
+  error_code: string | null;
+  sent_at: string | null;
+  next_attempt_at: string | null;
+  created_at: string;
+}
+
+export interface EmergencyPage {
+  id: string;
+  ticket_id: string;
+  status: PageStatus;
+  ack_timeout_seconds: number;
+  escalate_at: string | null;
+  escalated_at: string | null;
+  acknowledged_at: string | null;
+  acknowledged_by_role: RecipientRole | null;
+  acknowledged_via: "link" | "dashboard" | null;
+  acknowledged_by_user_id: string | null;
+  unresolved_at: string | null;
+  unresolved_reason: string | null;
+  created_at: string;
+  notifications: PageNotification[];
+}
+
+export interface PageAcknowledgement {
+  status: PageStatus;
+  acknowledged_at: string | null;
+  already_acknowledged: boolean;
+}

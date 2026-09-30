@@ -28,6 +28,7 @@ from app.core.middleware import (
 from app.core.version import APP_VERSION
 from app.infrastructure.database.session import engine
 from app.infrastructure.notifications.outbox import get_alert_outbox
+from app.infrastructure.paging.worker import get_paging_worker
 from app.shared.logging.setup import configure_logging, get_logger
 
 settings = get_settings()
@@ -42,11 +43,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # restart left unsent. One per uvicorn worker; `FOR UPDATE SKIP LOCKED`
     # means they never send the same alert twice. Off under test, where the
     # outbox is driven directly, and when the interval is set to 0.
-    poller: asyncio.Task[None] | None = None
+    # The emergency-paging worker rides the same cadence: escalates overdue
+    # pages, sends retries, and recovers sends a crash interrupted.
+    pollers: list[asyncio.Task[None]] = []
     if not settings.is_testing and settings.NOTIFICATION_OUTBOX_POLL_SECONDS > 0:
-        poller = asyncio.create_task(get_alert_outbox().run_forever())
+        pollers.append(asyncio.create_task(get_alert_outbox().run_forever()))
+        pollers.append(asyncio.create_task(get_paging_worker().run_forever()))
     yield
-    if poller is not None:
+    for poller in pollers:
         poller.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await poller

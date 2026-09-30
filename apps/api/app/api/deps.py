@@ -24,10 +24,12 @@ from app.application.services.dispatch_service import DispatchService
 from app.application.services.emergency_notification_service import (
     EmergencyNotificationService,
 )
+from app.application.services.emergency_paging_service import EmergencyPagingService
 from app.application.services.notification_settings_service import (
     NotificationSettingsService,
 )
 from app.application.services.organization_service import OrganizationService
+from app.application.services.paging_settings_service import PagingSettingsService
 from app.application.services.team_service import TeamService
 from app.application.services.voice_service import VoiceService
 from app.application.services.voice_tool_executor import VoiceToolExecutor
@@ -38,6 +40,7 @@ from app.domain.availability import AvailabilityProvider
 from app.domain.entities.user import User
 from app.domain.exceptions import AuthorizationError, InvalidTokenError
 from app.domain.notifications.provider import NotificationPort
+from app.domain.paging.port import AckLinkSigner
 from app.domain.transactions import Savepoints
 from app.infrastructure.ai.openai_provider import OpenAIProvider
 from app.infrastructure.database.locks import (
@@ -72,6 +75,10 @@ from app.infrastructure.database.repositories.call_transfer_repository_impl impo
     SqlAlchemyCallTransferAttemptRepository,
     SqlAlchemyCallTransferSettingsRepository,
 )
+from app.infrastructure.database.repositories.paging_repository_impl import (
+    SqlAlchemyEmergencyPageRepository,
+    SqlAlchemyPagingSettingsRepository,
+)
 from app.infrastructure.database.session import get_db
 from app.infrastructure.database.transactions import SessionAfterCommit, SqlAlchemySavepoints
 from app.infrastructure.notifications.outbox import EmergencyAlertOutbox
@@ -79,6 +86,9 @@ from app.infrastructure.notifications.outbox import (
     get_alert_outbox as get_process_alert_outbox,
 )
 from app.infrastructure.notifications.providers import build_notification_provider
+from app.infrastructure.paging.ack_links import HmacAckLinkSigner
+from app.infrastructure.paging.worker import EmergencyPagingWorker
+from app.infrastructure.paging.worker import get_paging_worker as get_process_paging_worker
 from app.infrastructure.scheduling.database_availability_provider import (
     DatabaseAvailabilityProvider,
 )
@@ -177,14 +187,56 @@ def get_emergency_notification_service(
     )
 
 
+def get_paging_worker() -> EmergencyPagingWorker:
+    """The process-wide emergency-paging worker. A dependency so tests can
+    substitute one with a fake provider and the test session factory."""
+    return get_process_paging_worker()
+
+
+def get_ack_link_signer(settings: Settings = Depends(get_settings)) -> AckLinkSigner:
+    return HmacAckLinkSigner(settings.JWT_SECRET_KEY)
+
+
+def get_emergency_paging_service(
+    db: AsyncSession = Depends(get_db),
+    settings: Settings = Depends(get_settings),
+    worker: EmergencyPagingWorker = Depends(get_paging_worker),
+    signer: AckLinkSigner = Depends(get_ack_link_signer),
+) -> EmergencyPagingService:
+    """Request-scoped: enqueues pages in the ticket's transaction and
+    records acknowledgements. Sending is the worker's job — this instance
+    has no provider, so no request handler can page anyone directly."""
+    return EmergencyPagingService(
+        settings_repository=SqlAlchemyPagingSettingsRepository(db),
+        page_repository=SqlAlchemyEmergencyPageRepository(db),
+        settings=settings,
+        signer=signer,
+        # The first sends, run by `get_db` only after this request's
+        # transaction has committed.
+        after_commit=SessionAfterCommit(db),
+        deliver_after_commit=worker.deliver,
+    )
+
+
+def get_paging_settings_service(db: AsyncSession = Depends(get_db)) -> PagingSettingsService:
+    return PagingSettingsService(
+        SqlAlchemyPagingSettingsRepository(db), SqlAlchemyVoiceLineRepository(db)
+    )
+
+
 def get_dispatch_service(
     db: AsyncSession = Depends(get_db),
     emergency_notifications: EmergencyNotificationService = Depends(
         get_emergency_notification_service
     ),
+    emergency_paging: EmergencyPagingService = Depends(get_emergency_paging_service),
 ) -> DispatchService:
     return DispatchService(
         emergency_notifications=emergency_notifications,
+        # Isolated in its own savepoint inside `sync_ticket_from_outcome`: a
+        # paging failure can never cost the ticket.
+        emergency_paging=emergency_paging,
+        savepoints=SqlAlchemySavepoints(db),
         emergency_ticket_repository=SqlAlchemyEmergencyTicketRepository(db),
         technician_profile_repository=SqlAlchemyTechnicianProfileRepository(db),
         conversation_outcome_repository=SqlAlchemyConversationOutcomeRepository(db),
@@ -250,6 +302,7 @@ def get_voice_tool_executor(
     emergency_notification_service: EmergencyNotificationService = Depends(
         get_emergency_notification_service
     ),
+    emergency_paging_service: EmergencyPagingService = Depends(get_emergency_paging_service),
 ) -> ToolExecutorFactory:
     """Composed from the three services that already own the business rules,
     rather than from repositories directly — the executor deliberately
@@ -268,6 +321,9 @@ def get_voice_tool_executor(
         # alerted. Without it the tool still creates the ticket and simply
         # never makes that claim.
         emergency_notification_service=emergency_notification_service,
+        # Read-only: whether the on-call recipient has been paged or has
+        # acknowledged, reduced to one coarse state — never who or where.
+        emergency_paging_service=emergency_paging_service,
         # The call's own caller ID, as the last-resort callback number.
         conversation_repository=SqlAlchemyConversationRepository(db),
         # One savepoint per tool: a failed tool must not take down what the

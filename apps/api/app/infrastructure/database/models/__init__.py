@@ -27,6 +27,11 @@ from app.infrastructure.database.models.notification import (
 )
 from app.infrastructure.database.models.offered_slot import OfferedSlotModel
 from app.infrastructure.database.models.organization import OrganizationModel
+from app.infrastructure.database.models.paging import (
+    EmergencyPageModel,
+    EmergencyPageNotificationModel,
+    OrganizationPagingSettingsModel,
+)
 from app.infrastructure.database.models.refresh_token import RefreshTokenModel
 from app.infrastructure.database.models.role import (
     PermissionModel,
@@ -52,6 +57,8 @@ __all__ = [
     "CustomerModel",
     "EmergencyKeywordModel",
     "EmergencyNotificationDeliveryModel",
+    "EmergencyPageModel",
+    "EmergencyPageNotificationModel",
     "EmergencyTicketModel",
     "FAQEntryModel",
     "HoursExceptionModel",
@@ -59,6 +66,7 @@ __all__ = [
     "OrganizationCallTransferSettingsModel",
     "OrganizationModel",
     "OrganizationNotificationSettingsModel",
+    "OrganizationPagingSettingsModel",
     "PermissionModel",
     "RefreshTokenModel",
     "RoleModel",

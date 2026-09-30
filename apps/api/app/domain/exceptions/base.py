@@ -266,3 +266,15 @@ class TurnPersistenceError(DomainError):
         self, message: str = "The conversation turn could not be recorded."
     ) -> None:
         super().__init__(message)
+
+
+class InvalidAcknowledgementLinkError(DomainError):
+    """An emergency-page acknowledgement link that is malformed, forged, or
+    expired. One error for all three, deliberately: telling a stranger which
+    of them applied would help them forge the next one. The message never
+    echoes the token — it is the whole credential."""
+
+    def __init__(
+        self, message: str = "This acknowledgement link is invalid or has expired."
+    ) -> None:
+        super().__init__(message)

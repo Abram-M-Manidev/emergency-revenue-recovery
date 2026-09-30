@@ -268,6 +268,63 @@ responses can echo the webhook URL back.
 
 ---
 
+## Emergency paging: who was paged, and did anyone take it
+
+An alert says "something happened"; a page asks a named person to say "I have
+it". Per emergency ticket there is one page (`emergency_pages`) and one
+notification per recipient × channel (`emergency_page_notifications`).
+
+**Page states** (stored as upper-case names in the database):
+
+| `status` | Meaning | Action |
+|---|---|---|
+| `PAGING_PRIMARY` | Primary paged, waiting for acknowledgement until `escalate_at` | none yet |
+| `PAGING_BACKUP` | Primary did not acknowledge (or was unreachable on every channel); backup paged | watch it |
+| `ACKNOWLEDGED` | A person pressed Acknowledge (`acknowledged_via` = `LINK` or `DASHBOARD`) | none |
+| `UNRESOLVED` | Nobody acknowledged (`unresolved_reason`: `no_acknowledgement`, `no_backup_configured`, `backup_unreachable`) | **Phone the business now.** A late acknowledgement is still accepted |
+
+**Notification states:** `QUEUED` → `SENDING` → `SENT` (the provider accepted it —
+*not* read, *not* answered, *not* acknowledged), or `RETRYING` → … → `FAILED`, or
+`CANCELED` (acknowledged before it went out). Rejections (invalid number, bad
+credentials) are not retried; timeouts and 5xx are, `PAGING_MAX_ATTEMPTS` times
+with backoff. If every channel to the current recipient fails, the page
+escalates at once instead of waiting out the window.
+
+**Guarantees:** the page is written in the ticket's own transaction (inside a
+savepoint — a paging failure never costs the ticket) and sent only after
+commit. A send holds a lease; a worker that dies mid-send is detected when the
+lease expires and the page is re-sent, so a crash can cause a **duplicate**
+page (same idempotency key), never a lost one. Escalation and acknowledgement
+lock the same row, so they cannot both win.
+
+```bash
+essr logs --since 24h api | grep -E 'emergency_page_(created|notification_attempted|escalated|acknowledged|unresolved)'
+# the one that matters most
+essr logs --since 24h api | grep emergency_page_unresolved
+
+essr exec postgres psql -U errs -d errs -c "
+  SELECT o.name, p.status, p.unresolved_reason, p.acknowledged_via, p.created_at
+    FROM emergency_pages p JOIN organizations o ON o.id = p.organization_id
+   WHERE p.created_at > now() - interval '7 days' ORDER BY p.created_at DESC;"
+```
+
+Logs carry roles, channels and outcomes — never a number, a message body or an
+acknowledgement token. Tokens travel in the URL fragment (`/ack#…`), so they
+never reach access logs either.
+
+**Fire-drill (before go-live, and after changing Twilio or paging settings):**
+set the primary and backup to phones you hold, create a test emergency, and
+confirm: the primary's text arrives with a link; not acknowledging for the
+timeout pages the backup; pressing Acknowledge on the backup's link stops it
+and Dispatch shows *Acknowledged*. Then repeat and acknowledge nothing: the page
+must end *Unresolved*.
+
+**What the assistant may say** follows the page, never the model: "being paged"
+(queued), "has been paged" (sent), "has acknowledged" (acknowledged) — and
+never "on the way".
+
+---
+
 ## Disabling one tenant's voice assistant
 
 When a business's assistant is misbehaving and you need it to stop **now**.

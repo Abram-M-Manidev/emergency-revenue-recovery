@@ -113,6 +113,8 @@ dropping real calls, which is why they are startup errors instead:
 | `VAPI_SERVER_SECRET` | Unset ⇒ every inbound webhook rejected ⇒ the phone line silently answers nothing |
 | `OPENAI_API_KEY` | Unset ⇒ every turn fails and the caller hears the fallback sentence |
 | `NOTIFICATION_PROVIDER` | `logging` is refused: it reports success while notifying nobody |
+| `PAGING_PROVIDER` | `logging` is refused; `twilio` requires `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`, `TWILIO_PHONE_NUMBER` |
+| `PAGING_ACK_BASE_URL` | If set, must be `https://` — the acknowledgement link is a credential |
 
 Two more settings are not startup errors but decide behaviour a paying
 customer will notice:
@@ -241,6 +243,13 @@ the on-call number (after hours). And on the Vapi assistant, turn on
 `monitorPlan.controlEnabled` (`docs/PILOT_LAUNCH.md` §B) — without it no
 transfer can be performed and callers are offered a callback instead. Test
 it with the fire-drill in `docs/RUNBOOK.md` → **Human transfer**.
+
+### 7c. Configure each business's emergency paging
+
+Owner → **Settings → Emergency paging**: primary and backup on-call numbers,
+channels, and minutes to acknowledge. Needs `PAGING_PROVIDER=twilio` and
+`PAGING_ACK_BASE_URL=https://YOUR_DOMAIN`. Run the paging fire-drill in
+`docs/RUNBOOK.md` → **Emergency paging** before relying on it.
 
 ### 8. Turn on external monitoring
 

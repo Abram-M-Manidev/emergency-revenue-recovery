@@ -17,7 +17,11 @@ from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Query, status
 
-from app.api.deps import get_dispatch_service, require_permission
+from app.api.deps import (
+    get_dispatch_service,
+    get_emergency_paging_service,
+    require_permission,
+)
 from app.application.schemas.dispatch import (
     AssignTicketRequest,
     CreateTechnicianRequest,
@@ -26,7 +30,9 @@ from app.application.schemas.dispatch import (
     TechnicianProfileResponse,
     UpdateTicketStatusRequest,
 )
+from app.application.schemas.paging import AcknowledgementResponse, EmergencyPageResponse
 from app.application.services.dispatch_service import DispatchService
+from app.application.services.emergency_paging_service import EmergencyPagingService
 from app.domain.entities.emergency_ticket import TicketStatus
 from app.domain.entities.rbac import Permissions
 from app.domain.entities.user import User
@@ -153,3 +159,48 @@ async def set_technician_on_call(
         user.organization_id, user_id, payload.is_on_call
     )
     return TechnicianProfileResponse.model_validate(technician)
+
+
+# --- Emergency paging ------------------------------------------------------------
+#
+# Reading a page needs only `dispatch:read`. Acknowledging it needs dispatch
+# authority, checked in `EmergencyPagingService.acknowledge_by_user` (Owner,
+# Admin, or a Technician — a read-only Member cannot silence an escalation).
+# Recipient numbers are masked in every response here.
+
+
+@router.get("/pages", response_model=list[EmergencyPageResponse])
+async def list_pages(
+    limit: int = Query(default=50, ge=1, le=100),
+    user: User = Depends(_read_user),
+    paging: EmergencyPagingService = Depends(get_emergency_paging_service),
+) -> list[EmergencyPageResponse]:
+    views = await paging.list_recent(user.organization_id, limit=limit)
+    return [EmergencyPageResponse.from_view(view) for view in views]
+
+
+@router.get("/tickets/{ticket_id}/paging", response_model=EmergencyPageResponse | None)
+async def get_ticket_paging(
+    ticket_id: uuid.UUID,
+    user: User = Depends(_read_user),
+    paging: EmergencyPagingService = Depends(get_emergency_paging_service),
+) -> EmergencyPageResponse | None:
+    """This ticket's page, or null when it was not paged (paging off)."""
+    view = await paging.get_for_ticket(user.organization_id, ticket_id)
+    return EmergencyPageResponse.from_view(view) if view else None
+
+
+@router.post("/tickets/{ticket_id}/paging/acknowledge", response_model=AcknowledgementResponse)
+async def acknowledge_ticket_page(
+    ticket_id: uuid.UUID,
+    user: User = Depends(_read_user),
+    paging: EmergencyPagingService = Depends(get_emergency_paging_service),
+) -> AcknowledgementResponse:
+    """Acknowledges this ticket's page: stops escalation and cancels any page
+    not yet sent. Idempotent — acknowledging twice keeps the first."""
+    result = await paging.acknowledge_by_user(user.organization_id, ticket_id, user=user)
+    return AcknowledgementResponse(
+        status=result.page.status,
+        acknowledged_at=result.page.acknowledged_at,
+        already_acknowledged=not result.newly_acknowledged,
+    )

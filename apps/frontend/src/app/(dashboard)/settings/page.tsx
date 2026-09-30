@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 
 import { EmergencyNotificationsCard } from "@/components/settings/emergency-notifications-card";
+import { EmergencyPagingCard } from "@/components/settings/emergency-paging-card";
 import { HumanTransferCard } from "@/components/settings/human-transfer-card";
 import { VoiceAssistantCard } from "@/components/settings/voice-assistant-card";
 import { Badge } from "@/components/ui/badge";
@@ -187,6 +188,7 @@ export default function SettingsPage() {
       />
 
       <EmergencyNotificationsCard canManage={canManageOrganization} />
+      <EmergencyPagingCard canManage={canManageOrganization} />
       <HumanTransferCard canManage={canManageOrganization} />
 
       <Card>

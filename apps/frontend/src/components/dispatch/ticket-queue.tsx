@@ -15,7 +15,15 @@ import {
   updateTicketStatus,
 } from "@/lib/api/dispatch";
 import { ApiError } from "@/lib/api/client";
-import type { EmergencyTicket, TechnicianProfile, TicketStatus } from "@/lib/api/types";
+import { acknowledgeTicketPage, fetchRecentPages } from "@/lib/api/paging";
+import type {
+  EmergencyPage,
+  EmergencyTicket,
+  PageStatus,
+  TechnicianProfile,
+  TicketStatus,
+} from "@/lib/api/types";
+import { useAuth } from "@/hooks/use-auth";
 import { useToast } from "@/hooks/use-toast";
 
 const STATUS_FILTERS: { value: TicketStatus | "all"; label: string }[] = [
@@ -43,8 +51,33 @@ const STATUS_LABEL: Record<TicketStatus, string> = {
   canceled: "Canceled",
 };
 
+/**
+ * What each page state honestly means. "Paged" is only ever shown once a
+ * provider accepted a page, and never implies anyone read it.
+ */
+function pagingLabel(page: EmergencyPage): {
+  label: string;
+  variant: "destructive" | "default" | "success" | "secondary";
+} {
+  if (page.status === "acknowledged") return { label: "Acknowledged", variant: "success" };
+  if (page.status === "unresolved") return { label: "Unresolved — nobody acknowledged", variant: "destructive" };
+  const sent = page.notifications.some((n) => n.status === "sent");
+  const who = page.status === "paging_backup" ? "backup" : "primary";
+  return sent
+    ? { label: `Paged ${who} — awaiting ack`, variant: "default" }
+    : { label: `Paging ${who}…`, variant: "secondary" };
+}
+
+const ACKNOWLEDGEABLE: PageStatus[] = ["paging_primary", "paging_backup", "unresolved"];
+
 export function TicketQueue() {
   const { toast } = useToast();
+  const { user } = useAuth();
+  const canAcknowledge =
+    (user?.permissions.includes("dispatch:manage") ||
+      user?.permissions.includes("dispatch:update_assigned")) ??
+    false;
+  const [pages, setPages] = useState<Record<string, EmergencyPage>>({});
   const [isLoading, setIsLoading] = useState(true);
   const [tickets, setTickets] = useState<EmergencyTicket[]>([]);
   const [technicians, setTechnicians] = useState<TechnicianProfile[]>([]);
@@ -63,11 +96,14 @@ export function TicketQueue() {
     Promise.all([
       fetchTickets(statusFilter === "all" ? undefined : statusFilter),
       fetchTechnicians(),
+      // Paging is supplementary: a failure here must not hide the queue.
+      fetchRecentPages().catch(() => [] as EmergencyPage[]),
     ])
-      .then(([ticketData, technicianData]) => {
+      .then(([ticketData, technicianData, pageData]) => {
         if (cancelled) return;
         setTickets(ticketData);
         setTechnicians(technicianData);
+        setPages(Object.fromEntries(pageData.map((page) => [page.ticket_id, page])));
       })
       .catch(() => toast({ title: "Failed to load dispatch queue", variant: "destructive" }))
       .finally(() => {
@@ -96,6 +132,29 @@ export function TicketQueue() {
     } catch (error) {
       toast({
         title: error instanceof ApiError ? error.message : "Failed to assign ticket",
+        variant: "destructive",
+      });
+    }
+  }
+
+  async function handleAcknowledge(ticket: EmergencyTicket) {
+    try {
+      const result = await acknowledgeTicketPage(ticket.id);
+      setPages((current) => {
+        const page = current[ticket.id];
+        if (!page) return current;
+        return {
+          ...current,
+          [ticket.id]: { ...page, status: result.status, acknowledged_at: result.acknowledged_at },
+        };
+      });
+      toast({
+        title: result.already_acknowledged ? "Already acknowledged" : "Emergency acknowledged — escalation stopped",
+        variant: "success",
+      });
+    } catch (error) {
+      toast({
+        title: error instanceof ApiError ? error.message : "Failed to acknowledge",
         variant: "destructive",
       });
     }
@@ -151,6 +210,7 @@ export function TicketQueue() {
                 <TableHead>Customer</TableHead>
                 <TableHead>Summary</TableHead>
                 <TableHead>Status</TableHead>
+                <TableHead>On-call paging</TableHead>
                 <TableHead>Assigned to</TableHead>
                 <TableHead>Created</TableHead>
                 <TableHead />
@@ -161,6 +221,8 @@ export function TicketQueue() {
                 const assignedTechnician = ticket.assigned_technician_user_id
                   ? technicianById.get(ticket.assigned_technician_user_id)
                   : undefined;
+                const page = pages[ticket.id];
+                const paging = page ? pagingLabel(page) : null;
                 return (
                   <TableRow key={ticket.id}>
                     <TableCell>
@@ -177,6 +239,20 @@ export function TicketQueue() {
                       <Badge variant={STATUS_BADGE_VARIANT[ticket.status]}>
                         {STATUS_LABEL[ticket.status]}
                       </Badge>
+                    </TableCell>
+                    <TableCell>
+                      {page && paging ? (
+                        <div className="flex flex-col items-start gap-1">
+                          <Badge variant={paging.variant}>{paging.label}</Badge>
+                          {canAcknowledge && ACKNOWLEDGEABLE.includes(page.status) ? (
+                            <Button size="sm" variant="outline" onClick={() => handleAcknowledge(ticket)}>
+                              Acknowledge
+                            </Button>
+                          ) : null}
+                        </div>
+                      ) : (
+                        <span className="text-xs text-muted-foreground">Not paged</span>
+                      )}
                     </TableCell>
                     <TableCell>{assignedTechnician?.full_name ?? "—"}</TableCell>
                     <TableCell>{new Date(ticket.created_at).toLocaleString()}</TableCell>

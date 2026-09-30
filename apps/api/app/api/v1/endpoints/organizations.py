@@ -17,6 +17,7 @@ from app.api.deps import (
     get_call_transfer_settings_service,
     get_notification_settings_service,
     get_organization_service,
+    get_paging_settings_service,
     require_permission,
 )
 from app.application.schemas.call_transfer import (
@@ -29,6 +30,7 @@ from app.application.schemas.notification_settings import (
     SetNotificationsEnabledRequest,
 )
 from app.application.schemas.organization import OrganizationResponse, UpdateOrganizationRequest
+from app.application.schemas.paging import ConfigurePagingRequest, PagingSettingsResponse
 from app.application.services.call_transfer_settings_service import (
     CallTransferSettingsService,
 )
@@ -36,10 +38,12 @@ from app.application.services.notification_settings_service import (
     NotificationSettingsService,
 )
 from app.application.services.organization_service import OrganizationService
+from app.application.services.paging_settings_service import PagingSettingsService
 from app.domain.call_transfer.settings import InvalidTransferNumberError
 from app.domain.entities.rbac import Permissions
 from app.domain.entities.user import User
 from app.domain.notifications.settings import InvalidNotificationDestinationError
+from app.domain.paging.settings import InvalidPagingSettingsError
 
 router = APIRouter(prefix="/organizations", tags=["organizations"])
 
@@ -222,5 +226,58 @@ async def delete_call_transfer_settings(
     service: CallTransferSettingsService = Depends(get_call_transfer_settings_service),
 ) -> Response:
     """Removes human-transfer configuration. Idempotent."""
+    await service.delete(user.organization_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# --- Emergency paging configuration -------------------------------------------
+#
+# Same authority and tenant rule as above: `organization:manage` (Owner-only by
+# default), tenant taken only from the caller's own JWT.
+
+
+@router.get("/current/paging", response_model=PagingSettingsResponse | None)
+async def get_paging_settings(
+    user: User = Depends(_manage_user),
+    service: PagingSettingsService = Depends(get_paging_settings_service),
+) -> PagingSettingsResponse | None:
+    """Who this organization pages about an emergency, or null if never set
+    (in which case nobody is paged and the assistant never says anyone was)."""
+    settings = await service.get(user.organization_id)
+    return PagingSettingsResponse.model_validate(settings) if settings else None
+
+
+@router.put("/current/paging", response_model=PagingSettingsResponse)
+async def configure_paging_settings(
+    payload: ConfigurePagingRequest,
+    user: User = Depends(_manage_user),
+    service: PagingSettingsService = Depends(get_paging_settings_service),
+) -> PagingSettingsResponse:
+    """Sets the primary and backup on-call numbers, channels and the
+    acknowledgement timeout. The 422 names the rule broken and never echoes
+    a submitted number."""
+    try:
+        settings = await service.configure(
+            user.organization_id,
+            is_enabled=payload.is_enabled,
+            primary_number=payload.primary_number,
+            backup_number=payload.backup_number,
+            sms_enabled=payload.sms_enabled,
+            voice_enabled=payload.voice_enabled,
+            ack_timeout_seconds=payload.ack_timeout_seconds,
+        )
+    except InvalidPagingSettingsError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
+        ) from exc
+    return PagingSettingsResponse.model_validate(settings)
+
+
+@router.delete("/current/paging", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
+async def delete_paging_settings(
+    user: User = Depends(_manage_user),
+    service: PagingSettingsService = Depends(get_paging_settings_service),
+) -> Response:
+    """Removes paging configuration and the stored numbers. Idempotent."""
     await service.delete(user.organization_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

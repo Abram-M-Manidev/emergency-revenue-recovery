@@ -35,6 +35,7 @@ from app.domain.exceptions import (
     EntityAlreadyExistsError,
     EntityNotFoundError,
     InactiveAccountError,
+    InvalidAcknowledgementLinkError,
     InvalidAppointmentStatusTransitionError,
     InvalidCredentialsError,
     InvalidTicketStatusTransitionError,
@@ -84,6 +85,9 @@ _DOMAIN_ERROR_STATUS: dict[type[DomainError], int] = {
     AvailabilityUnavailableError: status.HTTP_503_SERVICE_UNAVAILABLE,
     LastOwnerError: status.HTTP_409_CONFLICT,
     TurnPersistenceError: status.HTTP_503_SERVICE_UNAVAILABLE,
+    # 404: an unknown, forged and expired link are indistinguishable on
+    # purpose — see the exception's docstring.
+    InvalidAcknowledgementLinkError: status.HTTP_404_NOT_FOUND,
 }
 
 

@@ -24,6 +24,7 @@ import structlog
 from app.application.services.emergency_notification_service import (
     EmergencyNotificationService,
 )
+from app.application.services.emergency_paging_service import EmergencyPagingService
 from app.domain.entities.conversation_outcome import (
     CallClassification,
     ConversationOutcome,
@@ -45,6 +46,7 @@ from app.domain.repositories.emergency_ticket_repository import EmergencyTicketR
 from app.domain.repositories.role_repository import RoleRepository
 from app.domain.repositories.technician_profile_repository import TechnicianProfileRepository
 from app.domain.repositories.user_repository import UserRepository
+from app.domain.transactions import NullSavepoints, Savepoints
 from app.infrastructure.security.password import hash_password
 from app.shared.utils.phone import storable_phone_number
 
@@ -100,6 +102,11 @@ class DispatchService:
         # working; without it a ticket is created with no alert queued, which
         # the assistant then reports as "could not be confirmed".
         emergency_notifications: EmergencyNotificationService | None = None,
+        # Pages the on-call recipient, also in the ticket's transaction — but
+        # inside its own savepoint, so a paging failure can never cost the
+        # ticket (see `_start_paging`). Optional; absent, nobody is paged.
+        emergency_paging: EmergencyPagingService | None = None,
+        savepoints: Savepoints | None = None,
     ) -> None:
         self._tickets = emergency_ticket_repository
         self._technicians = technician_profile_repository
@@ -108,6 +115,8 @@ class DispatchService:
         self._users = user_repository
         self._roles = role_repository
         self._notifications = emergency_notifications
+        self._paging = emergency_paging
+        self._savepoints = savepoints or NullSavepoints()
 
     # --- Automatic ticket creation (the AI Brain -> Dispatch seam) ---
 
@@ -150,7 +159,29 @@ class DispatchService:
             # Idempotent by ticket, so the race path in `create` (which
             # returns the ticket another writer just created) is harmless.
             await self._notifications.enqueue(ticket)
+        await self._start_paging(ticket)
         return ticket
+
+    async def _start_paging(self, ticket: EmergencyTicket) -> None:
+        """Queues the on-call page in the ticket's transaction, isolated.
+
+        The savepoint sits INSIDE the `try` (see `domain/transactions.py`):
+        a paging failure — a bad settings row, a constraint, a bug — rolls
+        back only the page, logs, and leaves the ticket and its alert to
+        commit. The emergency is still recorded and still visible; it just
+        is not paged, and the assistant is then never told it was."""
+        if self._paging is None:
+            return
+        try:
+            async with self._savepoints.isolate():
+                await self._paging.enqueue(ticket)
+        except Exception as exc:
+            logger.error(
+                "emergency_page_enqueue_failed",
+                organization_id=str(ticket.organization_id),
+                ticket_id=str(ticket.id),
+                error=type(exc).__name__,
+            )
 
     async def _with_caller_id_fallback(
         self,

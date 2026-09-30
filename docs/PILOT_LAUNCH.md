@@ -82,7 +82,9 @@ Twilio's only job here is to own the phone number and hand calls to Vapi.
    routing manually.
 2. Attach the number to the assistant configured in section B.
 
-**ESSR's application code never calls Twilio.** `TWILIO_ACCOUNT_SID`,
+**The call path never calls Twilio.** The only application code that does is
+emergency paging, and only with `PAGING_PROVIDER=twilio` (see Part 2 §3b), where
+`TWILIO_PHONE_NUMBER` sends each page. Otherwise `TWILIO_ACCOUNT_SID`,
 `TWILIO_AUTH_TOKEN` and `TWILIO_PHONE_NUMBER` exist in `Settings` but are read
 by nothing — verified by grep across `apps/api/app`. Leave them blank unless
 and until something actually uses them. The same is true of `VAPI_API_KEY`:
@@ -157,6 +159,30 @@ the payload carries the caller's name, number and address.
 **Until this is set, emergency callers are told their request is logged but
 that the alert could not be confirmed.** That is correct behaviour, not a
 bug — but it is not what a pilot wants, so treat it as required onboarding.
+
+### 3b. Emergency paging (on-call escalation) — UI or API
+
+**Dashboard → Settings → Emergency paging**, or:
+
+```
+PUT /api/v1/organizations/current/paging
+  { "is_enabled": true, "primary_number": "+1...", "backup_number": "+1...",
+    "sms_enabled": true, "voice_enabled": false, "ack_timeout_seconds": 300 }
+```
+
+The primary on-call number is paged the moment an emergency ticket commits. If
+nobody **acknowledges** within the timeout (60–3600 s), the backup is paged; if
+the backup does not acknowledge either, the emergency is marked **unresolved**
+on the Dispatch page. Acknowledging means pressing Acknowledge — on the page the
+SMS link opens, or in Dispatch. A delivered text or an answered call is not an
+acknowledgement.
+
+Requires `PAGING_PROVIDER=twilio` with Twilio credentials, and
+`PAGING_ACK_BASE_URL=https://YOUR_DOMAIN` for the SMS link. **Real pages cost
+money and reach real phones**, so fire-drill with a number you control first
+(see `docs/RUNBOOK.md` → Emergency paging). With the default
+`PAGING_PROVIDER=none`, nothing is paged and the assistant never claims anyone
+was.
 
 ### 4. Technicians — API (optional but recommended)
 
@@ -248,6 +274,7 @@ discovered on a real call.
 | API docs | Not reachable in production | `/docs`, `/redoc` and `/openapi.json` are mounted at the **root**, not under `/api/v1`, so Caddy routes them to the frontend and they 404. Fine — arguably desirable on a public deployment — but it is accidental rather than chosen. |
 | Backups | Off-site, nightly | Uploaded to Backblaze B2, read back and sha256-verified, Object-Locked for 30 days; restorable onto a new VM (`docs/RUNBOOK.md` → Backups). Up to a day of writes can be lost — no point-in-time recovery. |
 | Alerting | None | Nothing pages you if the API dies or emergency alerts start failing. The `RUNBOOK.md` queries are the manual substitute. |
+| Emergency paging | Off until configured | Needs a Twilio account (`PAGING_PROVIDER=twilio`). Never exercised against real Twilio in development; fire-drill before relying on it. |
 | Rate limits | Per worker | 4 uvicorn workers each count separately, so the effective ceiling is roughly 4× the configured value. |
 | `secure` cookie | Requires HTTPS | The refresh cookie sets `secure=True` in production. Logging in over plain http will appear to succeed and then immediately bounce back to `/login`, because the browser silently drops the cookie. Always test over the real domain. |
 

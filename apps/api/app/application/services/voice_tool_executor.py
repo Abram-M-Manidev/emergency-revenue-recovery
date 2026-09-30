@@ -46,6 +46,7 @@ from app.application.services.dispatch_service import DispatchService
 from app.application.services.emergency_notification_service import (
     EmergencyNotificationService,
 )
+from app.application.services.emergency_paging_service import EmergencyPagingService
 from app.core.config import Settings
 from app.domain.ai.tools import (
     BOOK_APPOINTMENT,
@@ -84,6 +85,7 @@ from app.domain.exceptions import (
     SlotNotSelectedError,
 )
 from app.domain.notifications.emergency import DeliveryStatus, NotificationDelivery
+from app.domain.paging.page import CallerPagingState
 from app.domain.repositories.business_profile_repository import BusinessProfileRepository
 from app.domain.repositories.conversation_outcome_repository import ConversationOutcomeRepository
 from app.domain.repositories.conversation_repository import ConversationRepository
@@ -145,6 +147,9 @@ class VoiceToolExecutor(ToolExecutorFactory):
         # working; absent, `transfer_to_human` reports "unavailable" and the
         # assistant offers a callback instead — never a pretend transfer.
         call_transfer_service: CallTransferService | None = None,
+        # On-call paging, read-only. Optional; absent, the paging state is
+        # "off" and the assistant says nothing about anyone being paged.
+        emergency_paging_service: EmergencyPagingService | None = None,
     ) -> None:
         self._appointments = appointment_service
         self._dispatch = dispatch_service
@@ -159,6 +164,7 @@ class VoiceToolExecutor(ToolExecutorFactory):
         self._savepoints = savepoints or NullSavepoints()
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._call_transfers = call_transfer_service
+        self._paging = emergency_paging_service
 
     def bind(
         self,
@@ -241,11 +247,14 @@ class VoiceToolExecutor(ToolExecutorFactory):
                     "see it, and tell them to call the business directly — or "
                     "the emergency services — if it is dangerous right now."
                 )
+            paging_note = _paging_progress_line(
+                await self._paging_state(organization_id, ticket.id)
+            )
             return (
                 "Progress on this call (from the business's records):\n"
                 "- An emergency ticket has already been created. Do NOT call "
                 "create_service_request again, and do NOT offer or attempt an "
-                "appointment.\n" + reassurance
+                "appointment.\n" + reassurance + (f"\n{paging_note}" if paging_note else "")
             )
 
         appointment = await self._appointments.get_appointment_for_conversation(
@@ -494,6 +503,7 @@ class VoiceToolExecutor(ToolExecutorFactory):
             # Bounded and non-raising: a failure costs the caller a weaker
             # sentence, never the ticket and never the call.
             delivery = await self._alert_state(organization_id, ticket.id)
+            paging = await self._paging_state(organization_id, ticket.id)
             return {
                 "success": True,
                 "service_request_id": str(ticket.id),
@@ -501,6 +511,8 @@ class VoiceToolExecutor(ToolExecutorFactory):
                 "status": ticket.status.value,
                 "priority": "emergency",
                 **_dispatcher_alert_fields(delivery),
+                # Coarse on purpose: never who was paged, or where.
+                "on_call_paging": paging.value,
                 "customer_id": str(customer.id) if customer else None,
                 "service_name": matched_service.name if matched_service else None,
                 "bookable": False,
@@ -517,7 +529,7 @@ class VoiceToolExecutor(ToolExecutorFactory):
                     if still_needed
                     else {}
                 ),
-                "next_step": _dispatcher_next_step(delivery),
+                "next_step": _with_paging_step(_dispatcher_next_step(delivery), paging),
             }
 
         if appointment is not None:
@@ -1247,6 +1259,25 @@ class VoiceToolExecutor(ToolExecutorFactory):
 
     # --- Emergency alerting ---
 
+    async def _paging_state(
+        self, organization_id: uuid.UUID, ticket_id: uuid.UUID
+    ) -> CallerPagingState:
+        """Where paging the on-call recipient stands, read back from the
+        records. Read-only: the page itself is queued by `DispatchService` in
+        the ticket's transaction and sent by the worker after commit.
+
+        Fails closed to `OFF` — which licenses no sentence at all — and does
+        so inside its own savepoint, so a failed read cannot abort the tool's
+        transaction and take the ticket with it."""
+        if self._paging is None:
+            return CallerPagingState.OFF
+        try:
+            async with self._savepoints.isolate():
+                return await self._paging.caller_state(organization_id, ticket_id)
+        except Exception:
+            logger.warning("emergency_paging_lookup_failed", exc_info=True)
+            return CallerPagingState.OFF
+
     async def _alert_state(
         self, organization_id: uuid.UUID, ticket_id: uuid.UUID
     ) -> NotificationDelivery | None:
@@ -1335,6 +1366,7 @@ class _BoundToolExecutor(ToolExecutor):
             # it is what the caller was or was not told.
             dispatcher_alerted=content.get("dispatcher_alerted"),
             notification_status=content.get("notification_status"),
+            on_call_paging=content.get("on_call_paging"),
         )
         return ToolResult(id=invocation.id, name=invocation.name, content=content)
 
@@ -1450,6 +1482,44 @@ def _dispatcher_next_step(delivery: NotificationDelivery | None) -> str:
         "right now they should call the business directly or the emergency "
         "services. Do not offer an appointment time."
     )
+
+
+# What the assistant may say about paging the on-call recipient, one sentence
+# per state. Each states what is TRUE and, just as explicitly, what is not: a
+# page accepted by a provider is not a person reached, and an acknowledgement
+# is "I have it", never "I am on my way".
+_PAGING_STEPS: dict[CallerPagingState, str] = {
+    CallerPagingState.QUEUED: (
+        "The on-call technician is being paged now, but that is NOT confirmed "
+        "yet. You may say the on-call technician is being paged. Do NOT say "
+        "they have been reached, are aware, or are on the way."
+    ),
+    CallerPagingState.SENT: (
+        "A page has been sent to the on-call technician, but they have NOT "
+        "acknowledged it yet. You may say the on-call technician has been "
+        "paged. Do NOT say they have seen it, acknowledged it, or are on the "
+        "way."
+    ),
+    CallerPagingState.ACKNOWLEDGED: (
+        "The on-call technician has acknowledged this emergency. You may say "
+        "the on-call technician has acknowledged it. Do NOT say they are on "
+        "the way or give an arrival time — nobody has confirmed that."
+    ),
+    CallerPagingState.FAILED: (
+        "Paging the on-call technician did NOT succeed. Do NOT say the "
+        "technician was paged, notified, or is on the way."
+    ),
+}
+
+
+def _with_paging_step(next_step: str, paging: CallerPagingState) -> str:
+    step = _PAGING_STEPS.get(paging)
+    return f"{next_step} {step}" if step else next_step
+
+
+def _paging_progress_line(paging: CallerPagingState) -> str | None:
+    step = _PAGING_STEPS.get(paging)
+    return f"- {step}" if step else None
 
 
 def _domain_error_result(exc: DomainError) -> dict[str, Any]:

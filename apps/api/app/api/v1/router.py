@@ -10,6 +10,7 @@ from app.api.v1.endpoints import (
     dispatch,
     health,
     organizations,
+    paging,
     team,
     vapi_webhooks,
     version,
@@ -30,3 +31,4 @@ api_router.include_router(customers.router)
 api_router.include_router(analytics.router)
 api_router.include_router(team.router)
 api_router.include_router(organizations.router)
+api_router.include_router(paging.router)
