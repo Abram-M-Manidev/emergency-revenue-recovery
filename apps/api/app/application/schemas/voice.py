@@ -51,6 +51,13 @@ class VoiceCallResponse(BaseModel):
     ended_reason: str | None
     duration_seconds: int | None
     recording_url: str | None
+    # What the caller was told at the start of the call. All null when
+    # unknown (a call from before caller disclosure existed).
+    disclosure_sent_at: datetime | None = None
+    disclosed_ai: bool | None = None
+    disclosed_recording: bool | None = None
+    #: A recording exists and the caller was NOT told the call was recorded.
+    recording_notice_missing: bool = False
 
 
 # --- Vapi-facing (shared-secret authenticated) ---

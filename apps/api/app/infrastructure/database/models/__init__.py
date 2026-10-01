@@ -18,6 +18,7 @@ from app.infrastructure.database.models.customer import CustomerModel
 from app.infrastructure.database.models.customer_caller_identity import (
     CustomerCallerIdentityModel,
 )
+from app.infrastructure.database.models.disclosure import OrganizationDisclosureSettingsModel
 from app.infrastructure.database.models.emergency_keyword import EmergencyKeywordModel
 from app.infrastructure.database.models.emergency_ticket import EmergencyTicketModel
 from app.infrastructure.database.models.faq_entry import FAQEntryModel
@@ -64,6 +65,7 @@ __all__ = [
     "HoursExceptionModel",
     "OfferedSlotModel",
     "OrganizationCallTransferSettingsModel",
+    "OrganizationDisclosureSettingsModel",
     "OrganizationModel",
     "OrganizationNotificationSettingsModel",
     "OrganizationPagingSettingsModel",

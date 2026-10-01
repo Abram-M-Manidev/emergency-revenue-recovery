@@ -25,6 +25,9 @@ def _to_entity(model: VoiceCallModel) -> VoiceCall:
         recording_url=model.recording_url,
         created_at=model.created_at,
         updated_at=model.updated_at,
+        disclosure_sent_at=model.disclosure_sent_at,
+        disclosed_ai=model.disclosed_ai,
+        disclosed_recording=model.disclosed_recording,
     )
 
 
@@ -86,3 +89,24 @@ class SqlAlchemyVoiceCallRepository(VoiceCallRepository):
         await self._session.flush()
         await self._session.refresh(model)
         return _to_entity(model)
+
+    async def mark_disclosure(
+        self,
+        voice_call_id: uuid.UUID,
+        *,
+        sent_at: datetime,
+        ai: bool,
+        recording: bool,
+    ) -> bool:
+        # Through the ORM rather than a Core UPDATE, so the identity-map copy
+        # every later read in this session returns is the updated one. Runs
+        # under the call's advisory lock (see `VoiceService`), so the
+        # read-then-write cannot race another turn of the same call.
+        model = await self._session.get(VoiceCallModel, voice_call_id)
+        if model is None or model.disclosure_sent_at is not None:
+            return False
+        model.disclosure_sent_at = sent_at
+        model.disclosed_ai = ai
+        model.disclosed_recording = recording
+        await self._session.flush()
+        return True

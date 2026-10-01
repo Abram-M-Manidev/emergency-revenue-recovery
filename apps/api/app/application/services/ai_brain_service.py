@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -29,6 +29,7 @@ from app.domain.ai.provider import (
     ConversationTurn,
 )
 from app.domain.ai.tools import VOICE_TOOLS, ToolExecutorFactory
+from app.domain.disclosure import DEFAULT_DISCLOSURE_POLICY
 from app.domain.entities.business_hours import HoursException, WeeklyHours
 from app.domain.entities.business_profile import BusinessProfile
 from app.domain.entities.conversation import Conversation, ConversationChannel, ConversationStatus
@@ -52,11 +53,19 @@ from app.domain.exceptions import (
     EntityNotFoundError,
     TurnPersistenceError,
 )
+from app.domain.life_safety import (
+    detect_hazards,
+    emergency_number_for,
+    hazards_in,
+    life_safety_directive,
+    safety_instruction,
+)
 from app.domain.repositories.business_hours_repository import BusinessHoursRepository
 from app.domain.repositories.business_profile_repository import BusinessProfileRepository
 from app.domain.repositories.caller_identity_repository import CallerIdentityRepository
 from app.domain.repositories.conversation_outcome_repository import ConversationOutcomeRepository
 from app.domain.repositories.conversation_repository import ConversationRepository
+from app.domain.repositories.disclosure_repository import DisclosureSettingsRepository
 from app.domain.repositories.emergency_keyword_repository import EmergencyKeywordRepository
 from app.domain.repositories.faq_repository import FAQRepository
 from app.domain.repositories.service_area_repository import ServiceAreaRepository
@@ -154,6 +163,9 @@ class AIBrainService:
         # construction site keeps working; the in-memory fakes have no
         # transaction to protect.
         savepoints: Savepoints | None = None,
+        # Read only to answer "is this call recorded?" truthfully on a voice
+        # call. Optional; absent, the assistant says it cannot confirm.
+        disclosure_settings_repository: DisclosureSettingsRepository | None = None,
     ) -> None:
         self._conversations = conversation_repository
         self._outcomes = conversation_outcome_repository
@@ -168,6 +180,7 @@ class AIBrainService:
         self._caller_identities = caller_identity_repository
         self._tool_executors = tool_executor_factory
         self._savepoints = savepoints or NullSavepoints()
+        self._disclosure_settings = disclosure_settings_repository
 
     async def start_conversation(
         self,
@@ -212,10 +225,10 @@ class AIBrainService:
     async def send_message(
         self, organization_id: uuid.UUID, conversation_id: uuid.UUID, customer_message: str
     ) -> ConversationTurnResult:
-        conversation, request, services = await self._prepare_turn(
+        conversation, request, services, safety_prefix = await self._prepare_turn(
             organization_id, conversation_id, customer_message
         )
-        reply = await self._ai.generate_reply(request)
+        reply = _with_safety_prefix(await self._ai.generate_reply(request), safety_prefix)
         return await self._persist_turn(
             conversation, conversation_id, services, reply, customer_message
         )
@@ -230,9 +243,15 @@ class AIBrainService:
         validated reply arrives — same messages, same outcome upsert, same
         completion rule. Nothing is written from a partial response, so a
         stream that dies halfway leaves no half-formed outcome behind."""
-        conversation, request, services = await self._prepare_turn(
+        conversation, request, services, safety_prefix = await self._prepare_turn(
             organization_id, conversation_id, customer_message
         )
+
+        if safety_prefix:
+            # Spoken before the model has produced anything — and before the
+            # model is even asked — so it cannot be delayed, reworded or
+            # skipped by whatever the model does next.
+            yield ConversationTextDelta(safety_prefix + " ")
 
         reply: AIReply | None = None
         async for event in self._ai.stream_reply(request):
@@ -251,7 +270,11 @@ class AIBrainService:
 
         yield ConversationTurnComplete(
             await self._persist_turn(
-                conversation, conversation_id, services, reply, customer_message
+                conversation,
+                conversation_id,
+                services,
+                _with_safety_prefix(reply, safety_prefix),
+                customer_message,
             )
         )
 
@@ -259,7 +282,7 @@ class AIBrainService:
 
     async def _prepare_turn(
         self, organization_id: uuid.UUID, conversation_id: uuid.UUID, customer_message: str
-    ) -> tuple[Conversation, AIRequest, list[Service]]:
+    ) -> tuple[Conversation, AIRequest, list[Service], str | None]:
         conversation = await self.get_conversation(organization_id, conversation_id)
         if conversation.status is ConversationStatus.COMPLETED:
             raise ConversationCompletedError()
@@ -298,6 +321,35 @@ class AIBrainService:
         keyword_hint = any(
             keyword.phrase.lower() in customer_message.lower() for keyword in emergency_keywords
         )
+        # Life safety, decided from the caller's own words by fixed patterns
+        # — never by the model. A hazard reported for the first time on this
+        # turn gets the fixed instruction spoken before anything else; once
+        # reported, the directive binds every later turn of the call.
+        emergency_number = emergency_number_for(profile.country if profile else None)
+        earlier_hazards = hazards_in(
+            m.content for m in history if m.role is MessageRole.CUSTOMER
+        )
+        current_hazards = detect_hazards(customer_message)
+        new_hazards = current_hazards - earlier_hazards
+        all_hazards = earlier_hazards | current_hazards
+        safety_prefix = (
+            safety_instruction(new_hazards, emergency_number=emergency_number)
+            if new_hazards
+            else None
+        )
+        if new_hazards:
+            # Hazard kinds only — never the caller's words.
+            logger.warning(
+                "life_safety_instruction_given",
+                conversation_id=str(conversation_id),
+                hazards=sorted(h.value for h in new_hazards),
+            )
+        life_safety = life_safety_directive(
+            all_hazards,
+            emergency_number=emergency_number,
+            instruction_given=safety_instruction(all_hazards, emergency_number=emergency_number),
+        )
+
         known_caller = await self._resolve_known_caller(conversation)
         tool_progress = await self._describe_tool_progress(organization_id, conversation_id)
         system_prompt = build_system_prompt(
@@ -313,6 +365,8 @@ class AIBrainService:
             known_caller=known_caller,
             tools_enabled=self._tools_enabled,
             tool_progress=tool_progress,
+            life_safety=life_safety,
+            recording_notice_given=await self._recording_notice_given(conversation),
         )
 
         provider_history = tuple(
@@ -347,7 +401,22 @@ class AIBrainService:
                 else None
             ),
         )
-        return conversation, request, services
+        return conversation, request, services, safety_prefix
+
+    async def _recording_notice_given(self, conversation: Conversation) -> bool | None:
+        """Whether callers on this line are told the call is recorded — so
+        the model can answer the question truthfully. Voice only: the text
+        simulator records nothing. Best-effort, savepoint inside the `try`;
+        a failure leaves the honest "cannot confirm" answer."""
+        if self._disclosure_settings is None or conversation.channel is not ConversationChannel.VOICE:
+            return None
+        try:
+            async with self._savepoints.isolate():
+                stored = await self._disclosure_settings.get(conversation.organization_id)
+        except Exception:
+            logger.warning("disclosure_policy_lookup_failed", exc_info=True)
+            return None
+        return (stored.policy if stored else DEFAULT_DISCLOSURE_POLICY).recording_notice
 
     async def _describe_tool_progress(
         self, organization_id: uuid.UUID, conversation_id: uuid.UUID
@@ -683,3 +752,14 @@ def _today_in(profile: BusinessProfile | None) -> date:
     except (ZoneInfoNotFoundError, ValueError):
         zone = ZoneInfo("UTC")
     return datetime.now(zone).date()
+
+
+def _with_safety_prefix(reply: AIReply, safety_prefix: str | None) -> AIReply:
+    """The reply as the caller actually heard it: the fixed safety
+    instruction, then the model's words. Stored that way so the transcript,
+    and every later prompt built from it, record that the instruction was
+    given."""
+    if not safety_prefix:
+        return reply
+    spoken = f"{safety_prefix} {reply.message_to_customer}".strip()
+    return replace(reply, message_to_customer=spoken)

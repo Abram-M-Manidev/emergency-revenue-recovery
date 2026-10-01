@@ -14,11 +14,16 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from app.api.deps import (
+    get_call_disclosure_service,
     get_call_transfer_settings_service,
     get_notification_settings_service,
     get_organization_service,
     get_paging_settings_service,
     require_permission,
+)
+from app.application.schemas.call_disclosure import (
+    CallDisclosureSettingsResponse,
+    ConfigureCallDisclosureRequest,
 )
 from app.application.schemas.call_transfer import (
     CallTransferSettingsResponse,
@@ -31,6 +36,7 @@ from app.application.schemas.notification_settings import (
 )
 from app.application.schemas.organization import OrganizationResponse, UpdateOrganizationRequest
 from app.application.schemas.paging import ConfigurePagingRequest, PagingSettingsResponse
+from app.application.services.call_disclosure_service import CallDisclosureService
 from app.application.services.call_transfer_settings_service import (
     CallTransferSettingsService,
 )
@@ -280,4 +286,53 @@ async def delete_paging_settings(
 ) -> Response:
     """Removes paging configuration and the stored numbers. Idempotent."""
     await service.delete(user.organization_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+# --- Caller disclosure (AI / recording notice) ---------------------------------
+#
+# Same authority and tenant rule as above. Unlike the other settings, a
+# GET always returns a policy: with nothing saved, the DEFAULT applies (both
+# notices on), and the response says so rather than returning null — "what
+# will callers hear?" must always have an answer.
+
+
+@router.get("/current/disclosure", response_model=CallDisclosureSettingsResponse)
+async def get_call_disclosure_settings(
+    user: User = Depends(_manage_user),
+    service: CallDisclosureService = Depends(get_call_disclosure_service),
+) -> CallDisclosureSettingsResponse:
+    context = await service.context_for(user.organization_id)
+    stored = await service.get_settings(user.organization_id)
+    return CallDisclosureSettingsResponse.build(
+        context.policy, business_name=context.business_name, stored=stored
+    )
+
+
+@router.put("/current/disclosure", response_model=CallDisclosureSettingsResponse)
+async def configure_call_disclosure_settings(
+    payload: ConfigureCallDisclosureRequest,
+    user: User = Depends(_manage_user),
+    service: CallDisclosureService = Depends(get_call_disclosure_service),
+) -> CallDisclosureSettingsResponse:
+    stored = await service.configure(
+        user.organization_id,
+        ai_disclosure=payload.ai_disclosure_enabled,
+        recording_notice=payload.recording_notice_enabled,
+    )
+    context = await service.context_for(user.organization_id)
+    return CallDisclosureSettingsResponse.build(
+        stored.policy, business_name=context.business_name, stored=stored
+    )
+
+
+@router.delete(
+    "/current/disclosure", status_code=status.HTTP_204_NO_CONTENT, response_model=None
+)
+async def reset_call_disclosure_settings(
+    user: User = Depends(_manage_user),
+    service: CallDisclosureService = Depends(get_call_disclosure_service),
+) -> Response:
+    """Back to the default (both notices on). Idempotent."""
+    await service.reset(user.organization_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

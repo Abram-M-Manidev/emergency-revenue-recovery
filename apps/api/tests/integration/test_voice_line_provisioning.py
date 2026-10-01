@@ -143,7 +143,9 @@ async def test_a_provisioned_line_routes_calls_and_is_visible_only_to_its_owner(
         headers={"x-vapi-secret": _SECRET},
     )
     assert call.status_code == 200
-    assert call.json()["choices"][0]["message"]["content"] == "Hello from A."
+    content = call.json()["choices"][0]["message"]["content"]  # A call's first reply now leads with the caller notice (Phase D).
+    assert content.startswith("You're speaking with an automated assistant for Visible A")
+    assert content.endswith("and this call is recorded. Hello from A.")
     async with AsyncSessionLocal() as session:
         voice_call = (
             await session.execute(select(VoiceCallModel).where(VoiceCallModel.vapi_call_id == call_id))

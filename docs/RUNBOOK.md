@@ -325,6 +325,55 @@ never "on the way".
 
 ---
 
+## Caller notice, recording, and life safety
+
+**Who controls what on a call**
+
+| Step | Controlled by | ERRS guarantee |
+|---|---|---|
+| Answering the call, starting a recording | Vapi (assistant settings) | none — recording may begin before any notice |
+| Static `firstMessage` | Vapi dashboard | none — said before ERRS hears the call |
+| Opening, when `firstMessageMode` is model-generated | **ERRS** (fixed text, no model) | greeting + notice are the call's first ERRS words |
+| First reply on the call | **ERRS** | notice precedes every word of model output, once per call |
+| Everything the model says after that | model, bound by the prompt | best-effort |
+
+The notice given is recorded on the call (`voice_calls.disclosure_sent_at`,
+`disclosed_ai`, `disclosed_recording`; NULL = unknown, i.e. calls from before
+this existed). If the policy cannot be read, the **full** notice is used
+(`call_disclosure_policy_unreadable`). A recording that arrives for a call
+that was told nothing about recording logs `voice_recording_without_notice`
+(error when known, warning when unknown) and shows **"No recording notice
+was given"** on the call in the dashboard. Recordings are never deleted.
+
+```bash
+essr logs --since 24h api | grep -E 'call_disclosure_(given|policy_unreadable|record_failed)|voice_recording_without_notice'
+essr exec postgres psql -U errs -d errs -c "
+  SELECT o.name, count(*) FILTER (WHERE v.recording_url IS NOT NULL AND v.disclosed_recording IS FALSE) AS recorded_without_notice
+    FROM voice_calls v JOIN organizations o ON o.id = v.organization_id
+   WHERE v.created_at > now() - interval '7 days' GROUP BY o.name;"
+```
+
+**Life safety.** When a caller's words describe smoke or fire, a gas smell,
+carbon monoxide, sparking, or flooding, fixed patterns in
+`app/domain/life_safety.py` (not the model) recognise it. The first time a
+hazard is reported, a fixed instruction is spoken before any model output, and
+it is kept in the transcript: get out or away from the hazard, call 911 (or
+"your local emergency number" when the business profile's country is not
+US/CA). For the rest of the call the prompt forbids troubleshooting,
+forbids telling the caller to operate any equipment, forbids implying they
+should wait for a technician instead, and forbids claiming the emergency
+services were contacted. **ERRS never contacts emergency services.** The ticket,
+alert, paging and transfer machinery runs exactly as for any emergency.
+`life_safety_instruction_given` logs the hazard kinds (never the caller's
+words).
+
+Limits: detection is keyword-based (English, and generous rather than
+precise). A hazard described in words it does not know gets no fixed
+instruction, only the standing prompt rule. After the first delivery, repeating
+the advice is up to the model, as directed by the prompt.
+
+---
+
 ## Disabling one tenant's voice assistant
 
 When a business's assistant is misbehaving and you need it to stop **now**.

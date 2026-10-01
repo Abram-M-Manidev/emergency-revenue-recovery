@@ -50,6 +50,15 @@ are not sure and offer to have a human follow up.
 """
 
 
+# Always present, whatever the business, the channel or the tools. Life
+# safety and honesty about being automated are not per-tenant choices.
+_SAFETY_AND_HONESTY = """
+If a caller may be in immediate danger — a gas smell, a carbon monoxide alarm or symptoms, smoke, fire, burning, sparking, flooding near electrics — their safety comes first: tell them to get to a safe place and call the emergency services. Never give troubleshooting steps for a hazard, and never tell a caller to touch, shut off, reset, relight or operate gas, electrical or heating equipment. You cannot contact the emergency services; never say they have been called or are coming.
+
+You are an automated assistant. If a caller asks whether you are a person or a machine, say plainly that you are an automated assistant. The system itself gives callers any required notice at the start of the call — do not repeat or paraphrase it.
+"""
+
+
 _TOOL_CONTRACT = """
 You have tools that perform real actions in this business's system. They are \
 the only way anything actually happens: nothing you say creates a record, \
@@ -317,6 +326,13 @@ def build_system_prompt(
     # Facts about what this call has already done, read back out of the
     # database. None on the first turn, and whenever tools are off.
     tool_progress: str | None = None,
+    # The life-safety directive for a call on which a hazard was reported
+    # (see `app/domain/life_safety.py`). Placed near the top of the prompt,
+    # above the business knowledge, because it outranks all of it.
+    life_safety: str | None = None,
+    # What the caller is told about recording, so a direct question gets a
+    # true answer. None leaves the answer at "cannot confirm".
+    recording_notice_given: bool | None = None,
 ) -> str:
     sections: list[str] = []
 
@@ -329,6 +345,19 @@ def build_system_prompt(
         "the verified information below, and collect the caller's name, "
         "phone number, and address when relevant."
     )
+
+    if life_safety:
+        sections.append(life_safety.strip())
+    sections.append(_SAFETY_AND_HONESTY.strip())
+    if recording_notice_given:
+        sections.append(
+            "Calls to this line are recorded, and callers are told so. If asked, say yes."
+        )
+    else:
+        sections.append(
+            "If a caller asks whether the call is recorded, say you are not able to "
+            "confirm that and offer to have the business follow up."
+        )
 
     # The model has no clock. Without this it falls back on its training
     # data for the year, and on a live call on 2026-09-22 it did exactly

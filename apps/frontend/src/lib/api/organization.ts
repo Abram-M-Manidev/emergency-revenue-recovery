@@ -1,6 +1,8 @@
 import { apiRequest } from "@/lib/api/client";
 import type {
+  CallDisclosureSettings,
   CallTransferSettings,
+  ConfigureCallDisclosurePayload,
   ConfigureCallTransferPayload,
   ConfigureNotificationsPayload,
   NotificationSettings,
@@ -11,6 +13,7 @@ import type {
 const BASE = "/organizations/current";
 const NOTIFICATIONS = `${BASE}/notifications`;
 const CALL_TRANSFER = `${BASE}/call-transfer`;
+const DISCLOSURE = `${BASE}/disclosure`;
 
 export function fetchCurrentOrganization(): Promise<Organization> {
   return apiRequest<Organization>(BASE);
@@ -62,4 +65,19 @@ export function configureCallTransferSettings(
 
 export function deleteCallTransferSettings(): Promise<void> {
   return apiRequest<void>(CALL_TRANSFER, { method: "DELETE" });
+}
+
+/** Always a policy: with nothing saved, the default (both notices) applies. */
+export function fetchCallDisclosureSettings(): Promise<CallDisclosureSettings> {
+  return apiRequest<CallDisclosureSettings>(DISCLOSURE);
+}
+
+export function configureCallDisclosureSettings(
+  payload: ConfigureCallDisclosurePayload,
+): Promise<CallDisclosureSettings> {
+  return apiRequest<CallDisclosureSettings>(DISCLOSURE, { method: "PUT", body: payload });
+}
+
+export function resetCallDisclosureSettings(): Promise<void> {
+  return apiRequest<void>(DISCLOSURE, { method: "DELETE" });
 }

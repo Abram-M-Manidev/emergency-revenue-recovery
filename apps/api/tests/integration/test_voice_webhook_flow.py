@@ -414,7 +414,10 @@ async def test_stream_true_returns_sse_with_content_and_done(
 
     assert frames[0]["choices"][0]["delta"] == {"role": "assistant"}
     streamed = "".join(f["choices"][0]["delta"].get("content", "") for f in frames)
-    assert streamed == "Help is on the way."
+    assert streamed == (  # A call's first reply now leads with the caller notice (Phase D).
+        "You're speaking with an automated assistant for Voice Stream Org C, and this call "
+        "is recorded. Help is on the way."
+    )
     assert frames[-1]["choices"][0]["finish_reason"] == "stop"
 
 
@@ -542,7 +545,10 @@ async def test_streaming_turn_persists_and_emits_done(
     assert response.text.count("data: [DONE]") == 1, "L. exactly one terminator"
 
     spoken = "".join(f["choices"][0]["delta"].get("content", "") for f in frames)
-    assert spoken == "Stay on the line."
+    assert spoken == (  # A call's first reply now leads with the caller notice (Phase D).
+        "You're speaking with an automated assistant for Voice P2 Org A, and this call "
+        "is recorded. Stay on the line."
+    )
 
     # The turn reached the database from inside the streaming generator.
     detail = await client.get("/api/v1/ai/conversations", headers=_auth_headers(token))

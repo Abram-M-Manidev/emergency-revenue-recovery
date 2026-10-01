@@ -181,6 +181,11 @@ export function ChatPanel({ conversationId, onConversationChange }: ChatPanelPro
                 Recording
               </a>
             ) : null}
+            {voiceCall.recording_notice_missing ? (
+              <Badge variant="destructive">No recording notice was given</Badge>
+            ) : voiceCall.recording_url && voiceCall.disclosed_recording == null ? (
+              <span className="text-xs">Recording notice: unknown</span>
+            ) : null}
           </div>
         ) : null}
 

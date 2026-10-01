@@ -26,3 +26,17 @@ class VoiceCall:
     recording_url: str | None
     created_at: datetime
     updated_at: datetime
+    # What this call was told about the assistant and recording, and when
+    # (see `app/domain/disclosure.py`). All None for a call that predates
+    # disclosure, or on which ERRS never got to speak — "unknown", which is
+    # deliberately not the same as "no notice was given".
+    disclosure_sent_at: datetime | None = None
+    disclosed_ai: bool | None = None
+    disclosed_recording: bool | None = None
+
+    @property
+    def recording_notice_missing(self) -> bool:
+        """A recording exists, and ERRS knows it did NOT tell the caller the
+        call was recorded. Unknown (no disclosure on record) is not
+        "missing": it cannot be asserted either way."""
+        return self.recording_url is not None and self.disclosed_recording is False

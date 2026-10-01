@@ -61,7 +61,9 @@ On the assistant that will serve the pilot business:
 | Server URL Secret | the same value as `VAPI_SERVER_SECRET` (stored as `assistant.server.headers` / `server.credentialId`) | Authenticates lifecycle events **only** |
 | End call message (`endCallMessage`) | **empty** | Spoken before every hangup regardless of outcome; a fixed sentence like "your appointment is booked" becomes a false statement to emergency callers |
 | Monitor plan → **control enabled** (`monitorPlan.controlEnabled = true`) | **on** | Human transfer. With it, Vapi includes `call.monitor.controlUrl` in each Custom-LLM request, and ERRS moves the call to a person by POSTing a `transfer` command to that URL. Without it every transfer is reported *unavailable* (the caller is offered a callback instead). **Do not** add Vapi's own `transferCall` tool or static transfer destinations — ERRS chooses the number per tenant from its own settings |
-| First message | the business's greeting | Spoken before the first model turn; ESSR does not supply it |
+| First message mode (`firstMessageMode`) | **`assistant-speaks-first-with-model-generated-message`** (recommended) | Vapi then asks ERRS for the opening, and ERRS answers — without the model — with the greeting **and the caller notice** (AI / recording, per Settings → Caller notice). The first words of the call then come from ERRS. Not yet confirmed on a real call (see Caller notice below) |
+| First message (`firstMessage`) | **empty** when the mode above is used; otherwise a short greeting **without** any AI/recording wording | A static first message is spoken by Vapi before ERRS sees the call. ERRS still puts its notice before its own first reply, so wording here would be said twice |
+| Recording (`artifactPlan.recordingEnabled`) | the business's decision | **Vapi, not ERRS, records calls.** Keep Settings → Caller notice → "recorded" on whenever this is on. A recording that arrives for a call told nothing about recording is flagged on that call |
 | End call function | **enabled** | The API emits an `endCall` tool call when a turn should hang up (completion gate, or a disabled assistant) |
 
 **Replace any ngrok/tunnel URL.** The repository contains no tunnel URLs —
@@ -252,6 +254,33 @@ the caller straight back to the assistant). Without this, a caller who asks
 for a person is told honestly that nobody can be connected right now and is
 offered a callback. See `docs/RUNBOOK.md` → **Human transfer** for the rules.
 
+### 5c. Caller notice — UI (Settings → Caller notice) or API
+
+```
+GET /api/v1/organizations/current/disclosure     # always answers; default = both notices
+PUT /api/v1/organizations/current/disclosure
+  { "ai_disclosure_enabled": true, "recording_notice_enabled": true }
+```
+
+What callers are told about the automated assistant and about recording. The
+response shows the exact sentence. ERRS speaks it, word for word, before its
+first reply on every call (or as part of the opening, when Vapi lets ERRS
+speak first). The model never decides whether it is said. The default, with
+nothing saved, is both notices.
+
+**What ERRS cannot control, and must be configured in Vapi:**
+
+- Vapi answers the call and starts any recording **before** ERRS receives
+  anything. No ERRS setting can put a notice ahead of that. The closest ERRS
+  can get is the opening (`firstMessageMode` above): ERRS's notice is then the
+  first thing said, a second or two after Vapi answers.
+- Whether calls are recorded at all is the Vapi assistant's setting.
+- A static Vapi `firstMessage` is said before ERRS's notice.
+
+This repository makes no claim about which notices any jurisdiction
+requires. Decide that with the business's own advisers; ERRS makes the
+chosen notice reliable.
+
 ### 6. Confirm the kill switch is on
 
 ```
@@ -274,6 +303,7 @@ discovered on a real call.
 | API docs | Not reachable in production | `/docs`, `/redoc` and `/openapi.json` are mounted at the **root**, not under `/api/v1`, so Caddy routes them to the frontend and they 404. Fine — arguably desirable on a public deployment — but it is accidental rather than chosen. |
 | Backups | Off-site, nightly | Uploaded to Backblaze B2, read back and sha256-verified, Object-Locked for 30 days; restorable onto a new VM (`docs/RUNBOOK.md` → Backups). Up to a day of writes can be lost — no point-in-time recovery. |
 | Alerting | None | Nothing pages you if the API dies or emergency alerts start failing. The `RUNBOOK.md` queries are the manual substitute. |
+| Caller notice | Default on (AI + recording) | ERRS speaks it before its first reply. Whether it precedes the start of recording depends on the Vapi assistant (`firstMessageMode`), and that has not yet been verified on a real call. |
 | Emergency paging | Off until configured | Needs a Twilio account (`PAGING_PROVIDER=twilio`). Never exercised against real Twilio in development; fire-drill before relying on it. |
 | Rate limits | Per worker | 4 uvicorn workers each count separately, so the effective ceiling is roughly 4× the configured value. |
 | `secure` cookie | Requires HTTPS | The refresh cookie sets `secure=True` in production. Logging in over plain http will appear to succeed and then immediately bounce back to `/login`, because the browser silently drops the cookie. Always test over the real domain. |
@@ -321,6 +351,8 @@ essr logs -f api | grep -E 'voice_request_received|voice_line_resolved|voice_too
 |---|---|
 | Non-emergency booking | Assistant offers times, you pick one **in a later turn**, it books. Appointment appears in the dashboard with the time you chose. |
 | Consent invariant | The assistant must not book a time you never selected. Offering is not choosing. |
+| Caller notice | The first thing ERRS says is the notice from Settings → Caller notice, said once. Note how long after the call connects it is heard: that gap is what Vapi controls. |
+| Life safety | Say "I smell gas": before anything else you hear the fixed safety instruction (leave, call 911). The assistant gives no troubleshooting, never says emergency services were called, and still logs the emergency. |
 | Emergency | Ticket appears in Dispatch; your webhook endpoint receives the alert; the assistant says a dispatcher was alerted **only if** it did. |
 | Emergency with alerting off | Assistant says the request is logged but the alert could not be confirmed — and does *not* claim a dispatcher was notified. |
 | Kill switch | Disable in Settings, call again: you hear the "automated assistant is unavailable" message and the call ends. Re-enable. |

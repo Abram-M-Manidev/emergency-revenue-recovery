@@ -15,6 +15,7 @@ from app.application.services.analytics_service import AnalyticsService
 from app.application.services.appointment_service import AppointmentService
 from app.application.services.auth_service import AuthService
 from app.application.services.business_knowledge_service import BusinessKnowledgeService
+from app.application.services.call_disclosure_service import CallDisclosureService
 from app.application.services.call_transfer_service import CallTransferService
 from app.application.services.call_transfer_settings_service import (
     CallTransferSettingsService,
@@ -74,6 +75,9 @@ from app.infrastructure.database.repositories import (
 from app.infrastructure.database.repositories.call_transfer_repository_impl import (
     SqlAlchemyCallTransferAttemptRepository,
     SqlAlchemyCallTransferSettingsRepository,
+)
+from app.infrastructure.database.repositories.disclosure_repository_impl import (
+    SqlAlchemyDisclosureSettingsRepository,
 )
 from app.infrastructure.database.repositories.paging_repository_impl import (
     SqlAlchemyEmergencyPageRepository,
@@ -380,12 +384,24 @@ def get_ai_brain_service(
         # passing the factory here does not by itself turn them on.
         tool_executor_factory=tool_executor_factory,
         savepoints=SqlAlchemySavepoints(db),
+        # Only so "is this call recorded?" gets a true answer on a voice call.
+        disclosure_settings_repository=SqlAlchemyDisclosureSettingsRepository(db),
+    )
+
+
+def get_call_disclosure_service(db: AsyncSession = Depends(get_db)) -> CallDisclosureService:
+    return CallDisclosureService(
+        settings_repository=SqlAlchemyDisclosureSettingsRepository(db),
+        organization_repository=SqlAlchemyOrganizationRepository(db),
+        business_profile_repository=SqlAlchemyBusinessProfileRepository(db),
+        savepoints=SqlAlchemySavepoints(db),
     )
 
 
 def get_voice_service(
     db: AsyncSession = Depends(get_db),
     ai_brain_service: AIBrainService = Depends(get_ai_brain_service),
+    disclosure_service: CallDisclosureService = Depends(get_call_disclosure_service),
 ) -> VoiceService:
     return VoiceService(
         voice_line_repository=SqlAlchemyVoiceLineRepository(db),
@@ -401,6 +417,9 @@ def get_voice_service(
         # deliberate fail-open direction for this control.
         organization_repository=SqlAlchemyOrganizationRepository(db),
         savepoints=SqlAlchemySavepoints(db),
+        # The caller notice: spoken by ERRS before its first reply on a call
+        # (or as the call's opening), decided here and never by the model.
+        disclosure_service=disclosure_service,
     )
 
 

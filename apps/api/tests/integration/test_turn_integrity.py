@@ -754,7 +754,9 @@ async def test_a_sip_caller_id_longer_than_a_phone_column_does_not_kill_the_call
         client, call_id=call_id, assistant_id=assistant_id, utterance="Hi", caller_number=sip
     )
     assert response.status_code == 200, response.text
-    assert _spoken_text(response) == "How can I help?"
+    spoken = _spoken_text(response)  # A call's first reply now leads with the caller notice (Phase D).
+    assert spoken.startswith("You're speaking with an automated assistant for ")
+    assert spoken.endswith("and this call is recorded. How can I help?")
 
     async with AsyncSessionLocal() as session:
         voice_call = (

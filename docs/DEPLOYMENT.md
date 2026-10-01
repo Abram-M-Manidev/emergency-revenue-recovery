@@ -251,6 +251,15 @@ channels, and minutes to acknowledge. Needs `PAGING_PROVIDER=twilio` and
 `PAGING_ACK_BASE_URL=https://YOUR_DOMAIN`. Run the paging fire-drill in
 `docs/RUNBOOK.md` → **Emergency paging** before relying on it.
 
+### 7d. Caller notice and Vapi first message
+
+Owner → **Settings → Caller notice** (default: AI + recording notice). On the
+Vapi assistant, set `firstMessageMode` to
+`assistant-speaks-first-with-model-generated-message` and leave `firstMessage`
+empty, so the call opens with ERRS's greeting and notice. Keep the notice's
+"recorded" option on whenever Vapi recording is on. See `docs/PILOT_LAUNCH.md`
+§B and §5c for what ERRS can and cannot guarantee.
+
 ### 8. Turn on external monitoring
 
 **Not optional for a phone line that takes emergency calls.** Every check in

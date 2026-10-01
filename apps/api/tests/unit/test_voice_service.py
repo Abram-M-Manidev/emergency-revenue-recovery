@@ -134,6 +134,17 @@ class FakeVoiceCallRepository(VoiceCallRepository):
         self._calls[vapi_call_id] = updated
         return updated
 
+    async def mark_disclosure(self, voice_call_id, *, sent_at, ai, recording):
+        for key, call in self._calls.items():
+            if call.id == voice_call_id:
+                if call.disclosure_sent_at is not None:
+                    return False
+                self._calls[key] = replace(
+                    call, disclosure_sent_at=sent_at, disclosed_ai=ai, disclosed_recording=recording
+                )
+                return True
+        return False
+
 
 def _make_voice_service(
     *,

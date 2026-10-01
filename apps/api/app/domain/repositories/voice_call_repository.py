@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from abc import ABC, abstractmethod
+from datetime import datetime
 
 from app.domain.entities.voice_call import VoiceCall
 
@@ -34,4 +35,17 @@ class VoiceCallRepository(ABC):
     ) -> VoiceCall:
         """No-op-safe: called from the `end-of-call-report` webhook, which
         Vapi may in principle redeliver."""
+        ...
+
+    @abstractmethod
+    async def mark_disclosure(
+        self,
+        voice_call_id: uuid.UUID,
+        *,
+        sent_at: datetime,
+        ai: bool,
+        recording: bool,
+    ) -> bool:
+        """Records the notice given on this call — once. Returns False (and
+        changes nothing) when one is already recorded."""
         ...

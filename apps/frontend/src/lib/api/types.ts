@@ -211,6 +211,12 @@ export interface VoiceCall {
   ended_reason: string | null;
   duration_seconds: number | null;
   recording_url: string | null;
+  /** What the caller was told at the start; all null when unknown (older calls). */
+  disclosure_sent_at?: string | null;
+  disclosed_ai?: boolean | null;
+  disclosed_recording?: boolean | null;
+  /** A recording exists and the caller was NOT told the call was recorded. */
+  recording_notice_missing?: boolean;
 }
 
 // --- Dispatch ---
@@ -503,4 +509,23 @@ export interface PageAcknowledgement {
   status: PageStatus;
   acknowledged_at: string | null;
   already_acknowledged: boolean;
+}
+
+// --- Caller disclosure ---
+
+export interface CallDisclosureSettings {
+  ai_disclosure_enabled: boolean;
+  recording_notice_enabled: boolean;
+  /** True when nothing is saved and the default (both notices) applies. */
+  is_default: boolean;
+  /** Spoken before the assistant's first reply; null when nothing is said. */
+  disclosure_sentence: string | null;
+  /** The whole opening, when the Vapi assistant lets ERRS speak first. */
+  opening_message: string;
+  updated_at: string | null;
+}
+
+export interface ConfigureCallDisclosurePayload {
+  ai_disclosure_enabled: boolean;
+  recording_notice_enabled: boolean;
 }

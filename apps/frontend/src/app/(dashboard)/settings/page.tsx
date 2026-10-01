@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 
+import { CallerDisclosureCard } from "@/components/settings/caller-disclosure-card";
 import { EmergencyNotificationsCard } from "@/components/settings/emergency-notifications-card";
 import { EmergencyPagingCard } from "@/components/settings/emergency-paging-card";
 import { HumanTransferCard } from "@/components/settings/human-transfer-card";
@@ -187,6 +188,7 @@ export default function SettingsPage() {
         onChange={setOrganization}
       />
 
+      <CallerDisclosureCard canManage={canManageOrganization} />
       <EmergencyNotificationsCard canManage={canManageOrganization} />
       <EmergencyPagingCard canManage={canManageOrganization} />
       <HumanTransferCard canManage={canManageOrganization} />

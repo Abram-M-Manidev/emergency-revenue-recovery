@@ -16,7 +16,8 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 
 import structlog
 from structlog.contextvars import bind_contextvars
@@ -25,6 +26,13 @@ from app.application.services.ai_brain_service import (
     AIBrainService,
     ConversationTextDelta,
     ConversationToolPhase,
+)
+from app.application.services.call_disclosure_service import CallDisclosureService
+from app.domain.disclosure import (
+    REPEAT_OPENING_MESSAGE,
+    DisclosurePolicy,
+    disclosure_sentence,
+    opening_message,
 )
 from app.domain.entities.conversation import ConversationChannel, ConversationStatus
 from app.domain.entities.conversation_message import ConversationMessage, MessageRole
@@ -208,6 +216,10 @@ class VoiceService:
         # Postgres, where a failed query would otherwise abort the turn's
         # transaction even though the exception is caught.
         savepoints: Savepoints | None = None,
+        # The caller notice (AI / recording). Optional so every existing
+        # construction site keeps working; absent, ERRS speaks no notice and
+        # the opening request keeps its old behaviour.
+        disclosure_service: CallDisclosureService | None = None,
     ) -> None:
         self._voice_lines = voice_line_repository
         self._voice_calls = voice_call_repository
@@ -217,6 +229,7 @@ class VoiceService:
         self._supersession = supersession or _SUPERSESSION
         self._organizations = organization_repository
         self._savepoints = savepoints or NullSavepoints()
+        self._disclosure = disclosure_service
 
     # --- Admin-facing reads ---
 
@@ -290,9 +303,10 @@ class VoiceService:
         async with self._call_lock.hold(vapi_call_id):
             voice_line = await self._resolve_voice_line(assistant_id, phone_number_id)
             organization_id = voice_line.organization_id
-            conversation_id = await self._conversation_id_for(
+            voice_call = await self._voice_call_for(
                 organization_id, vapi_call_id, customer_number
             )
+            conversation_id = voice_call.conversation_id
             # Bound here, inside the generator, rather than relying on the
             # request-scoped context propagating into a StreamingResponse
             # body that Starlette iterates after the handler has returned.
@@ -303,6 +317,15 @@ class VoiceService:
                 turn_sequence=sequence,
             )
             logger.info("voice_turn_started", streaming=True)
+
+            # The caller notice, before ANYTHING else ERRS says on this call
+            # - before the cached-reply shortcut, before the model is even
+            # asked. Decided here, not by the model, and at most once per
+            # call. Not counted as the caller "hearing speech" for the
+            # holding-phrase rule below: it answers nothing they said.
+            notice = await self._take_disclosure(organization_id, voice_call, via="first_reply")
+            if notice:
+                yield VoiceTextDelta(notice + " ")
 
             history = await self._conversations.list_messages(conversation_id)
             cached_reply = _last_answered_turn(history)
@@ -374,9 +397,9 @@ class VoiceService:
                         )
                     )
 
-    async def _conversation_id_for(
+    async def _voice_call_for(
         self, organization_id: uuid.UUID, vapi_call_id: str, customer_number: str | None
-    ) -> uuid.UUID:
+    ) -> VoiceCall:
         voice_call = await self._voice_calls.get_by_vapi_call_id(vapi_call_id)
         if voice_call is None:
             conversation = await self._ai_brain.start_conversation(
@@ -390,7 +413,7 @@ class VoiceService:
                 vapi_call_id=vapi_call_id,
                 caller_number=customer_number,
             )
-        return voice_call.conversation_id
+        return voice_call
 
     async def _handle_chat_completion_locked(
         self,
@@ -405,19 +428,7 @@ class VoiceService:
         voice_line = await self._resolve_voice_line(assistant_id, phone_number_id)
         organization_id = voice_line.organization_id
 
-        voice_call = await self._voice_calls.get_by_vapi_call_id(vapi_call_id)
-        if voice_call is None:
-            conversation = await self._ai_brain.start_conversation(
-                organization_id,
-                caller_phone_number=customer_number,
-                channel=ConversationChannel.VOICE,
-            )
-            voice_call = await self._voice_calls.create(
-                organization_id=organization_id,
-                conversation_id=conversation.id,
-                vapi_call_id=vapi_call_id,
-                caller_number=customer_number,
-            )
+        voice_call = await self._voice_call_for(organization_id, vapi_call_id, customer_number)
         conversation_id = voice_call.conversation_id
         bind_contextvars(
             conversation_id=str(conversation_id),
@@ -425,7 +436,32 @@ class VoiceService:
             turn_sequence=sequence,
         )
         logger.info("voice_turn_started", streaming=False)
+        result = await self._answer_locked(
+            vapi_call_id=vapi_call_id,
+            organization_id=organization_id,
+            conversation_id=conversation_id,
+            customer_utterance=customer_utterance,
+            sequence=sequence,
+        )
+        # Same rule as the streaming path — the notice leads ERRS's first
+        # reply on the call — but taken only once there IS a reply to lead.
+        # Here the whole reply is one body: if the turn raised, the transport
+        # speaks a fallback without the notice, so recording it as given
+        # would be false.
+        notice = await self._take_disclosure(organization_id, voice_call, via="first_reply")
+        if notice:
+            return replace(result, reply_text=f"{notice} {result.reply_text}".strip())
+        return result
 
+    async def _answer_locked(
+        self,
+        *,
+        vapi_call_id: str,
+        organization_id: uuid.UUID,
+        conversation_id: uuid.UUID,
+        customer_utterance: str,
+        sequence: int,
+    ) -> ChatCompletionResult:
         history = await self._conversations.list_messages(conversation_id)
         cached_reply = _last_answered_turn(history)
 
@@ -489,6 +525,92 @@ class VoiceService:
             conversation_id=conversation_id,
         )
 
+    # --- Caller disclosure ---
+
+    async def open_call(
+        self,
+        *,
+        vapi_call_id: str,
+        assistant_id: str | None,
+        phone_number_id: str | None,
+        customer_number: str | None,
+    ) -> str | None:
+        """The call's opening words, when Vapi asks ERRS for them (a request
+        with no caller utterance: the assistant's first message is set to be
+        model-generated). Deterministic - greeting plus notice, no model call.
+
+        Returns None, leaving the transport's previous behaviour untouched,
+        when no disclosure service is wired or when this call has already
+        had a turn (a no-utterance request mid-call is not an opening).
+        Raises exactly what a normal turn raises for an unknown line or a
+        switched-off assistant, so the transport answers those the same way.
+        """
+        if self._disclosure is None:
+            return None
+        async with self._call_lock.hold(vapi_call_id):
+            voice_line = await self._resolve_voice_line(assistant_id, phone_number_id)
+            organization_id = voice_line.organization_id
+            voice_call = await self._voice_call_for(organization_id, vapi_call_id, customer_number)
+            bind_contextvars(
+                conversation_id=str(voice_call.conversation_id),
+                organization_id=str(organization_id),
+            )
+            if await self._conversations.list_messages(voice_call.conversation_id):
+                return None
+            if voice_call.disclosure_sent_at is not None:
+                # A retried opening request: the notice was already given.
+                return REPEAT_OPENING_MESSAGE
+            context = await self._disclosure.context_for(organization_id)
+            await self._record_disclosure(organization_id, voice_call, context.policy, via="opening")
+            return opening_message(context.policy, context.business_name)
+
+    async def _take_disclosure(
+        self, organization_id: uuid.UUID, voice_call: VoiceCall, *, via: str
+    ) -> str | None:
+        """The notice to put before ERRS's reply, if this call has not had
+        one yet; None otherwise (or when no disclosure service is wired).
+
+        Marked as given in the same transaction as the turn. If the turn
+        rolls back, the mark goes with it and the next turn repeats the
+        notice - the safe direction."""
+        if self._disclosure is None or voice_call.disclosure_sent_at is not None:
+            return None
+        context = await self._disclosure.context_for(organization_id)
+        await self._record_disclosure(organization_id, voice_call, context.policy, via=via)
+        return disclosure_sentence(context.policy, context.business_name)
+
+    async def _record_disclosure(
+        self,
+        organization_id: uuid.UUID,
+        voice_call: VoiceCall,
+        policy: DisclosurePolicy,
+        *,
+        via: str,
+    ) -> None:
+        # Savepoint inside the `try`: failing to RECORD the notice must never
+        # stop it being SPOKEN, nor abort the turn's transaction.
+        try:
+            async with self._savepoints.isolate():
+                await self._voice_calls.mark_disclosure(
+                    voice_call.id,
+                    sent_at=datetime.now(timezone.utc),
+                    ai=policy.ai_disclosure,
+                    recording=policy.recording_notice,
+                )
+        except Exception as exc:
+            logger.error(
+                "call_disclosure_record_failed",
+                organization_id=str(organization_id),
+                error=type(exc).__name__,
+            )
+        logger.info(
+            "call_disclosure_given",
+            organization_id=str(organization_id),
+            via=via,
+            ai_disclosure=policy.ai_disclosure,
+            recording_notice=policy.recording_notice,
+        )
+
     async def handle_end_of_call_report(
         self,
         *,
@@ -528,6 +650,19 @@ class VoiceService:
             duration_seconds=duration_seconds,
             recording_url=recording_url,
         )
+        if recording_url is not None and voice_call.disclosed_recording is not True:
+            # Vapi recorded a call on which ERRS did not tell the caller so.
+            # Recording is Vapi's setting, not ours: this cannot be undone
+            # here, only surfaced - loudly when ERRS KNOWS no notice was given
+            # (the business switched it off), as a warning when it is unknown
+            # (ERRS never spoke on the call).
+            log = logger.error if voice_call.disclosed_recording is False else logger.warning
+            log(
+                "voice_recording_without_notice",
+                organization_id=str(voice_call.organization_id),
+                conversation_id=str(voice_call.conversation_id),
+                notice_known=voice_call.disclosure_sent_at is not None,
+            )
 
         conversation = await self._conversations.get_by_id(
             voice_call.organization_id, voice_call.conversation_id

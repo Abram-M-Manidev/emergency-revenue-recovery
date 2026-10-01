@@ -152,10 +152,37 @@ async def vapi_chat_completions(
 
     customer_utterance = _latest_customer_utterance(payload)
     if customer_utterance is None:
-        logger.warning("vapi_chat_completion_no_user_message", vapi_call_id=payload.call.id)
-        return _completion_response(
-            _FALLBACK_MESSAGE, should_end_call=False, stream=payload.stream
-        )
+        # No caller words yet: Vapi asking for the call's opening (the
+        # assistant's first message set to be model-generated). ERRS answers
+        # with a fixed greeting and the caller notice — no model involved —
+        # so the first words of the call come from ERRS, not from a Vapi
+        # dashboard field. See `app/domain/disclosure.py`.
+        try:
+            opening = await service.open_call(
+                vapi_call_id=payload.call.id,
+                assistant_id=payload.call.assistantId or payload.assistantId,
+                phone_number_id=payload.call.phoneNumberId or payload.phoneNumberId,
+                customer_number=caller_number,
+            )
+        except VoiceAssistantDisabledError:
+            logger.info("vapi_chat_completion_assistant_disabled", vapi_call_id=payload.call.id)
+            return _completion_response(
+                _ASSISTANT_DISABLED_MESSAGE, should_end_call=True, stream=payload.stream
+            )
+        except DomainError as exc:
+            logger.error(
+                "vapi_call_opening_failed",
+                error=exc.__class__.__name__,
+                vapi_call_id=payload.call.id,
+            )
+            opening = None
+        if opening is None:
+            logger.warning("vapi_chat_completion_no_user_message", vapi_call_id=payload.call.id)
+            return _completion_response(
+                _FALLBACK_MESSAGE, should_end_call=False, stream=payload.stream
+            )
+        logger.info("vapi_call_opened", vapi_call_id=payload.call.id)
+        return _completion_response(opening, should_end_call=False, stream=payload.stream)
 
     if payload.stream:
         # Live calls: forward the model's sentence as it is written so Vapi
