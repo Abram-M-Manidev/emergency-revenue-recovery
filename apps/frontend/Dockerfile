@@ -22,11 +22,23 @@ FROM base AS builder
 # this ARG the bundle silently fell back to http://localhost:8000/api/v1 (see
 # src/lib/constants.ts), so every browser called its own machine. The build
 # refuses to proceed without a value rather than ship that fallback again.
+#
+# It must also be https://. A non-empty value is not enough: the development
+# root .env sets NEXT_PUBLIC_API_BASE_URL=http://localhost:8000/api/v1, and
+# that variable overrides the production compose's ERRS_DOMAIN-derived
+# default — so a production build on a host still carrying the dev .env
+# would bake localhost in. The dashboard sends credentials, so it is https
+# or nothing. (Local rehearsals behind Caddy's internal CA use https too.)
 ARG NEXT_PUBLIC_API_BASE_URL
 ENV NEXT_PUBLIC_API_BASE_URL=$NEXT_PUBLIC_API_BASE_URL
 RUN test -n "$NEXT_PUBLIC_API_BASE_URL" || { \
       echo "NEXT_PUBLIC_API_BASE_URL build arg is required for the production frontend image" >&2; \
       exit 1; }
+RUN case "$NEXT_PUBLIC_API_BASE_URL" in \
+      https://*) ;; \
+      *) echo "NEXT_PUBLIC_API_BASE_URL must be an https:// URL for the production frontend image" >&2; \
+         exit 1 ;; \
+    esac
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 RUN npm run build
