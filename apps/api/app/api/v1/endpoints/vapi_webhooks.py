@@ -36,6 +36,7 @@ from structlog.contextvars import bind_contextvars
 from app.api.deps import (
     get_appointment_service,
     get_call_follow_up_service,
+    get_call_usage_service,
     get_customer_service,
     get_dispatch_service,
     get_savepoints,
@@ -45,6 +46,7 @@ from app.api.deps import (
 from app.application.schemas.voice import VapiChatCompletionRequest
 from app.application.services.appointment_service import AppointmentService
 from app.application.services.call_follow_up_service import CallFollowUpService
+from app.application.services.call_usage_service import CallUsageService
 from app.application.services.customer_service import CustomerService
 from app.application.services.dispatch_service import DispatchService
 from app.application.services.voice_service import (
@@ -60,6 +62,7 @@ from app.domain.exceptions import (
     VoiceAssistantDisabledError,
 )
 from app.domain.transactions import Savepoints
+from app.infrastructure.telephony.vapi_usage import parse_end_of_call_usage
 from app.shared.logging.timing import elapsed_ms, now
 from app.shared.utils.phone import storable_phone_number
 
@@ -752,6 +755,7 @@ async def vapi_events(
     payload: dict[str, Any] = Body(...),
     service: VoiceService = Depends(get_voice_service),
     follow_ups: CallFollowUpService = Depends(get_call_follow_up_service),
+    usage: CallUsageService = Depends(get_call_usage_service),
 ) -> dict[str, str]:
     """Vapi's Server URL lifecycle events (status updates, transcripts,
     end-of-call reports, ...). Accepted as a raw dict rather than a strict
@@ -799,6 +803,16 @@ async def vapi_events(
             )
         except Exception as exc:
             logger.error("call_follow_up_on_end_failed", error=type(exc).__name__)
+
+    # Usage metering, last: everything above is for the caller, this is
+    # bookkeeping. Runs whether or not ERRS ever held a conversation on the
+    # call (`ended` is None then), because Vapi bills those calls too.
+    # Contained twice over — the service swallows its own failures — so a
+    # metering defect can never fail the report or what it committed.
+    try:
+        await usage.record_end_of_call(parse_end_of_call_usage(message, vapi_call_id))
+    except Exception as exc:
+        logger.error("call_usage_on_end_failed", error=type(exc).__name__)
     return {"status": "ok"}
 
 

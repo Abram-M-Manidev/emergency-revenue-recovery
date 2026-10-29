@@ -29,6 +29,7 @@ from app.domain.ai.provider import (
     ConversationTurn,
 )
 from app.domain.ai.tools import VOICE_TOOLS, ToolExecutorFactory
+from app.domain.ai.usage import TokenUsageSink, TokenUsageTally
 from app.domain.disclosure import DEFAULT_DISCLOSURE_POLICY
 from app.domain.entities.business_hours import HoursException, WeeklyHours
 from app.domain.entities.business_profile import BusinessProfile
@@ -70,6 +71,7 @@ from app.domain.repositories.emergency_keyword_repository import EmergencyKeywor
 from app.domain.repositories.faq_repository import FAQRepository
 from app.domain.repositories.service_area_repository import ServiceAreaRepository
 from app.domain.repositories.service_repository import ServiceRepository
+from app.domain.repositories.usage_repository import LLMUsageRepository
 from app.domain.transactions import NullSavepoints, Savepoints
 from app.shared.logging.timing import elapsed_ms, now
 from app.shared.utils.phone import storable_phone_number
@@ -166,6 +168,9 @@ class AIBrainService:
         # Read only to answer "is this call recorded?" truthfully on a voice
         # call. Optional; absent, the assistant says it cannot confirm.
         disclosure_settings_repository: DisclosureSettingsRepository | None = None,
+        # Usage metering. Optional; absent, token usage is not recorded and
+        # nothing else about the turn changes.
+        llm_usage_repository: LLMUsageRepository | None = None,
     ) -> None:
         self._conversations = conversation_repository
         self._outcomes = conversation_outcome_repository
@@ -181,6 +186,7 @@ class AIBrainService:
         self._tool_executors = tool_executor_factory
         self._savepoints = savepoints or NullSavepoints()
         self._disclosure_settings = disclosure_settings_repository
+        self._llm_usage = llm_usage_repository
 
     async def start_conversation(
         self,
@@ -225,10 +231,17 @@ class AIBrainService:
     async def send_message(
         self, organization_id: uuid.UUID, conversation_id: uuid.UUID, customer_message: str
     ) -> ConversationTurnResult:
+        usage = TokenUsageTally()
         conversation, request, services, safety_prefix = await self._prepare_turn(
-            organization_id, conversation_id, customer_message
+            organization_id, conversation_id, customer_message, usage_sink=usage
         )
-        reply = _with_safety_prefix(await self._ai.generate_reply(request), safety_prefix)
+        try:
+            generated = await self._ai.generate_reply(request)
+        except AIProviderUnavailableError:
+            await self._record_llm_usage(conversation, usage)
+            raise
+        await self._record_llm_usage(conversation, usage)
+        reply = _with_safety_prefix(generated, safety_prefix)
         return await self._persist_turn(
             conversation, conversation_id, services, reply, customer_message
         )
@@ -243,8 +256,9 @@ class AIBrainService:
         validated reply arrives — same messages, same outcome upsert, same
         completion rule. Nothing is written from a partial response, so a
         stream that dies halfway leaves no half-formed outcome behind."""
+        usage = TokenUsageTally()
         conversation, request, services, safety_prefix = await self._prepare_turn(
-            organization_id, conversation_id, customer_message
+            organization_id, conversation_id, customer_message, usage_sink=usage
         )
 
         if safety_prefix:
@@ -254,13 +268,22 @@ class AIBrainService:
             yield ConversationTextDelta(safety_prefix + " ")
 
         reply: AIReply | None = None
-        async for event in self._ai.stream_reply(request):
-            if isinstance(event, AITextDelta):
-                yield ConversationTextDelta(event.text)
-            elif isinstance(event, AIToolPhase):
-                yield ConversationToolPhase(event.tool_names, event.model_already_spoke)
-            else:
-                reply = event.reply
+        try:
+            async for event in self._ai.stream_reply(request):
+                if isinstance(event, AITextDelta):
+                    yield ConversationTextDelta(event.text)
+                elif isinstance(event, AIToolPhase):
+                    yield ConversationToolPhase(event.tool_names, event.model_already_spoke)
+                else:
+                    reply = event.reply
+        except AIProviderUnavailableError:
+            # The transport turns this into a spoken fallback and commits, so
+            # the tokens already spent are still worth recording. An
+            # abandoned stream (GeneratorExit/CancelledError) is deliberately
+            # not handled: nothing may be awaited during that shutdown.
+            await self._record_llm_usage(conversation, usage)
+            raise
+        await self._record_llm_usage(conversation, usage)
 
         if reply is None:
             # A provider that ended its stream without the terminal event
@@ -281,7 +304,12 @@ class AIBrainService:
     # --- shared turn lifecycle (identical for streaming and non-streaming) ---
 
     async def _prepare_turn(
-        self, organization_id: uuid.UUID, conversation_id: uuid.UUID, customer_message: str
+        self,
+        organization_id: uuid.UUID,
+        conversation_id: uuid.UUID,
+        customer_message: str,
+        *,
+        usage_sink: TokenUsageSink | None = None,
     ) -> tuple[Conversation, AIRequest, list[Service], str | None]:
         conversation = await self.get_conversation(organization_id, conversation_id)
         if conversation.status is ConversationStatus.COMPLETED:
@@ -400,8 +428,35 @@ class AIBrainService:
                 if self._tools_enabled and self._tool_executors is not None
                 else None
             ),
+            usage_sink=usage_sink,
         )
         return conversation, request, services, safety_prefix
+
+    async def _record_llm_usage(self, conversation: Conversation, usage: TokenUsageTally) -> None:
+        """Adds this turn's provider-reported tokens to the conversation's
+        total. Strictly best-effort, savepoint inside the `try` (see
+        `_describe_tool_progress`): metering must never cost the caller the
+        turn, the booking, the ticket, or the alert this turn produced."""
+        if self._llm_usage is None:
+            return
+        totals = usage.totals()
+        if not totals:
+            return
+        try:
+            async with self._savepoints.isolate():
+                for total in totals:
+                    await self._llm_usage.add(
+                        organization_id=conversation.organization_id,
+                        conversation_id=conversation.id,
+                        channel=conversation.channel.value,
+                        total=total,
+                    )
+        except Exception as exc:
+            logger.warning(
+                "llm_usage_record_failed",
+                conversation_id=str(conversation.id),
+                error=type(exc).__name__,
+            )
 
     async def _recording_notice_given(self, conversation: Conversation) -> bool | None:
         """Whether callers on this line are told the call is recorded — so

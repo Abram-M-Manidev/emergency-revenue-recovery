@@ -33,6 +33,7 @@ from app.domain.ai.provider import (
     AIToolPhase,
 )
 from app.domain.ai.tools import BOOK_APPOINTMENT, TRANSFER_TO_HUMAN, ToolErrors, ToolInvocation
+from app.domain.ai.usage import TokenUsage, TokenUsageSink
 from app.domain.entities.conversation_outcome import CallClassification, RecommendedAction
 from app.domain.exceptions import AIProviderUnavailableError
 from app.infrastructure.ai.streaming_json import StreamingStringFieldExtractor
@@ -176,14 +177,20 @@ class OpenAIProvider(AIProvider):
         # and gpt-5.6-sol requires exactly that whenever tools are offered.
         for round_index in range(max_rounds + 1):
             allow_tools = request.tools_enabled and round_index < max_rounds
-            with _translated_api_errors():
-                response = await client.chat.completions.create(  # type: ignore[call-overload]
-                    model=config.model,
-                    messages=messages,
-                    response_format={"type": "json_schema", "json_schema": _JSON_SCHEMA},
-                    extra_body=self._extra_body_for(config),
-                    **self._tool_kwargs(request, allow_tools),
-                )
+            try:
+                with _translated_api_errors():
+                    response = await client.chat.completions.create(  # type: ignore[call-overload]
+                        model=config.model,
+                        messages=messages,
+                        response_format={"type": "json_schema", "json_schema": _JSON_SCHEMA},
+                        extra_body=self._extra_body_for(config),
+                        **self._tool_kwargs(request, allow_tools),
+                    )
+            except AIProviderUnavailableError:
+                # Attempted, outcome unknown: counted, never as zero tokens.
+                _report_usage(request.usage_sink, config.model, None)
+                raise
+            _report_usage(request.usage_sink, config.model, getattr(response, "usage", None))
 
             message = response.choices[0].message
             raw_tool_calls = message.tool_calls or []
@@ -271,6 +278,11 @@ class OpenAIProvider(AIProvider):
             history_turns=len(request.history),
             tools_enabled=request.tools_enabled,
         )
+        # True from the moment a round's request is sent until its usage has
+        # been reported. Whatever ends the turn early — a provider error, a
+        # failing tool, Vapi abandoning the stream — the `finally` below then
+        # still counts that request, as one whose usage never arrived.
+        usage_pending = False
 
         try:
             for round_index in range(max_rounds + 1):
@@ -302,7 +314,9 @@ class OpenAIProvider(AIProvider):
                 # so the ordinary path streams exactly as before.
                 hold_provisional_content = tool_failure_this_turn
                 held_content: list[str] = []
+                round_usage: Any = None
 
+                usage_pending = True
                 with _translated_api_errors():
                     stream = await client.chat.completions.create(  # type: ignore[call-overload]
                         model=config.model,
@@ -310,9 +324,17 @@ class OpenAIProvider(AIProvider):
                         response_format={"type": "json_schema", "json_schema": _JSON_SCHEMA},
                         extra_body=self._extra_body_for(config),
                         stream=True,
+                        # Usage arrives as one extra, final chunk with an
+                        # EMPTY `choices` list — skipped by the check below
+                        # like any other choice-less chunk, so it can never
+                        # reach the content or tool-call handling.
+                        stream_options={"include_usage": True},
                         **self._tool_kwargs(request, allow_tools),
                     )
                     async for chunk in stream:
+                        chunk_usage = getattr(chunk, "usage", None)
+                        if chunk_usage is not None:
+                            round_usage = chunk_usage
                         if not chunk.choices:
                             continue
                         delta = chunk.choices[0].delta
@@ -369,6 +391,8 @@ class OpenAIProvider(AIProvider):
                                     elapsed_ms=elapsed_ms(started_at, first_output_at),
                                 )
                             yield AITextDelta(text)
+                usage_pending = False
+                _report_usage(request.usage_sink, config.model, round_usage)
 
                 if tool_calls and allow_tools:
                     accumulated = [tool_calls[index] for index in sorted(tool_calls)]
@@ -475,6 +499,11 @@ class OpenAIProvider(AIProvider):
                 produced_output=first_output_at is not None,
             )
             raise
+        finally:
+            # Synchronous and non-raising, so it is safe even during
+            # generator shutdown, where nothing may be awaited.
+            if usage_pending:
+                _report_usage(request.usage_sink, config.model, None)
 
     # --- shared request construction (identical for both paths) ---
 
@@ -700,6 +729,40 @@ def _updated_booking_state(previously_failed: bool, outcome: _ToolRoundOutcome) 
     if outcome.booking_succeeded:
         return False
     return previously_failed or outcome.booking_failed
+
+
+def _report_usage(sink: TokenUsageSink | None, model: str, usage: Any) -> None:
+    """Hands one request's provider-reported usage to the sink. Never raises:
+    metering must not be able to cost the caller a turn. `usage` None means
+    the provider never reported it."""
+    if sink is None:
+        return
+    try:
+        sink.record(_token_usage(model, usage))
+    except Exception:
+        logger.warning("ai_usage_report_failed", exc_info=True)
+
+
+def _token_usage(model: str, usage: Any) -> TokenUsage:
+    prompt = _token_count(getattr(usage, "prompt_tokens", None))
+    completion = _token_count(getattr(usage, "completion_tokens", None))
+    if usage is None or (prompt is None and completion is None):
+        return TokenUsage(model=model, reported=False)
+    cached = _token_count(
+        getattr(getattr(usage, "prompt_tokens_details", None), "cached_tokens", None)
+    )
+    return TokenUsage(
+        model=model,
+        prompt_tokens=prompt or 0,
+        cached_prompt_tokens=cached or 0,
+        completion_tokens=completion or 0,
+    )
+
+
+def _token_count(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
 
 
 @contextmanager

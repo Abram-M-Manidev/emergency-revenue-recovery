@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from app.domain.ai.tools import ToolDefinition, ToolExecutor
+from app.domain.ai.usage import TokenUsageSink
 from app.domain.entities.conversation_outcome import CallClassification, RecommendedAction
 
 
@@ -58,6 +59,9 @@ class AIRequest:
     # unchanged either way.
     tools: tuple[ToolDefinition, ...] = ()
     tool_executor: ToolExecutor | None = None
+    # Where the provider reports the tokens each model request used. None
+    # (every existing caller and fake) means usage is simply not collected.
+    usage_sink: TokenUsageSink | None = None
 
     @property
     def tools_enabled(self) -> bool:

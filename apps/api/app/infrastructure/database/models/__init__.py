@@ -44,6 +44,10 @@ from app.infrastructure.database.models.role import (
 from app.infrastructure.database.models.service import ServiceModel
 from app.infrastructure.database.models.service_area import ServiceAreaModel
 from app.infrastructure.database.models.technician_profile import TechnicianProfileModel
+from app.infrastructure.database.models.usage import (
+    CallUsageRecordModel,
+    ConversationLLMUsageModel,
+)
 from app.infrastructure.database.models.user import UserModel
 from app.infrastructure.database.models.voice_call import VoiceCallModel
 from app.infrastructure.database.models.voice_line import VoiceLineModel
@@ -53,6 +57,8 @@ __all__ = [
     "BusinessProfileModel",
     "CallFollowUpModel",
     "CallTransferAttemptModel",
+    "CallUsageRecordModel",
+    "ConversationLLMUsageModel",
     "ConversationMessageModel",
     "ConversationModel",
     "ConversationOutcomeModel",

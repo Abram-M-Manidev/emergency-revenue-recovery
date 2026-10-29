@@ -21,6 +21,7 @@ from app.application.services.call_transfer_service import CallTransferService
 from app.application.services.call_transfer_settings_service import (
     CallTransferSettingsService,
 )
+from app.application.services.call_usage_service import CallUsageService
 from app.application.services.customer_service import CustomerService
 from app.application.services.dispatch_service import DispatchService
 from app.application.services.emergency_notification_service import (
@@ -86,6 +87,10 @@ from app.infrastructure.database.repositories.disclosure_repository_impl import 
 from app.infrastructure.database.repositories.paging_repository_impl import (
     SqlAlchemyEmergencyPageRepository,
     SqlAlchemyPagingSettingsRepository,
+)
+from app.infrastructure.database.repositories.usage_repository_impl import (
+    SqlAlchemyCallUsageRepository,
+    SqlAlchemyLLMUsageRepository,
 )
 from app.infrastructure.database.session import get_db
 from app.infrastructure.database.transactions import SessionAfterCommit, SqlAlchemySavepoints
@@ -413,6 +418,20 @@ def get_ai_brain_service(
         savepoints=SqlAlchemySavepoints(db),
         # Only so "is this call recorded?" gets a true answer on a voice call.
         disclosure_settings_repository=SqlAlchemyDisclosureSettingsRepository(db),
+        # Usage metering: provider-reported tokens per conversation.
+        # Best-effort; a failure never reaches the turn.
+        llm_usage_repository=SqlAlchemyLLMUsageRepository(db),
+    )
+
+
+def get_call_usage_service(db: AsyncSession = Depends(get_db)) -> CallUsageService:
+    """Per-call usage from the end-of-call report. Records only — nothing it
+    does changes how any call is handled."""
+    return CallUsageService(
+        usage_repository=SqlAlchemyCallUsageRepository(db),
+        voice_call_repository=SqlAlchemyVoiceCallRepository(db),
+        voice_line_repository=SqlAlchemyVoiceLineRepository(db),
+        savepoints=SqlAlchemySavepoints(db),
     )
 
 
