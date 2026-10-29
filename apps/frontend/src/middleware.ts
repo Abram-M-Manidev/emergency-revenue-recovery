@@ -26,8 +26,11 @@ export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
   const hasSession = request.cookies.has(AUTH_COOKIE_NAME);
 
+  // `/` is the public marketing page; signed-in users go straight to the app.
   if (pathname === "/") {
-    return NextResponse.redirect(new URL(hasSession ? ROUTES.dashboard : ROUTES.login, request.url));
+    return hasSession
+      ? NextResponse.redirect(new URL(ROUTES.dashboard, request.url))
+      : NextResponse.next();
   }
 
   const isProtected = PROTECTED_PREFIXES.some((prefix) => pathname.startsWith(prefix));
