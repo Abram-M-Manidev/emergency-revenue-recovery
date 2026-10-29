@@ -302,7 +302,7 @@ discovered on a real call.
 | Registration enumeration | Present | A duplicate email returns a distinguishable error, so account existence is discoverable. |
 | API docs | Not reachable in production | `/docs`, `/redoc` and `/openapi.json` are mounted at the **root**, not under `/api/v1`, so Caddy routes them to the frontend and they 404. Fine — arguably desirable on a public deployment — but it is accidental rather than chosen. |
 | Backups | Off-site, nightly | Uploaded to Backblaze B2, read back and sha256-verified, Object-Locked for 30 days; restorable onto a new VM (`docs/RUNBOOK.md` → Backups). Up to a day of writes can be lost — no point-in-time recovery. |
-| Alerting | None | Nothing pages you if the API dies or emergency alerts start failing. The `RUNBOOK.md` queries are the manual substitute. |
+| Alerting | External, operator-configured | API-down and missed-backup alerts exist only once the two monitors in `docs/RUNBOOK.md` → **External monitoring** are set up (uptime check on `/api/v1/health/ready`, backup heartbeat via `BACKUP_HEARTBEAT_URL`). Nothing pages you when emergency alerts start failing for one tenant; the `RUNBOOK.md` queries are the manual substitute. |
 | Caller notice | Default on (AI + recording) | ERRS speaks it before its first reply. Whether it precedes the start of recording depends on the Vapi assistant (`firstMessageMode`), and that has not yet been verified on a real call. |
 | Emergency paging | Off until configured | Needs a Twilio account (`PAGING_PROVIDER=twilio`). Never exercised against real Twilio in development; fire-drill before relying on it. |
 | Rate limits | Per worker | 4 uvicorn workers each count separately, so the effective ceiling is roughly 4× the configured value. |

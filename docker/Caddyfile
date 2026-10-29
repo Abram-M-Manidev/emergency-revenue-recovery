@@ -37,8 +37,10 @@
 	# The API, including the Vapi webhook path. Ordered before the frontend
 	# catch-all because Caddy matches the most specific route.
 	#
-	# /health and /docs are under /api/v1 already (see app/api/v1/router.py),
-	# so this one matcher covers the API surface entirely.
+	# /health is under /api/v1 (see app/api/v1/router.py), so this one
+	# matcher covers the API surface. /docs, /redoc and /openapi.json are
+	# FastAPI defaults mounted at the root, not under /api/v1, so they fall
+	# through to the frontend and 404 — the API docs are not public.
 	handle /api/* {
 		reverse_proxy api:8000 {
 			# X-Forwarded-Proto and X-Forwarded-For are NOT set explicitly

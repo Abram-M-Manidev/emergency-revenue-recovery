@@ -781,6 +781,8 @@ Stated so nobody discovers it during an incident:
   configured value.
 - **No data-deletion / retention tooling.** Transcripts and customer records
   accumulate indefinitely; there is no self-serve erasure path yet.
-- **Voice line provisioning is manual** — a SQL insert, no UI.
+- **Voice line provisioning has no UI** — it is done with the operator CLI
+  (`python -m app.cli.voice_lines`, `docs/PILOT_LAUNCH.md` §5), never by
+  hand-written SQL.
 
 These are Phase 3 items, not oversights.
