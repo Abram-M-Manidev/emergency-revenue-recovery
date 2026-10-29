@@ -1,5 +1,5 @@
 import { apiRequest } from "@/lib/api/client";
-import type { VoiceCall, VoiceLine } from "@/lib/api/types";
+import type { CallFollowUp, VoiceCall, VoiceLine } from "@/lib/api/types";
 
 const BASE = "/voice";
 
@@ -9,4 +9,15 @@ export function fetchVoiceLine(): Promise<VoiceLine | null> {
 
 export function fetchVoiceCall(conversationId: string): Promise<VoiceCall> {
   return apiRequest<VoiceCall>(`${BASE}/calls/${conversationId}`);
+}
+
+/** Calls that ended without their request being recorded; open ones unless asked. */
+export function fetchFollowUps(includeResolved = false): Promise<CallFollowUp[]> {
+  return apiRequest<CallFollowUp[]>(
+    `${BASE}/follow-ups${includeResolved ? "?include_resolved=true" : ""}`,
+  );
+}
+
+export function resolveFollowUp(followUpId: string): Promise<CallFollowUp> {
+  return apiRequest<CallFollowUp>(`${BASE}/follow-ups/${followUpId}/resolve`, { method: "POST" });
 }

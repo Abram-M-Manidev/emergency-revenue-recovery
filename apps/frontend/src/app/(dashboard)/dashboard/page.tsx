@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { PhoneCall, Siren, TrendingUp, Users } from "lucide-react";
 import Link from "next/link";
 
+import { FollowUpQueue } from "@/components/follow-ups/follow-up-queue";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { EmptyState } from "@/components/ui/empty-state";
 import { useAuth } from "@/hooks/use-auth";
@@ -93,6 +94,8 @@ export default function DashboardPage() {
           {user ? `Signed in as ${user.email}` : "Loading your workspace..."}
         </p>
       </div>
+
+      <FollowUpQueue />
 
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
         <Link href={ROUTES.dispatch}>

@@ -189,6 +189,15 @@ class CallTransferService:
             "next_step": _AFTER_INITIATED.format(announcement=announcement),
         }
 
+    async def list_for_conversation(
+        self, organization_id: uuid.UUID, conversation_id: uuid.UUID
+    ) -> list[CallTransferAttempt]:
+        """Every transfer attempt on this call, oldest first, for the owner's
+        call view. Scoped to the organization: another tenant's conversation
+        id simply has none."""
+        attempts = await self._attempts.list_for_conversation(conversation_id)
+        return [a for a in attempts if a.organization_id == organization_id]
+
     async def progress_note(
         self,
         *,

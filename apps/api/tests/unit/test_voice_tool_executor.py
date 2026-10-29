@@ -774,7 +774,7 @@ async def test_the_emergency_flow_keeps_its_emergency_behaviour():
     """The separation must cut both ways — an emergency still routes as one.
 
     What the assistant may SAY about a dispatcher is a separate question,
-    settled by `dispatcher_alerted` and covered in
+    settled by `alert_delivered` and covered in
     `test_emergency_notification.py`. This test is about routing, so it
     asserts on the routing fields only."""
     harness = _Harness(notification_status=DeliveryStatus.DELIVERED)
@@ -788,7 +788,7 @@ async def test_the_emergency_flow_keeps_its_emergency_behaviour():
     assert result["service_request_type"] == "emergency_ticket"
     # The turn that opens the ticket only queues the alert (the outbox), so
     # it may say the team is BEING alerted — never that it has been.
-    assert result["dispatcher_alerted"] is False
+    assert result["alert_delivered"] is False
     assert result["notification_status"] == "pending"
     assert "being sent right now" in result["next_step"]
 
@@ -797,7 +797,9 @@ async def test_the_emergency_flow_keeps_its_emergency_behaviour():
     await harness.notifications.deliver_next_due()
     progress = await harness.factory.describe_progress(_ORG_ID, _CONVERSATION_ID)
     assert progress is not None
-    assert "A dispatcher has been alerted" in progress
+    # Delivered to the alert channel is not a person reached (B4).
+    assert "sent to the team" in progress
+    assert "A dispatcher has been alerted" not in progress
     assert "do NOT offer or attempt an appointment" in progress
 
 

@@ -16,6 +16,7 @@ from app.application.services.appointment_service import AppointmentService
 from app.application.services.auth_service import AuthService
 from app.application.services.business_knowledge_service import BusinessKnowledgeService
 from app.application.services.call_disclosure_service import CallDisclosureService
+from app.application.services.call_follow_up_service import CallFollowUpService
 from app.application.services.call_transfer_service import CallTransferService
 from app.application.services.call_transfer_settings_service import (
     CallTransferSettingsService,
@@ -71,6 +72,9 @@ from app.infrastructure.database.repositories import (
     SqlAlchemyUserRepository,
     SqlAlchemyVoiceCallRepository,
     SqlAlchemyVoiceLineRepository,
+)
+from app.infrastructure.database.repositories.call_follow_up_repository_impl import (
+    SqlAlchemyCallFollowUpRepository,
 )
 from app.infrastructure.database.repositories.call_transfer_repository_impl import (
     SqlAlchemyCallTransferAttemptRepository,
@@ -349,6 +353,29 @@ def get_call_transfer_service(db: AsyncSession) -> CallTransferService:
         voice_line_repository=SqlAlchemyVoiceLineRepository(db),
         emergency_ticket_repository=SqlAlchemyEmergencyTicketRepository(db),
         transfer_port=VapiCallControlTransfer(),
+    )
+
+
+def get_call_follow_up_service(
+    db: AsyncSession = Depends(get_db),
+    dispatch_service: DispatchService = Depends(get_dispatch_service),
+    appointment_service: AppointmentService = Depends(get_appointment_service),
+) -> CallFollowUpService:
+    """Calls ERRS could not finish: the AI-outage path and the end-of-call
+    rule. Built on the request's session so a follow-up, the ticket it opens
+    and that ticket's queued alert all commit together."""
+    return CallFollowUpService(
+        follow_up_repository=SqlAlchemyCallFollowUpRepository(db),
+        conversation_repository=SqlAlchemyConversationRepository(db),
+        emergency_keyword_repository=SqlAlchemyEmergencyKeywordRepository(db),
+        business_profile_repository=SqlAlchemyBusinessProfileRepository(db),
+        transfer_attempt_repository=SqlAlchemyCallTransferAttemptRepository(db),
+        dispatch_service=dispatch_service,
+        appointment_service=appointment_service,
+        # The outage path's way to a person: the same per-tenant transfer
+        # settings and provider the `transfer_to_human` tool uses.
+        call_transfer_service=get_call_transfer_service(db),
+        savepoints=SqlAlchemySavepoints(db),
     )
 
 

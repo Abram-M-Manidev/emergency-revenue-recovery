@@ -217,6 +217,52 @@ export interface VoiceCall {
   disclosed_recording?: boolean | null;
   /** A recording exists and the caller was NOT told the call was recorded. */
   recording_notice_missing?: boolean;
+  /** Every attempt to hand the call to a person, oldest first. */
+  transfer_attempts?: CallTransferAttempt[];
+  /** Set when the call ended without its request being recorded. */
+  follow_up?: CallFollowUp | null;
+}
+
+export type TransferStatus =
+  | "requested"
+  | "destination_resolved"
+  | "initiated"
+  | "unavailable"
+  | "failed";
+
+export type TransferReason =
+  | "caller_requested"
+  | "caller_frustrated"
+  | "out_of_scope"
+  | "emergency_policy"
+  | "system_unavailable";
+
+export interface CallTransferAttempt {
+  status: TransferStatus;
+  reason: TransferReason;
+  is_emergency: boolean;
+  destination_kind: "business_hours" | "after_hours" | null;
+  /** Masked, e.g. "+1•••••4567". */
+  destination: string | null;
+  error_code: string | null;
+  created_at: string | null;
+}
+
+export type FollowUpReason =
+  | "ai_unavailable"
+  | "ended_before_request_recorded"
+  | "transferred_before_request_recorded";
+
+export interface CallFollowUp {
+  id: string;
+  conversation_id: string;
+  reason: FollowUpReason;
+  possible_emergency: boolean;
+  emergency_ticket_id: string | null;
+  caller_number: string | null;
+  created_at: string | null;
+  resolved_at: string | null;
+  resolved_by_user_id: string | null;
 }
 
 // --- Dispatch ---

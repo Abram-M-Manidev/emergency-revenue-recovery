@@ -66,13 +66,19 @@ class DeliveryStatus(str, Enum):
     NOT_CONFIGURED = "not_configured"
 
     @property
-    def alerted_a_human(self) -> bool:
-        """The single question the caller-facing sentence turns on.
+    def reached_destination(self) -> bool:
+        """Whether the alert reached the business's alert destination — the
+        question the caller-facing sentence turns on.
+
+        Deliberately NOT "a human was told". A webhook answering 2xx proves
+        the message reached a channel or an automation, not that anyone read
+        it; this used to be called `alerted_a_human` and licensed the
+        assistant to say a dispatcher would call (B4, 2026-10-28 audit).
+        Only an acknowledged page is evidence of a person.
 
         A property rather than an `is DELIVERED` comparison scattered across
         call sites, so that if another terminal status is ever added there is
-        exactly one place deciding whether it counts as a human having been
-        told."""
+        exactly one place deciding whether it counts as delivered."""
         return self is DeliveryStatus.DELIVERED
 
 
@@ -156,8 +162,8 @@ class NotificationDelivery:
     next_attempt_at: datetime | None = None
 
     @property
-    def alerted_a_human(self) -> bool:
-        return self.status.alerted_a_human
+    def reached_destination(self) -> bool:
+        return self.status.reached_destination
 
     @property
     def is_queued(self) -> bool:

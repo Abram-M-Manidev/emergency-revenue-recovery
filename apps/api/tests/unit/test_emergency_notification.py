@@ -158,7 +158,7 @@ async def test_enqueue_records_a_pending_alert_and_sends_nothing():
     assert provider.sends == []
     assert delivery.status is DeliveryStatus.PENDING
     assert delivery.is_queued is True
-    assert delivery.alerted_a_human is False
+    assert delivery.reached_destination is False
     assert repo.rows[ticket.id].next_attempt_at is not None
 
 
@@ -208,7 +208,7 @@ async def test_a_successful_alert_is_recorded_as_delivered():
 
     assert delivery is not None
     assert delivery.status is DeliveryStatus.DELIVERED
-    assert delivery.alerted_a_human is True
+    assert delivery.reached_destination is True
     assert delivery.attempts == 1
     assert delivery.delivered_at is not None
     assert delivery.next_attempt_at is None
@@ -228,7 +228,7 @@ async def test_a_refused_alert_leaves_the_ticket_and_schedules_a_retry():
 
     assert delivery is not None
     assert delivery.status is DeliveryStatus.FAILED
-    assert delivery.alerted_a_human is False
+    assert delivery.reached_destination is False
     assert delivery.error_code == "http_500"
     assert delivery.is_queued is True, "a failed alert with budget left must be retried"
     assert ticket.id in tickets.by_id
@@ -361,7 +361,7 @@ async def test_a_slow_provider_is_cut_off_and_recorded_as_a_failed_attempt():
     assert delivery is not None
     assert delivery.status is DeliveryStatus.FAILED
     assert delivery.error_code == "timeout"
-    assert delivery.alerted_a_human is False
+    assert delivery.reached_destination is False
 
 
 @pytest.mark.asyncio
@@ -433,7 +433,7 @@ async def test_delivery_state_is_readable_without_sending():
     found = await service.get_delivery(_ORG_ID, ticket.id)
     missing = await service.get_delivery(_OTHER_ORG_ID, ticket.id)
 
-    assert found is not None and found.alerted_a_human is True
+    assert found is not None and found.reached_destination is True
     assert missing is None
     assert len(provider.sends) == 1
 
@@ -465,7 +465,7 @@ async def test_the_null_provider_never_reports_delivery():
     receipt = await NullNotificationProvider().send(_alert(), None)
 
     assert receipt.status is DeliveryStatus.NOT_CONFIGURED
-    assert receipt.status.alerted_a_human is False
+    assert receipt.status.reached_destination is False
 
 
 @pytest.mark.asyncio
@@ -661,7 +661,7 @@ async def test_a_queued_alert_licenses_being_alerted_but_not_alerted():
 
     result = await harness.report_emergency()
 
-    assert result["dispatcher_alerted"] is False
+    assert result["alert_delivered"] is False
     assert result["notification_status"] == "pending"
     guidance = result["next_step"]
     assert "being sent right now" in guidance
@@ -679,7 +679,7 @@ async def test_an_unconfigured_organization_forbids_the_dispatcher_sentence():
     assert result["success"] is True
     assert result["service_request_type"] == "emergency_ticket"
     assert await harness.tickets.get_by_conversation_id(harness.conversation_id) is not None
-    assert result["dispatcher_alerted"] is False
+    assert result["alert_delivered"] is False
     assert result["notification_status"] == "not_configured"
     guidance = result["next_step"]
     assert "could NOT be confirmed" in guidance
@@ -694,7 +694,7 @@ async def test_a_missing_notification_service_still_forbids_the_claim():
     result = await harness.report_emergency()
 
     assert result["success"] is True
-    assert result["dispatcher_alerted"] is False
+    assert result["alert_delivered"] is False
     assert "Do NOT say a dispatcher has been alerted" in result["next_step"]
 
 
@@ -722,7 +722,9 @@ async def test_a_later_turn_reads_the_alert_state_rather_than_assuming_it():
     assert "Do NOT say a dispatcher HAS been alerted" in queued_progress
 
     assert delivered_progress is not None
-    assert "A dispatcher has been alerted and will contact them" in delivered_progress
+    # Delivered to the alert channel is not a person reached (B4).
+    assert "sent to the team" in delivered_progress
+    assert "A dispatcher has been alerted" not in delivered_progress
     assert "could NOT be confirmed" not in delivered_progress
 
     assert failed_progress is not None
@@ -757,3 +759,41 @@ async def test_the_alert_never_carries_the_destination_into_the_tool_result():
     rendered = " ".join(str(value) for value in result.values())
     assert _DESTINATION not in rendered
     assert "hooks.example.invalid" not in rendered
+
+
+# --- B4 (2026-10-28 audit): a delivered alert is not a person reached --------
+
+
+@pytest.mark.asyncio
+async def test_a_delivered_alert_is_reported_as_delivered_never_as_a_person_alerted():
+    """A webhook 2xx is evidence the message reached the business's alert
+    channel. It is not evidence anyone read it, so neither the field name
+    nor the sentence beside it may say a dispatcher was alerted."""
+    harness = _ToolHarness(notification_status=DeliveryStatus.DELIVERED)
+    await harness.report_emergency()
+    await harness.deliver()
+
+    # Re-running the tool on the same call reads the delivered state back.
+    result = await harness.report_emergency()
+
+    assert "dispatcher_alerted" not in result
+    assert result["alert_delivered"] is True
+    guidance = result["next_step"]
+    assert "A dispatcher has been alerted" not in guidance
+    # What is licensed is the delivery, and the person is explicitly not.
+    assert "You may say it has been sent to the team" in guidance
+    assert "Do NOT say a dispatcher has been alerted, will contact" in guidance
+
+
+@pytest.mark.asyncio
+async def test_a_later_turn_after_delivery_promises_no_person():
+    harness = _ToolHarness(notification_status=DeliveryStatus.DELIVERED)
+    await harness.report_emergency()
+    await harness.deliver()
+
+    progress = await harness.factory.describe_progress(_ORG_ID, harness.conversation_id)
+
+    assert progress is not None
+    assert "A dispatcher has been alerted" not in progress
+    assert "You may say it has been sent to the team" in progress
+    assert "do NOT say a dispatcher has been alerted, will contact" in progress

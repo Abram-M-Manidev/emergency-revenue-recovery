@@ -200,14 +200,27 @@ def test_the_dispatcher_claim_is_bound_to_the_tool_result_not_the_models_judgeme
     stated here in both directions."""
     prompt = _build(tools_enabled=True)
 
-    assert '"dispatcher_alerted"' in prompt
+    assert '"alert_delivered"' in prompt
     assert "Never decide it yourself" in prompt
     # The true branch.
-    assert '"dispatcher_alerted": true' in prompt
+    assert '"alert_delivered": true' in prompt
     # The false branch, which is the one that used to be missing entirely.
-    assert '"dispatcher_alerted": false' in prompt
+    assert '"alert_delivered": false' in prompt
     assert "Do NOT say a dispatcher has been alerted" in prompt
     assert "emergency services" in prompt
+
+
+def test_a_delivered_alert_never_licenses_saying_a_person_was_told():
+    """B4 (2026-10-28 audit). A webhook answering 2xx proves the message
+    reached a Slack channel or an automation, not that anyone read it. The
+    prompt used to turn that into "a dispatcher has been alerted and will
+    contact them shortly" — a promise nothing backs. Only an acknowledged
+    page is evidence of a person."""
+    prompt = _build(tools_enabled=True)
+
+    assert '"dispatcher_alerted"' not in prompt
+    assert "say a dispatcher has been alerted and will" not in prompt
+    assert "a delivered alert is not a person reached" in prompt.lower()
 
 
 def test_the_prompt_never_licenses_an_unconditional_dispatcher_claim():

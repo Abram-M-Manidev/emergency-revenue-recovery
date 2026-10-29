@@ -223,11 +223,14 @@ class VoiceToolExecutor(ToolExecutorFactory):
             # Read back from the outbox row rather than assumed. A turn after
             # the ticket's turn usually finds the alert already delivered,
             # because the send runs the moment that turn committed.
-            if delivery is not None and delivery.alerted_a_human:
+            if delivery is not None and delivery.reached_destination:
                 reassurance = (
-                    "- A dispatcher has been alerted and will contact them. "
-                    "You may say so, and should reassure them someone will be "
-                    "in touch shortly."
+                    "- The emergency IS recorded and its alert has been sent to "
+                    "the team's alert channel. You may say it has been sent to "
+                    "the team. Nobody has confirmed reading it: do NOT say a "
+                    "dispatcher has been alerted, will contact them, or is on "
+                    "the way. If it is dangerous right now, tell them to call "
+                    "the business directly or the emergency services."
                 )
             elif delivery is not None and delivery.is_queued:
                 reassurance = (
@@ -841,6 +844,11 @@ class VoiceToolExecutor(ToolExecutorFactory):
             reason = TransferReason(arguments.get("reason"))
         except ValueError:
             return {"success": False, "error": ToolErrors.INVALID_ARGUMENTS}
+        if reason is TransferReason.SYSTEM_UNAVAILABLE:
+            # Set only by the outage path, never chosen by the model: it is
+            # how the business tells "the assistant broke" from "the caller
+            # asked".
+            return {"success": False, "error": ToolErrors.INVALID_ARGUMENTS}
         is_emergency = bool(arguments.get("is_emergency"))
         if self._call_transfers is None:
             return {
@@ -1360,11 +1368,11 @@ class _BoundToolExecutor(ToolExecutor):
             # consent refusal without recording what the caller asked for.
             selection_state=content.get("selection_state"),
             turn_index=self._turn_index,
-            # Whether this turn was permitted to tell the caller a human was
-            # alerted. Present only on emergency results; the single most
+            # Whether this turn was permitted to tell the caller the alert was
+            # sent to the team. Present only on emergency results; the single most
             # important field on this line during an incident review, because
             # it is what the caller was or was not told.
-            dispatcher_alerted=content.get("dispatcher_alerted"),
+            alert_delivered=content.get("alert_delivered"),
             notification_status=content.get("notification_status"),
             on_call_paging=content.get("on_call_paging"),
         )
@@ -1427,22 +1435,28 @@ class _BoundToolExecutor(ToolExecutor):
 def _dispatcher_alert_fields(delivery: NotificationDelivery | None) -> dict[str, Any]:
     """The machine-readable half of emergency truthfulness.
 
-    `dispatcher_alerted` is the only thing licensing the assistant to say a
-    human was told, and it is `True` for exactly one reason: a configured
-    provider accepted the message. Not because a ticket exists, not because
-    the model believes it should have — the tool result carries the backend's
-    evidence, and the prompt tells the assistant to read it.
+    `alert_delivered` is the only thing licensing the assistant to say the
+    alert was sent to the team, and it is `True` for exactly one reason: a
+    configured provider accepted the message. Not because a ticket exists,
+    not because the model believes it should have — the tool result carries
+    the backend's evidence, and the prompt tells the assistant to read it.
+
+    It was called `dispatcher_alerted`, and the name was the bug: a webhook
+    2xx is a message delivered to a channel, not a person who has read it,
+    yet the field licensed "a dispatcher will contact you shortly" (B4,
+    2026-10-28 audit). Only an acknowledged page (`on_call_paging`) is
+    evidence of a person.
 
     `notification_status` travels alongside so the assistant can tell "nobody
     is set up to be alerted here" from "we tried and it failed", which are
     different sentences to a caller with a gas leak."""
     if delivery is None:
         return {
-            "dispatcher_alerted": False,
+            "alert_delivered": False,
             "notification_status": DeliveryStatus.FAILED.value,
         }
     return {
-        "dispatcher_alerted": delivery.alerted_a_human,
+        "alert_delivered": delivery.reached_destination,
         "notification_status": delivery.status.value,
     }
 
@@ -1456,10 +1470,14 @@ def _dispatcher_next_step(delivery: NotificationDelivery | None) -> str:
     the rule the model actually follows is the one sitting beside the result
     it is reading (see the standard-vs-emergency wording note in
     `_book_appointment`)."""
-    if delivery is not None and delivery.alerted_a_human:
+    if delivery is not None and delivery.reached_destination:
         return (
-            "A dispatcher has been alerted and will contact the caller. You "
-            "may say so. Do not offer an appointment time."
+            "The emergency IS recorded and its alert has been sent to the "
+            "team's alert channel. You may say it has been sent to the team. "
+            "Nobody has confirmed reading it: Do NOT say a dispatcher has "
+            "been alerted, will contact the caller, or is on the way. If it "
+            "is dangerous right now, tell them to call the business directly "
+            "or the emergency services. Do not offer an appointment time."
         )
     if delivery is not None and delivery.is_queued:
         # The outbox state on the ticket's own turn: the alert is committed

@@ -516,7 +516,7 @@ async def test_a_live_emergency_turn_queues_then_sends_after_commit(voice_client
 
     tool_result = scripted.results[-1].content
     assert tool_result["success"] is True
-    assert tool_result["dispatcher_alerted"] is False
+    assert tool_result["alert_delivered"] is False
     assert tool_result["notification_status"] == "pending"
 
     assert len(recording.sends) == sends_before + 1
@@ -539,7 +539,9 @@ async def test_a_live_emergency_turn_queues_then_sends_after_commit(voice_client
         headers={"x-vapi-secret": _SECRET},
     )
     prompt = scripted.requests[-1].system_prompt
-    assert "A dispatcher has been alerted and will contact them" in prompt
+    # Delivered to the alert channel is not a person reached (B4).
+    assert "alert has been sent to the team's alert channel" in prompt
+    assert "A dispatcher has been alerted" not in prompt
     assert voice_call.conversation_id is not None
     assert len(recording.sends) == sends_before + 1, "the second turn re-sent the alert"
 

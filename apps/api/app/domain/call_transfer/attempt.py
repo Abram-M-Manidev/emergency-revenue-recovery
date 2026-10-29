@@ -32,12 +32,15 @@ class TransferStatus(str, Enum):
 
 class TransferReason(str, Enum):
     """Why the assistant is handing the call over. Chosen by the model from a
-    closed set, so reporting can count them and policy can branch on them."""
+    closed set, so reporting can count them and policy can branch on them —
+    except SYSTEM_UNAVAILABLE, which only the AI-outage path sets (the model
+    cannot be the one asking when the model is what failed)."""
 
     CALLER_REQUESTED = "caller_requested"
     CALLER_FRUSTRATED = "caller_frustrated"
     OUT_OF_SCOPE = "out_of_scope"
     EMERGENCY_POLICY = "emergency_policy"
+    SYSTEM_UNAVAILABLE = "system_unavailable"
 
 
 class DestinationKind(str, Enum):

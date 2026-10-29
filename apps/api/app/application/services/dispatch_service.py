@@ -162,6 +162,45 @@ class DispatchService:
         await self._start_paging(ticket)
         return ticket
 
+    async def open_unconfirmed_emergency(
+        self,
+        organization_id: uuid.UUID,
+        conversation_id: uuid.UUID,
+        *,
+        summary: str,
+        caller_number: str | None,
+    ) -> EmergencyTicket:
+        """A ticket for a possible emergency that no tool recorded, because
+        the AI provider failed or the caller hung up first.
+
+        Same alert outbox and paging as `sync_ticket_from_outcome`, so the
+        business hears about it exactly as it hears about any emergency. The
+        caller ID is the only contact detail: nobody has stated a name or an
+        address. Returns the existing ticket untouched if this call already
+        has one — a ticket the model did record always wins."""
+        existing = await self._tickets.get_by_conversation_id(conversation_id)
+        if existing is not None:
+            return existing
+        ticket = await self._tickets.create(
+            organization_id=organization_id,
+            conversation_id=conversation_id,
+            matched_service_id=None,
+            customer_name=None,
+            customer_phone=storable_phone_number(caller_number),
+            customer_address=None,
+            summary=summary,
+        )
+        if self._notifications is not None:
+            await self._notifications.enqueue(ticket)
+        await self._start_paging(ticket)
+        logger.warning(
+            "unconfirmed_emergency_ticket_opened",
+            organization_id=str(organization_id),
+            ticket_id=str(ticket.id),
+            has_callback_number=ticket.customer_phone is not None,
+        )
+        return ticket
+
     async def _start_paging(self, ticket: EmergencyTicket) -> None:
         """Queues the on-call page in the ticket's transaction, isolated.
 

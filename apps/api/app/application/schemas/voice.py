@@ -16,7 +16,15 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.domain.call_transfer.attempt import (
+    CallTransferAttempt,
+    DestinationKind,
+    TransferReason,
+    TransferStatus,
+)
+from app.domain.call_transfer.settings import mask_number
 from app.domain.entities.voice_line import VoiceProvider
+from app.domain.follow_ups import FollowUpReason
 
 # --- Admin-facing (JWT-authenticated) ---
 
@@ -58,6 +66,53 @@ class VoiceCallResponse(BaseModel):
     disclosed_recording: bool | None = None
     #: A recording exists and the caller was NOT told the call was recorded.
     recording_notice_missing: bool = False
+    #: Every attempt to hand this call to a person, oldest first. "initiated"
+    #: means the provider accepted the transfer — never that anyone answered.
+    transfer_attempts: list[CallTransferAttemptResponse] = []
+    #: Set when the call ended without its request being recorded.
+    follow_up: CallFollowUpResponse | None = None
+
+
+class CallTransferAttemptResponse(BaseModel):
+    status: TransferStatus
+    reason: TransferReason
+    is_emergency: bool
+    destination_kind: DestinationKind | None
+    #: Masked (`+1•••••4567`): enough to recognise the number, not to publish
+    #: a technician's personal mobile on every screen that shows a call.
+    destination: str | None
+    error_code: str | None
+    created_at: datetime | None
+
+    @classmethod
+    def from_attempt(cls, attempt: CallTransferAttempt) -> CallTransferAttemptResponse:
+        return cls(
+            status=attempt.status,
+            reason=attempt.reason,
+            is_emergency=attempt.is_emergency,
+            destination_kind=attempt.destination_kind,
+            destination=mask_number(attempt.destination_number),
+            error_code=attempt.error_code,
+            created_at=attempt.created_at,
+        )
+
+
+class CallFollowUpResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    conversation_id: uuid.UUID
+    reason: FollowUpReason
+    possible_emergency: bool
+    emergency_ticket_id: uuid.UUID | None
+    caller_number: str | None
+    created_at: datetime | None
+    resolved_at: datetime | None
+    resolved_by_user_id: uuid.UUID | None
+
+
+# `VoiceCallResponse` names the two models above before they are defined.
+VoiceCallResponse.model_rebuild()
 
 
 # --- Vapi-facing (shared-secret authenticated) ---

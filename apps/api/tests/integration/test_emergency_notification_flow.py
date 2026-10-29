@@ -173,7 +173,7 @@ async def test_a_recorded_attempt_persists_and_reads_back(database_ready):
 
     assert delivery is not None
     assert delivery.status is DeliveryStatus.DELIVERED
-    assert delivery.alerted_a_human is True
+    assert delivery.reached_destination is True
     assert delivery.attempts == 1
     assert delivery.delivered_at is not None
     assert delivery.next_attempt_at is None
@@ -200,7 +200,7 @@ async def test_a_failed_attempt_records_the_code_and_claims_nothing(database_rea
         await session.commit()
 
     assert delivery.status is DeliveryStatus.FAILED
-    assert delivery.alerted_a_human is False
+    assert delivery.reached_destination is False
     assert delivery.error_code == "http_500"
     assert delivery.delivered_at is None
     assert delivery.is_queued is True
@@ -356,7 +356,7 @@ async def test_the_webhook_provider_really_posts_and_reports_delivered():
         receipt = await provider.send(alert, server.url)
 
     assert receipt.status is DeliveryStatus.DELIVERED
-    assert receipt.status.alerted_a_human is True
+    assert receipt.status.reached_destination is True
     assert server.body is not None
     payload = json.loads(server.body)
     assert payload["event"] == "emergency_ticket_created"
@@ -389,7 +389,7 @@ async def test_a_rejecting_endpoint_is_failed_and_never_claims_an_alert():
         )
 
     assert receipt.status is DeliveryStatus.FAILED
-    assert receipt.status.alerted_a_human is False
+    assert receipt.status.reached_destination is False
     assert receipt.error_code == "http_500"
 
 

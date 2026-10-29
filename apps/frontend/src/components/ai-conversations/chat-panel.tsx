@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Send } from "lucide-react";
 
+import { FOLLOW_UP_REASON_LABEL } from "@/components/follow-ups/follow-up-queue";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
@@ -20,6 +21,8 @@ import type {
   Conversation,
   ConversationMessage,
   ConversationOutcome,
+  TransferReason,
+  TransferStatus,
   VoiceCall,
 } from "@/lib/api/types";
 import { useToast } from "@/hooks/use-toast";
@@ -29,6 +32,34 @@ interface ChatPanelProps {
   conversationId: string | null;
   onConversationChange: (conversation: Conversation) => void;
 }
+
+/**
+ * "Transfer accepted" is the strongest claim available: the provider moved
+ * the call. Nothing confirms that anyone answered, so nothing here says so.
+ */
+const TRANSFER_STATUS_LABEL: Record<TransferStatus, string> = {
+  requested: "Requested",
+  destination_resolved: "Requested",
+  initiated: "Transfer accepted",
+  unavailable: "Not available",
+  failed: "Failed",
+};
+
+const TRANSFER_STATUS_VARIANT: Record<TransferStatus, "success" | "destructive" | "secondary"> = {
+  requested: "secondary",
+  destination_resolved: "secondary",
+  initiated: "success",
+  unavailable: "secondary",
+  failed: "destructive",
+};
+
+const TRANSFER_REASON_LABEL: Record<TransferReason, string> = {
+  caller_requested: "Caller asked for a person",
+  caller_frustrated: "Caller was frustrated",
+  out_of_scope: "Outside what the assistant can do",
+  emergency_policy: "Emergency handed to a person",
+  system_unavailable: "Assistant was unavailable",
+};
 
 function classificationBadgeVariant(classification: CallClassification) {
   if (classification === "emergency") return "destructive";
@@ -186,6 +217,39 @@ export function ChatPanel({ conversationId, onConversationChange }: ChatPanelPro
             ) : voiceCall.recording_url && voiceCall.disclosed_recording == null ? (
               <span className="text-xs">Recording notice: unknown</span>
             ) : null}
+            {voiceCall.follow_up ? (
+              <Badge variant={voiceCall.follow_up.resolved_at ? "secondary" : "destructive"}>
+                {voiceCall.follow_up.resolved_at
+                  ? "Called back"
+                  : `Needs a callback: ${FOLLOW_UP_REASON_LABEL[voiceCall.follow_up.reason]}`}
+              </Badge>
+            ) : null}
+          </div>
+        ) : null}
+
+        {voiceCall?.transfer_attempts && voiceCall.transfer_attempts.length > 0 ? (
+          <div className="space-y-1 rounded-md border border-border bg-muted/30 p-3 text-sm">
+            <p className="font-medium">Transfers to a person</p>
+            {voiceCall.transfer_attempts.map((attempt, index) => (
+              <div
+                key={`${attempt.created_at ?? ""}-${index}`}
+                className="flex flex-wrap items-center gap-2 text-muted-foreground"
+              >
+                <Badge variant={TRANSFER_STATUS_VARIANT[attempt.status]}>
+                  {TRANSFER_STATUS_LABEL[attempt.status]}
+                </Badge>
+                <span>{TRANSFER_REASON_LABEL[attempt.reason]}</span>
+                {attempt.destination ? (
+                  <span>
+                    to {attempt.destination_kind === "after_hours" ? "on-call" : "office"}{" "}
+                    {attempt.destination}
+                  </span>
+                ) : null}
+                {attempt.error_code ? (
+                  <span className="text-xs">({attempt.error_code})</span>
+                ) : null}
+              </div>
+            ))}
           </div>
         ) : null}
 

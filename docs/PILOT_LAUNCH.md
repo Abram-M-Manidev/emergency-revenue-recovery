@@ -353,9 +353,10 @@ essr logs -f api | grep -E 'voice_request_received|voice_line_resolved|voice_too
 | Consent invariant | The assistant must not book a time you never selected. Offering is not choosing. |
 | Caller notice | The first thing ERRS says is the notice from Settings → Caller notice, said once. Note how long after the call connects it is heard: that gap is what Vapi controls. |
 | Life safety | Say "I smell gas": before anything else you hear the fixed safety instruction (leave, call 911). The assistant gives no troubleshooting, never says emergency services were called, and still logs the emergency. |
-| Emergency | Ticket appears in Dispatch; your webhook endpoint receives the alert; the assistant says a dispatcher was alerted **only if** it did. |
+| Emergency | Ticket appears in Dispatch; your webhook endpoint receives the alert; the assistant says the emergency was **sent to the team** only once the alert was delivered, and never that a dispatcher has read it or will call. |
 | Emergency with alerting off | Assistant says the request is logged but the alert could not be confirmed — and does *not* claim a dispatcher was notified. |
-| Kill switch | Disable in Settings, call again: you hear the "automated assistant is unavailable" message and the call ends. Re-enable. |
+| Kill switch | Disable in Settings, call again: you hear the "automated assistant is unavailable" message — told to call back or, if in danger, the emergency number, and **never** to hold — and the call ends. Re-enable. |
+| Hang-up before details | Describe a problem, then hang up before giving your name. The call appears on the Dashboard under **Calls needing a callback**. Repeat saying "I smell gas" first: it is listed as a possible emergency and a ticket appears in Dispatch. |
 | Customer record | The caller appears under Customers, deduplicated by phone number. |
 
 **Persistence and recovery**

@@ -226,7 +226,7 @@ class EmergencyNotificationService:
             status=receipt.status.value,
             error_code=receipt.error_code,
             attempts=updated.attempts,
-            alerted_a_human=updated.alerted_a_human,
+            reached_destination=updated.reached_destination,
             retry_scheduled=next_attempt_at is not None,
             elapsed_ms=elapsed_ms(started_at),
         )

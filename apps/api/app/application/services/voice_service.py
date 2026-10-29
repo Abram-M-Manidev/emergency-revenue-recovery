@@ -178,6 +178,20 @@ VoiceStreamEvent = VoiceTextDelta | VoiceTurnComplete
 
 
 @dataclass(frozen=True, slots=True)
+class EndedCall:
+    """What the end-of-call report settled, for whoever acts on a call that
+    ended (see `CallFollowUpService.handle_call_ended`).
+
+    `completed_by_assistant` is read BEFORE the report force-completes the
+    conversation: true means the AI Brain itself decided the call was done,
+    false means the caller hung up (or the line dropped) first."""
+
+    organization_id: uuid.UUID
+    conversation_id: uuid.UUID
+    completed_by_assistant: bool
+
+
+@dataclass(frozen=True, slots=True)
 class _AnsweredTurn:
     customer_utterance: str
     reply_text: str
@@ -246,6 +260,11 @@ class VoiceService:
             # AIBrainService.get_conversation.
             raise EntityNotFoundError("VoiceCall", str(conversation_id))
         return voice_call
+
+    async def find_call(self, vapi_call_id: str) -> VoiceCall | None:
+        """The call ERRS already knows by this Vapi id, or None — for the
+        transport's failure path, which must not create anything new."""
+        return await self._voice_calls.get_by_vapi_call_id(vapi_call_id)
 
     # --- Vapi webhook adapter ---
 
@@ -618,7 +637,7 @@ class VoiceService:
         ended_reason: str | None,
         duration_seconds: int | None,
         recording_url: str | None,
-    ) -> None:
+    ) -> EndedCall | None:
         # The call is over, so its supersession ticket can never be consulted
         # again. Dropped first so an early return below cannot leak it.
         self._supersession.forget(vapi_call_id)
@@ -629,7 +648,7 @@ class VoiceService:
             # id we never processed a chat-completion for (e.g. the caller
             # hung up before saying anything). Nothing to reconcile.
             logger.warning("voice_call_not_found_for_end_of_call_report", vapi_call_id=vapi_call_id)
-            return
+            return None
 
         # `ended_reason` is Vapi's own enum string (`assistant-ended-call`,
         # `silence-timed-out`, ...), not caller data, and is the single most
@@ -667,10 +686,18 @@ class VoiceService:
         conversation = await self._conversations.get_by_id(
             voice_call.organization_id, voice_call.conversation_id
         )
-        if conversation is not None and conversation.status is not ConversationStatus.COMPLETED:
+        completed_by_assistant = (
+            conversation is not None and conversation.status is ConversationStatus.COMPLETED
+        )
+        if conversation is not None and not completed_by_assistant:
             # The caller hung up (or the line dropped) before the AI Brain
             # itself decided the conversation was complete.
             await self._conversations.complete(voice_call.conversation_id)
+        return EndedCall(
+            organization_id=voice_call.organization_id,
+            conversation_id=voice_call.conversation_id,
+            completed_by_assistant=completed_by_assistant,
+        )
 
     async def _resolve_voice_line(
         self, assistant_id: str | None, phone_number_id: str | None

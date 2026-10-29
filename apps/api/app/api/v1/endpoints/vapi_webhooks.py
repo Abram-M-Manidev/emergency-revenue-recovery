@@ -35,6 +35,7 @@ from structlog.contextvars import bind_contextvars
 
 from app.api.deps import (
     get_appointment_service,
+    get_call_follow_up_service,
     get_customer_service,
     get_dispatch_service,
     get_savepoints,
@@ -43,6 +44,7 @@ from app.api.deps import (
 )
 from app.application.schemas.voice import VapiChatCompletionRequest
 from app.application.services.appointment_service import AppointmentService
+from app.application.services.call_follow_up_service import CallFollowUpService
 from app.application.services.customer_service import CustomerService
 from app.application.services.dispatch_service import DispatchService
 from app.application.services.voice_service import (
@@ -72,21 +74,31 @@ logger = structlog.get_logger("app.voice.vapi")
 # server-side per channel (see AIModelProfile) and is not Vapi's business.
 _MODEL_NAME = "errs-ai-brain"
 
+# The last resort, used only when even the follow-up path (below) could not
+# run — typically because the database is the thing that failed. It still
+# points a caller in danger at the emergency services: an emergency caller
+# told only to "call back in a few minutes" is told to wait.
 _FALLBACK_MESSAGE = (
     "I'm sorry, I'm having trouble connecting to our system right now. "
-    "Please try calling back in a few minutes."
+    "If anyone is in danger, please hang up and call your local emergency "
+    "number now. Otherwise, please try calling back in a few minutes."
 )
 
 # Spoken when a business has switched its own assistant off. Deliberately
 # different from the generic fallback above: nothing is broken, so implying a
 # fault ("trouble connecting", "try again in a few minutes") would be both
 # false and useless — it invites the caller to redial into the same silence.
-# This tells them plainly that the automated line is unavailable and sends
-# them to a human, which is the only action that helps them.
+#
+# The call ENDS after this sentence (`endCall`), so it must not ask the
+# caller to wait. It used to say "Please hold the line for our team" — a
+# caller told to hold on a line that is about to hang up stops looking for
+# help (B1, 2026-10-28 audit). Nothing transfers this call, so nothing may
+# promise a person on it.
 _ASSISTANT_DISABLED_MESSAGE = (
     "Thanks for calling. Our automated assistant is unavailable at the "
-    "moment. Please hold the line for our team, or call back during "
-    "business hours and someone will help you."
+    "moment, so we can't take your call on this line. If anyone is in "
+    "danger, please hang up and call your local emergency number now. "
+    "Otherwise, please call back during business hours."
 )
 
 # Spoken when a call reaches `AI_MAX_CONVERSATION_TURNS`. It used to get the
@@ -128,6 +140,7 @@ async def vapi_chat_completions(
     appointment_service: AppointmentService = Depends(get_appointment_service),
     customer_service: CustomerService = Depends(get_customer_service),
     savepoints: Savepoints = Depends(get_savepoints),
+    follow_ups: CallFollowUpService = Depends(get_call_follow_up_service),
 ) -> Response:
     # Bound before anything else so every later event in this turn — across
     # every layer — carries the call id without it being threaded through.
@@ -205,6 +218,7 @@ async def vapi_chat_completions(
                     customer_service=customer_service,
                     savepoints=savepoints,
                     caller_number=caller_number,
+                    follow_ups=follow_ups,
                 ),
             ),
             media_type="text/event-stream",
@@ -255,8 +269,15 @@ async def vapi_chat_completions(
             message=exc.message,
             vapi_call_id=payload.call.id,
         )
+        text, transferred = await _outage_reply(
+            payload=payload,
+            customer_utterance=customer_utterance,
+            service=service,
+            follow_ups=follow_ups,
+        )
+        # A call being moved to a person must not also be hung up.
         return _completion_response(
-            _FALLBACK_MESSAGE, should_end_call=True, stream=payload.stream
+            text, should_end_call=not transferred, stream=payload.stream
         )
 
     # Same three syncs, same order and same isolation as the streaming path —
@@ -447,6 +468,7 @@ async def _turn_frames(
     customer_service: CustomerService,
     savepoints: Savepoints,
     caller_number: str | None,
+    follow_ups: CallFollowUpService,
 ) -> AsyncGenerator[str, None]:
     """Emits the turn as OpenAI-compatible SSE while it is still being
     generated.
@@ -474,6 +496,9 @@ async def _turn_frames(
 
     result = None
     spoke = False
+    # Everything the caller has heard this turn, so the outage reply never
+    # repeats the caller notice or the fixed safety instruction.
+    said: list[str] = []
     try:
         async for event in service.handle_chat_completion_stream(
             vapi_call_id=payload.call.id,
@@ -485,6 +510,7 @@ async def _turn_frames(
             if isinstance(event, VoiceTextDelta):
                 if event.text:
                     spoke = True
+                    said.append(event.text)
                     stats.content_frames += 1
                     if stats.first_content_at is None:
                         # The first frame Vapi can hand to TTS. This is the
@@ -535,9 +561,18 @@ async def _turn_frames(
             vapi_call_id=payload.call.id,
             partial_speech=spoke,
         )
-        yield frames.content(_FALLBACK_MESSAGE)
+        text, _ = await _outage_reply(
+            payload=payload,
+            customer_utterance=customer_utterance,
+            service=service,
+            follow_ups=follow_ups,
+            already_said="".join(said),
+        )
+        if text:
+            yield frames.content(text)
         # No `endCall`: the turn never produced an authoritative
-        # `is_conversation_complete`, so hanging up here would be a guess.
+        # `is_conversation_complete`, so hanging up here would be a guess —
+        # and on a transfer it would cut the caller off.
         yield frames.finish("stop")
         yield frames.done()
         return
@@ -560,14 +595,30 @@ async def _turn_frames(
             partial_speech=spoke,
             recovered=True,
         )
-        yield frames.content(_FALLBACK_MESSAGE)
+        text, _ = await _outage_reply(
+            payload=payload,
+            customer_utterance=customer_utterance,
+            service=service,
+            follow_ups=follow_ups,
+            already_said="".join(said),
+        )
+        if text:
+            yield frames.content(text)
         yield frames.finish("stop")
         yield frames.done()
         return
 
     if result is None:
         logger.error("vapi_chat_completion_stream_no_result", vapi_call_id=payload.call.id)
-        yield frames.content(_FALLBACK_MESSAGE)
+        text, _ = await _outage_reply(
+            payload=payload,
+            customer_utterance=customer_utterance,
+            service=service,
+            follow_ups=follow_ups,
+            already_said="".join(said),
+        )
+        if text:
+            yield frames.content(text)
         yield frames.finish("stop")
         yield frames.done()
         return
@@ -595,6 +646,44 @@ async def _turn_frames(
         finish_reason = "tool_calls"
     yield frames.finish(finish_reason)
     yield frames.done()
+
+
+async def _outage_reply(
+    *,
+    payload: VapiChatCompletionRequest,
+    customer_utterance: str,
+    service: VoiceService,
+    follow_ups: CallFollowUpService,
+    already_said: str = "",
+) -> tuple[str, bool]:
+    """What to say, and whether the call is being moved to a person, when
+    the turn could not be answered (B2, 2026-10-28 audit).
+
+    It used to be one fixed sentence — "try calling back in a few minutes" —
+    whatever the caller had said, gas leak included. Now the call ERRS knows
+    is handed to `CallFollowUpService`: a follow-up is recorded, a possible
+    emergency gets a ticket (and its alert and page), and a person is tried.
+    Anything going wrong here — the database being the usual reason the turn
+    failed in the first place — falls back to the fixed sentence, which
+    still points a caller in danger at the emergency services."""
+    try:
+        voice_call = await service.find_call(payload.call.id)
+        if voice_call is None:
+            # An unmapped line or a call that never got started: nothing to
+            # attach a follow-up to.
+            return _FALLBACK_MESSAGE, False
+        reply = await follow_ups.handle_ai_failure(
+            organization_id=voice_call.organization_id,
+            conversation_id=voice_call.conversation_id,
+            caller_utterance=customer_utterance,
+            call_control=payload.call.monitor.controlUrl if payload.call.monitor else None,
+            already_said=already_said,
+        )
+    except Exception as exc:
+        logger.error("voice_outage_handling_failed", error=type(exc).__name__)
+        return _FALLBACK_MESSAGE, False
+    logger.info("voice_outage_reply", transfer_initiated=reply.transfer_initiated)
+    return reply.text, reply.transfer_initiated
 
 
 async def _run_outcome_syncs(
@@ -662,6 +751,7 @@ async def _run_outcome_syncs(
 async def vapi_events(
     payload: dict[str, Any] = Body(...),
     service: VoiceService = Depends(get_voice_service),
+    follow_ups: CallFollowUpService = Depends(get_call_follow_up_service),
 ) -> dict[str, str]:
     """Vapi's Server URL lifecycle events (status updates, transcripts,
     end-of-call reports, ...). Accepted as a raw dict rather than a strict
@@ -685,7 +775,7 @@ async def vapi_events(
         logger.warning("vapi_end_of_call_report_missing_call_id")
         return {"status": "ok"}
 
-    await service.handle_end_of_call_report(
+    ended = await service.handle_end_of_call_report(
         vapi_call_id=vapi_call_id,
         ended_reason=_bounded_text(message.get("endedReason"), _ENDED_REASON_MAX_LENGTH),
         duration_seconds=_duration_seconds(
@@ -695,7 +785,56 @@ async def vapi_events(
             _first_present(message, "recordingUrl", "stereoRecordingUrl")
         ),
     )
+    if ended is not None:
+        # B3 (2026-10-28 audit): a call that ended before its request was
+        # recorded used to leave only a transcript. Contained: the report is
+        # still acknowledged, and the end-of-call write above still commits,
+        # whatever happens here.
+        try:
+            await follow_ups.handle_call_ended(
+                organization_id=ended.organization_id,
+                conversation_id=ended.conversation_id,
+                completed_by_assistant=ended.completed_by_assistant,
+                caller_lines=_caller_lines(message),
+            )
+        except Exception as exc:
+            logger.error("call_follow_up_on_end_failed", error=type(exc).__name__)
     return {"status": "ok"}
+
+
+# Vapi's transcript is caller-supplied text of unbounded size; only this much
+# is ever scanned.
+_REPORT_MAX_LINES = 200
+_REPORT_MAX_LINE_LENGTH = 2000
+
+
+def _caller_lines(message: dict[str, Any]) -> list[str]:
+    """The CALLER's lines from Vapi's end-of-call transcript — never the
+    assistant's, whose own safety sentence names smoke and gas.
+
+    Accepts the structured form (`artifact.messages`, or top-level
+    `messages`, with role "user") and falls back to the plain transcript
+    ("User: ..." lines). Anything malformed yields nothing rather than an
+    error: this is a best-effort second source, ERRS's own transcript being
+    the first."""
+    artifact = message.get("artifact")
+    artifact = artifact if isinstance(artifact, dict) else {}
+    for source in (artifact.get("messages"), message.get("messages")):
+        if isinstance(source, list):
+            lines = [
+                entry.get("message") or entry.get("content")
+                for entry in source[:_REPORT_MAX_LINES]
+                if isinstance(entry, dict) and entry.get("role") == "user"
+            ]
+            return [line[:_REPORT_MAX_LINE_LENGTH] for line in lines if isinstance(line, str)]
+    for transcript in (artifact.get("transcript"), message.get("transcript")):
+        if isinstance(transcript, str):
+            return [
+                line.split(":", 1)[1].strip()[:_REPORT_MAX_LINE_LENGTH]
+                for line in transcript.splitlines()[:_REPORT_MAX_LINES]
+                if line.strip().lower().startswith("user:")
+            ]
+    return []
 
 
 def _bounded_text(value: Any, max_length: int) -> str | None:

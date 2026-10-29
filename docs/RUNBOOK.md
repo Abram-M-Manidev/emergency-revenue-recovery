@@ -62,9 +62,15 @@ essr logs --since 1h api | grep voice_tool_executed | grep '"success":false'
 # Are emergency alerts being delivered?
 essr logs --since 24h api | grep emergency_notification_attempted
 
-# Alerts that did NOT reach a human — the highest-priority line in this file
+# Alerts that did NOT reach their destination — the highest-priority line in
+# this file. (Even a delivered alert only reached a channel; an acknowledged
+# page is the only evidence a person has it.)
 essr logs --since 24h api | grep emergency_notification_attempted \
-  | grep -v '"alerted_a_human":true'
+  | grep -v '"reached_destination":true'
+
+# Calls that ended before their request was recorded (see "Calls needing a
+# callback" below)
+essr logs --since 24h api | grep call_follow_up_recorded
 
 # Is one tenant failing repeatedly? (group by organization_id)
 essr logs --since 1h api | grep '"success":false' \
@@ -234,6 +240,46 @@ you and offer a callback, and must not say "connecting you".
 transfer only); no confirmation that anyone answered; if the destination does
 not pick up, what happens next is the carrier's/destination's voicemail — ERRS
 is no longer on the call. Transfer destinations are PSTN numbers only (no SIP).
+A transferred call on which no request was recorded is put on the callback list
+(below), so someone checks the caller was actually helped.
+
+---
+
+## Calls needing a callback
+
+Calls that ended **without their request being recorded** are listed on the
+Dashboard under **Calls needing a callback** (`GET /api/v1/voice/follow-ups`),
+possible emergencies first. Created by fixed rules, never by the model, at most
+one per call (`call_follow_ups`):
+
+| Reason | When | What else happens |
+|---|---|---|
+| `ai_unavailable` | The AI provider failed on a live turn | ERRS tries to transfer the caller (reason `system_unavailable`, using Settings → Human transfer). Otherwise the caller hears that the system is having trouble, the fixed safety instruction if they described a hazard, where to go if anyone is in danger, and whether the call was logged or flagged as a possible emergency |
+| `ended_before_request_recorded` | The caller hung up (or the line dropped) before a ticket or appointment request existed | — |
+| `transferred_before_request_recorded` | A transfer was accepted but nothing was recorded, and nothing confirms anyone answered | — |
+
+**Possible emergency:** when the caller's own words (ERRS's transcript, plus
+the caller's lines from Vapi's end-of-call report) match a life-safety hazard
+or one of the business's emergency keywords, ERRS opens an emergency ticket
+with the caller ID as the callback number. Its alert and on-call page run
+exactly as for any emergency, and it appears in Dispatch. The match is
+keyword-based and generous on purpose: a false alarm costs a callback, a miss
+costs a caller in danger. Only the caller's lines count, never the assistant's.
+
+Not flagged: a call the assistant itself finished with nothing to record (a
+question answered), a call on which nothing was said, and a call whose ticket
+or appointment request already exists. An outcome of `book_appointment` opens
+an appointment request on its own, so that call counts as recorded.
+
+Owners and Admins mark a callback done (**Mark called back**, or
+`POST /api/v1/voice/follow-ups/{id}/resolve`); Members can see the list.
+
+```bash
+essr exec postgres psql -U errs -d errs -c "
+  SELECT o.name, f.reason, f.possible_emergency, f.created_at
+    FROM call_follow_ups f JOIN organizations o ON o.id = f.organization_id
+   WHERE f.resolved_at IS NULL ORDER BY f.possible_emergency DESC, f.created_at;"
+```
 
 ---
 
@@ -257,7 +303,7 @@ essr exec postgres psql -U errs -d errs -c "
 
 | `status` | Meaning | Action |
 |---|---|---|
-| `delivered` | A provider accepted the alert. The assistant was allowed to tell the caller a dispatcher was alerted. | none |
+| `delivered` | A provider accepted the alert. The assistant was allowed to tell the caller it was **sent to the team** — never that a dispatcher read it, will call, or is on the way: a webhook 2xx reaches a channel, not a person. | none |
 | `failed` | We tried and the endpoint refused, timed out, or was unreachable. The caller was told the alert could **not** be confirmed. | Check `error_code`; verify the business's webhook still works |
 | `not_configured` | That business has no destination set (or has paused it). | Onboard them — Settings → Emergency alerts |
 | `pending` | In flight, or a request died mid-attempt. | If it persists, check API logs for that `ticket_id` |
