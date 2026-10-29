@@ -8,6 +8,7 @@ exposed to client-side JavaScript (mitigating XSS token theft).
 from __future__ import annotations
 
 from fastapi import APIRouter, Cookie, Depends, Request, Response, status
+from fastapi.responses import JSONResponse
 
 from app.api.deps import get_auth_service, get_current_user
 from app.application.schemas.auth import (
@@ -19,8 +20,9 @@ from app.application.schemas.auth import (
 )
 from app.application.services.auth_service import AuthService, IssuedSession
 from app.core.config import Settings, get_settings
+from app.core.errors import domain_error_response
 from app.domain.entities.user import User
-from app.domain.exceptions import InvalidTokenError
+from app.domain.exceptions import InactiveAccountError, InvalidTokenError
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -41,6 +43,18 @@ def _set_refresh_cookie(response: Response, session: IssuedSession, settings: Se
         key=REFRESH_COOKIE_NAME,
         value=session.refresh_token,
         max_age=max_age,
+        httponly=True,
+        secure=settings.is_production,
+        samesite="lax",
+        path=REFRESH_COOKIE_PATH,
+    )
+
+
+def _clear_refresh_cookie(response: Response, settings: Settings) -> None:
+    # Same name, path and attributes as `_set_refresh_cookie` (and no
+    # domain, like it), so the browser matches and drops that exact cookie.
+    response.delete_cookie(
+        key=REFRESH_COOKIE_NAME,
         httponly=True,
         secure=settings.is_production,
         samesite="lax",
@@ -115,15 +129,29 @@ async def refresh(
     refresh_token: str | None = Cookie(default=None, alias=REFRESH_COOKIE_NAME),
     auth_service: AuthService = Depends(get_auth_service),
     settings: Settings = Depends(get_settings),
-) -> AuthResponse:
+) -> AuthResponse | JSONResponse:
     if refresh_token is None:
         raise InvalidTokenError("No refresh token was provided.")
 
-    session = await auth_service.refresh(
-        raw_refresh_token=refresh_token,
-        user_agent=request.headers.get("user-agent"),
-        ip_address=request.client.host if request.client else None,
-    )
+    try:
+        session = await auth_service.refresh(
+            raw_refresh_token=refresh_token,
+            user_agent=request.headers.get("user-agent"),
+            ip_address=request.client.host if request.client else None,
+        )
+    except (InvalidTokenError, InactiveAccountError) as exc:
+        # This cookie can never refresh again: malformed, unknown, expired,
+        # revoked, already rotated, or its user or organization is no longer
+        # active. Left in the browser it kept the frontend middleware — which
+        # only sees that a cookie EXISTS — sending the visitor back to
+        # /dashboard, where the refresh failed again: an endless spinner,
+        # with / and /login both bouncing there. So the same error goes back,
+        # with the cookie cleared. Any other failure (the database being down)
+        # propagates untouched and keeps the cookie: a transient fault must
+        # not sign anyone out.
+        failed = domain_error_response(request, exc)
+        _clear_refresh_cookie(failed, settings)
+        return failed
     _set_refresh_cookie(response, session, settings)
     return _to_auth_response(session)
 

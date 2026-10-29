@@ -119,26 +119,36 @@ def error_response(
     return JSONResponse(status_code=status_code, content=body)
 
 
+def domain_error_response(request: Request, exc: DomainError) -> JSONResponse:
+    """The response the `DomainError` handler below sends for `exc`.
+
+    Public so an endpoint that must attach something to its error response
+    — `/auth/refresh` clearing a dead session cookie — can return exactly
+    what raising would have produced: a response set on FastAPI's injected
+    `Response` is discarded once the endpoint raises."""
+    status_code = status.HTTP_400_BAD_REQUEST
+    for error_type, mapped_status in _DOMAIN_ERROR_STATUS.items():
+        if isinstance(exc, error_type):
+            status_code = mapped_status
+            break
+
+    if status_code >= status.HTTP_500_INTERNAL_SERVER_ERROR:
+        logger.error("domain_error", error=exc.__class__.__name__, message=exc.message)
+    else:
+        logger.info("domain_error", error=exc.__class__.__name__, message=exc.message)
+
+    return error_response(
+        request,
+        status_code=status_code,
+        code=_domain_error_code(exc),
+        message=exc.message,
+    )
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(DomainError)
     async def handle_domain_error(request: Request, exc: DomainError) -> JSONResponse:
-        status_code = status.HTTP_400_BAD_REQUEST
-        for error_type, mapped_status in _DOMAIN_ERROR_STATUS.items():
-            if isinstance(exc, error_type):
-                status_code = mapped_status
-                break
-
-        if status_code >= status.HTTP_500_INTERNAL_SERVER_ERROR:
-            logger.error("domain_error", error=exc.__class__.__name__, message=exc.message)
-        else:
-            logger.info("domain_error", error=exc.__class__.__name__, message=exc.message)
-
-        return error_response(
-            request,
-            status_code=status_code,
-            code=_domain_error_code(exc),
-            message=exc.message,
-        )
+        return domain_error_response(request, exc)
 
     @app.exception_handler(RequestValidationError)
     async def handle_validation_error(
