@@ -40,6 +40,7 @@ from app.domain.life_safety import (
     hazards_in,
     safety_instruction,
 )
+from app.domain.notifications.emergency import DeliveryStatus, NotificationDelivery
 from app.domain.repositories.business_profile_repository import BusinessProfileRepository
 from app.domain.repositories.call_follow_up_repository import CallFollowUpRepository
 from app.domain.repositories.call_transfer_repository import CallTransferAttemptRepository
@@ -158,7 +159,11 @@ class CallFollowUpService:
         if instruction and instruction not in already_said:
             sentences.append(instruction)
         if follow_up is not None and follow_up.emergency_ticket_id is not None:
-            sentences.append("I've flagged your call to the team as a possible emergency.")
+            sentences.append(
+                _emergency_alert_sentence(
+                    await self._alert_delivery(organization_id, follow_up.emergency_ticket_id)
+                )
+            )
         elif follow_up is not None:
             sentences.append("I've logged your call for the team to follow up.")
         sentences.append(
@@ -305,6 +310,19 @@ class CallFollowUpService:
         )
         return follow_up
 
+    async def _alert_delivery(
+        self, organization_id: uuid.UUID, ticket_id: uuid.UUID
+    ) -> NotificationDelivery | None:
+        """The ticket's alert state, for what the caller may be told. A
+        failed read is reported as "unknown" — the sentence that claims
+        nothing — never as an error that could cost the caller the reply."""
+        try:
+            async with self._savepoints.isolate():
+                return await self._dispatch.alert_delivery(organization_id, ticket_id)
+        except Exception as exc:
+            logger.error("call_follow_up_alert_lookup_failed", error=type(exc).__name__)
+            return None
+
     async def _transfer(
         self,
         organization_id: uuid.UUID,
@@ -370,3 +388,35 @@ class CallFollowUpService:
         except Exception:
             return _UNKNOWN_EMERGENCY_NUMBER
         return emergency_number_for(profile.country if profile else None)
+
+
+def _emergency_alert_sentence(delivery: NotificationDelivery | None) -> str:
+    """What the outage reply may say about a possible emergency's alert.
+
+    The same evidence as the tool path's `_dispatcher_next_step`, read more
+    strictly. On this turn the alert was usually queued seconds ago and is
+    sent only once the turn commits, so a never-attempted PENDING alert is the
+    common case and licenses "being sent" — never "sent" or "alerted".
+    An alert that has already FAILED and is only waiting to retry does not:
+    `is_queued` covers it, but "being sent now" would hide a known failure
+    from a caller in an emergency. Only a delivery the provider accepted (a
+    ticket recorded earlier in the call, already sent) licenses "sent to the
+    team", and even that is a message reaching a channel, not a person
+    having read it. Anything else — nowhere configured to send, a failed or
+    exhausted send, alerting not wired, or the state unreadable — claims
+    nothing beyond the ticket itself."""
+    if delivery is not None and delivery.reached_destination:
+        return "I've sent your call to the team as a possible emergency."
+    if (
+        delivery is not None
+        and delivery.status is DeliveryStatus.PENDING
+        and delivery.is_queued
+    ):
+        return (
+            "I've logged your call as a possible emergency, and an alert to the "
+            "team is being sent now."
+        )
+    return (
+        "I've logged your call as a possible emergency, but I can't confirm "
+        "that anyone on the team has been alerted."
+    )

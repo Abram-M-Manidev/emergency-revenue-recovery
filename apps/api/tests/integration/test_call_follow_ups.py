@@ -22,6 +22,7 @@ audit:
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
@@ -30,7 +31,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 
 import app.api.deps as deps_module
-from app.api.deps import get_ai_provider, verify_vapi_secret
+from app.api.deps import get_ai_provider, get_notification_provider, verify_vapi_secret
 from app.domain.ai.provider import AIProvider, AIReply, AIRequest
 from app.domain.call_transfer.attempt import TransferReason, TransferStatus
 from app.domain.call_transfer.port import CallTransferPort, TransferInitiation
@@ -38,6 +39,7 @@ from app.domain.entities.conversation_outcome import CallClassification, Recomme
 from app.domain.entities.voice_line import VoiceProvider
 from app.domain.exceptions import AIProviderUnavailableError, InvalidTokenError
 from app.domain.follow_ups import FollowUpReason
+from app.domain.notifications.emergency import DeliveryStatus, NotificationChannel
 from app.infrastructure.database.models import *  # noqa: F401,F403
 from app.infrastructure.database.models.call_follow_up import CallFollowUpModel
 from app.infrastructure.database.models.call_transfer import (
@@ -45,13 +47,16 @@ from app.infrastructure.database.models.call_transfer import (
     OrganizationCallTransferSettingsModel,
 )
 from app.infrastructure.database.models.emergency_ticket import EmergencyTicketModel
-from app.infrastructure.database.models.notification import EmergencyNotificationDeliveryModel
+from app.infrastructure.database.models.notification import (
+    EmergencyNotificationDeliveryModel,
+    OrganizationNotificationSettingsModel,
+)
 from app.infrastructure.database.models.organization import OrganizationModel
 from app.infrastructure.database.models.voice_call import VoiceCallModel
 from app.infrastructure.database.models.voice_line import VoiceLineModel
 from app.infrastructure.database.session import AsyncSessionLocal, Base, engine
 from app.main import app, fastapi_app
-from tests.fakes import ScriptedToolAIProvider, default_reply
+from tests.fakes import FakeNotificationProvider, ScriptedToolAIProvider, default_reply
 
 _SECRET = "test-vapi-secret-follow-ups"
 _COMPLETIONS = "/api/v1/voice/vapi/chat/completions"
@@ -298,14 +303,149 @@ async def test_an_ai_outage_during_an_emergency_opens_a_ticket_and_queues_its_al
 
     spoken = _spoken(response)
     assert "leave the building" in spoken, "the fixed safety instruction must survive the outage"
-    assert "flagged" in spoken and "possible emergency" in spoken
+    # Deliberately reversed: this asserted "flagged" — a claim made with no
+    # alert destination configured, so nobody could have been alerted.
+    assert "possible emergency" in spoken
+    assert _UNCONFIRMED_ALERT in spoken
+    assert "flagged" not in spoken and "being sent" not in spoken
     _, follow_ups, tickets, deliveries, _ = await _records(call_id)
     assert len(tickets) == 1
     assert tickets[0].customer_phone is not None, "the dispatcher needs someone to call back"
     assert "gas" in tickets[0].summary.lower()
     assert len(deliveries) == 1, "the alert is queued with the ticket"
+    assert deliveries[0].status is DeliveryStatus.NOT_CONFIGURED
     assert follow_ups[0].possible_emergency is True
     assert follow_ups[0].emergency_ticket_id == tickets[0].id
+
+
+# --- What the outage reply may say about the alert ---------------------------
+#
+# On the outage turn the alert is at most QUEUED: it is sent after the turn
+# commits. The reply used to claim the call was "flagged to the team" in
+# every state. Each state below gets only the sentence its evidence allows,
+# and the ticket, the alert and the follow-up are created exactly as before.
+
+_UNCONFIRMED_ALERT = (
+    "I've logged your call as a possible emergency, but I can't confirm that anyone "
+    "on the team has been alerted."
+)
+_ALERT_BEING_SENT = (
+    "I've logged your call as a possible emergency, and an alert to the team is being sent now."
+)
+_ALERT_SENT = "I've sent your call to the team as a possible emergency."
+
+
+async def _alert_destination(assistant: str) -> uuid.UUID:
+    """Gives the assistant's organization an emergency alert destination.
+    The send itself goes to the fake provider the test installs."""
+    async with AsyncSessionLocal() as session:
+        organization_id = (await session.execute(
+            select(VoiceLineModel.organization_id)
+            .where(VoiceLineModel.vapi_assistant_id == assistant))).scalar_one()
+        session.add(OrganizationNotificationSettingsModel(
+            organization_id=organization_id, channel=NotificationChannel.WEBHOOK,
+            destination="https://alerts.example.com/hook", is_enabled=True))
+        await session.commit()
+    return organization_id
+
+
+@pytest.fixture
+def fake_alerts():
+    provider = FakeNotificationProvider(status=DeliveryStatus.DELIVERED)
+    fastapi_app.dependency_overrides[get_notification_provider] = lambda: provider
+    yield provider
+    fastapi_app.dependency_overrides.pop(get_notification_provider, None)
+
+
+async def _seed_earlier_emergency(call_id: str, *, status: DeliveryStatus,
+                                  next_attempt_at: datetime | None, attempts: int) -> uuid.UUID:
+    """An emergency ticket recorded earlier in this call, with its alert in
+    `status` — what the outage turn finds and reuses."""
+    async with AsyncSessionLocal() as session:
+        voice_call = (await session.execute(
+            select(VoiceCallModel).where(VoiceCallModel.vapi_call_id == call_id))).scalar_one()
+        ticket = EmergencyTicketModel(
+            organization_id=voice_call.organization_id, conversation_id=voice_call.conversation_id,
+            customer_phone=_CALLER, summary="Gas smell reported earlier in the call.")
+        session.add(ticket)
+        await session.flush()
+        session.add(EmergencyNotificationDeliveryModel(
+            organization_id=voice_call.organization_id, emergency_ticket_id=ticket.id,
+            channel=NotificationChannel.WEBHOOK, provider="fake", status=status,
+            attempts=attempts, next_attempt_at=next_attempt_at,
+            delivered_at=datetime.now(timezone.utc) if status is DeliveryStatus.DELIVERED else None))
+        await session.commit()
+        return ticket.id
+
+
+@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.parametrize("stream", [True, False])
+async def test_an_outage_with_an_alert_queued_says_it_is_being_sent_not_sent(
+    client, fake_alerts, stream
+):
+    _Holder.provider = _Down()
+    assistant = await _tenant()
+    await _alert_destination(assistant)
+    call_id = f"call_fu_{uuid.uuid4().hex[:8]}"
+
+    spoken = _spoken(await _turn(client, _body(call_id, assistant, "I smell gas in my kitchen!",
+                                               stream=stream)))
+
+    assert _ALERT_BEING_SENT in spoken
+    assert _ALERT_SENT not in spoken and "flagged" not in spoken
+    assert "leave the building" in spoken
+    _, follow_ups, tickets, deliveries, _ = await _records(call_id)
+    assert len(tickets) == 1 and len(deliveries) == 1, "ticket and alert exactly as before"
+    assert follow_ups[0].possible_emergency is True
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_an_outage_after_an_alert_was_delivered_may_say_sent(client, fake_alerts):
+    scripted = _scripted()
+    scripted.queue_reply(default_reply(message_to_customer="What's going on?"))
+    assistant = await _tenant()
+    await _alert_destination(assistant)
+    call_id = f"call_fu_{uuid.uuid4().hex[:8]}"
+    await _turn(client, _body(call_id, assistant, "Hi, I need some help."))
+    ticket_id = await _seed_earlier_emergency(call_id, status=DeliveryStatus.DELIVERED,
+                                              next_attempt_at=None, attempts=1)
+
+    _Holder.provider = _Down()
+    spoken = _spoken(await _turn(client, _body(call_id, assistant, "I smell gas in here.")))
+
+    assert _ALERT_SENT in spoken
+    assert "dispatcher" not in spoken.lower() and "on the way" not in spoken.lower()
+    _, follow_ups, tickets, _, _ = await _records(call_id)
+    assert [t.id for t in tickets] == [ticket_id], "the earlier ticket is reused, not duplicated"
+    assert follow_ups[0].emergency_ticket_id == ticket_id
+
+
+@pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.parametrize(
+    ("label", "next_attempt_in", "attempts"),
+    [("retries_spent", None, 8), ("failed_retry_pending", timedelta(minutes=5), 2)],
+)
+async def test_an_outage_after_an_alert_failed_claims_nothing(
+    client, fake_alerts, label, next_attempt_in, attempts
+):
+    scripted = _scripted()
+    scripted.queue_reply(default_reply(message_to_customer="What's going on?"))
+    assistant = await _tenant()
+    await _alert_destination(assistant)
+    call_id = f"call_fu_{uuid.uuid4().hex[:8]}"
+    await _turn(client, _body(call_id, assistant, "Hi, I need some help."))
+    await _seed_earlier_emergency(
+        call_id, status=DeliveryStatus.FAILED, attempts=attempts,
+        next_attempt_at=(datetime.now(timezone.utc) + next_attempt_in) if next_attempt_in else None)
+
+    _Holder.provider = _Down()
+    spoken = _spoken(await _turn(client, _body(call_id, assistant, "I smell gas in here.")))
+
+    assert _UNCONFIRMED_ALERT in spoken, label
+    assert "being sent" not in spoken and _ALERT_SENT not in spoken, label
+    assert "If anyone is in danger, please hang up and call" in spoken, label
+    _, follow_ups, tickets, _, _ = await _records(call_id)
+    assert len(tickets) == 1 and follow_ups[0].possible_emergency is True, label
 
 
 # --- B3: the caller hangs up before the request is recorded ------------------

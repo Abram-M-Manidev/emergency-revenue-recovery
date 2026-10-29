@@ -40,6 +40,7 @@ from app.domain.exceptions import (
     EntityNotFoundError,
     InvalidTicketStatusTransitionError,
 )
+from app.domain.notifications.emergency import NotificationDelivery
 from app.domain.repositories.conversation_outcome_repository import ConversationOutcomeRepository
 from app.domain.repositories.conversation_repository import ConversationRepository
 from app.domain.repositories.emergency_ticket_repository import EmergencyTicketRepository
@@ -200,6 +201,16 @@ class DispatchService:
             has_callback_number=ticket.customer_phone is not None,
         )
         return ticket
+
+    async def alert_delivery(
+        self, organization_id: uuid.UUID, ticket_id: uuid.UUID
+    ) -> NotificationDelivery | None:
+        """What is known about this ticket's alert, read-only. None when
+        alerting is not wired here or nothing was queued — which licenses no
+        claim at all, exactly like a failed delivery."""
+        if self._notifications is None:
+            return None
+        return await self._notifications.get_delivery(organization_id, ticket_id)
 
     async def _start_paging(self, ticket: EmergencyTicket) -> None:
         """Queues the on-call page in the ticket's transaction, isolated.
