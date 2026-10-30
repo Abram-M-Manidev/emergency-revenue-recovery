@@ -14,8 +14,9 @@ Both shapes were checked on 2026-10-30 against Vapi's OpenAPI spec
   Calls are de-duplicated by id. A window that cannot be split any further
   and is still full raises `VapiPagingError`, rather than returning a list
   that might be incomplete.
-- No rate limit is documented for these endpoints. Requests are therefore
-  sent one at a time with a minimum gap, and a 429 is retried after its
+- No rate limit is documented for these endpoints; our org's settings show
+  200 requests/minute. Requests are therefore sent one at a time at least
+  0.35 s apart (at most 172 in any minute), and a 429 is retried after its
   `Retry-After` (or a jittered backoff when it has none). 5xx responses and
   timeouts are retried the same way. 401 and 403 are never retried.
 
@@ -58,7 +59,10 @@ _MAX_ATTEMPTS = 4
 _BACKOFF_BASE_SECONDS = 1.0
 _BACKOFF_CAP_SECONDS = 30.0
 _RETRY_AFTER_CAP_SECONDS = 60.0
-_MIN_REQUEST_INTERVAL_SECONDS = 0.25
+# At most 172 requests in any minute, under the 200/min API limit shown in our
+# Vapi org's settings (2026-10-30), retries included. Every request, a retry
+# too, waits for this gap, so the ceiling holds however a run goes.
+_MIN_REQUEST_INTERVAL_SECONDS = 0.35
 
 
 def _iso(moment: datetime) -> str:

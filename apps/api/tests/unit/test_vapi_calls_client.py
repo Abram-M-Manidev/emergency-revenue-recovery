@@ -19,6 +19,7 @@ from app.domain.usage_reconciliation import (
     VapiPagingError,
     VapiUnavailableError,
 )
+from app.infrastructure.telephony import vapi_calls_client
 from app.infrastructure.telephony.vapi_calls_client import VapiCallsClient
 
 _KEY = "test-private-key-0000"
@@ -221,3 +222,34 @@ def test_the_key_is_only_ever_sent_over_https_to_vapi(url: str):
 def test_a_blank_key_is_refused():
     with pytest.raises(ValueError):
         VapiCallsClient(api_key="  ")
+
+
+@pytest.mark.asyncio
+async def test_the_default_pacing_stays_under_200_requests_a_minute(monkeypatch):
+    """Our Vapi org's API limit is 200 requests/minute. Time here moves
+    only when the client sleeps, so this counts the most requests the
+    default pacing can ever start within one minute, retries included."""
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(vapi_calls_client.time, "monotonic", lambda: clock["now"])
+
+    async def sleep(seconds: float) -> None:
+        clock["now"] += seconds
+
+    started: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        started.append(clock["now"])
+        # Every other request is a 429 with no delay, the most aggressive
+        # retry pattern a server could ask for.
+        if len(started) % 2:
+            return httpx.Response(429, headers={"Retry-After": "0"})
+        return httpx.Response(200, json=_call("c", _START))
+
+    client = VapiCallsClient(api_key=_KEY, transport=httpx.MockTransport(handler), sleep=sleep)
+    while not started or started[-1] - started[0] < 60:
+        await client.get_call("c")
+
+    in_first_minute = [moment for moment in started if moment - started[0] < 60]
+    assert len(in_first_minute) <= 172 < 200
+    gaps = [later - earlier for earlier, later in zip(started, started[1:], strict=False)]
+    assert min(gaps) == pytest.approx(0.35)

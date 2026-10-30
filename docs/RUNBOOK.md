@@ -431,6 +431,8 @@ report lacked, and records every disagreement for a person to look at.
 **Needs** `VAPI_API_KEY` in `apps/api/.env`. This must be Vapi's
 **private** key: Dashboard → Organization → API Keys. The key is used only
 for read-only `GET /call` and `GET /call/{id}`. Nothing is written to Vapi.
+Requests are spaced at least 0.35 s apart, retries included: at most 172 in
+any minute, under the org's 200 requests/minute API limit.
 
 ```bash
 # see what it would record, then roll back (always do this first)
