@@ -89,8 +89,10 @@ emergency paging, and only with `PAGING_PROVIDER=twilio` (see Part 2 §3b), wher
 `TWILIO_PHONE_NUMBER` sends each page. Otherwise `TWILIO_ACCOUNT_SID`,
 `TWILIO_AUTH_TOKEN` and `TWILIO_PHONE_NUMBER` exist in `Settings` but are read
 by nothing — verified by grep across `apps/api/app`. Leave them blank unless
-and until something actually uses them. The same is true of `VAPI_API_KEY`:
-the backend never calls Vapi's API, only receives its webhooks.
+and until something actually uses them. `VAPI_API_KEY` is read only by the
+operator-run usage reconciliation CLI (see `docs/RUNBOOK.md`, "Usage
+reconciliation"). It must be Vapi's **private** key. The web app and the call
+path never call Vapi's API; they only receive its webhooks.
 
 ---
 

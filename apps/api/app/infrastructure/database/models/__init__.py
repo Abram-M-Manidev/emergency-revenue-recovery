@@ -47,6 +47,8 @@ from app.infrastructure.database.models.technician_profile import TechnicianProf
 from app.infrastructure.database.models.usage import (
     CallUsageRecordModel,
     ConversationLLMUsageModel,
+    UsageReconciliationRunModel,
+    VapiCallReconciliationModel,
 )
 from app.infrastructure.database.models.user import UserModel
 from app.infrastructure.database.models.voice_call import VoiceCallModel
@@ -83,7 +85,9 @@ __all__ = [
     "ServiceAreaModel",
     "ServiceModel",
     "TechnicianProfileModel",
+    "UsageReconciliationRunModel",
     "UserModel",
+    "VapiCallReconciliationModel",
     "VoiceCallModel",
     "VoiceLineModel",
     "WeeklyHoursModel",

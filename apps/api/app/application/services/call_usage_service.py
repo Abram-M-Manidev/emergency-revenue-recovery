@@ -23,6 +23,7 @@ from app.domain.usage import (
     CallUsageFacts,
     CallUsageRecord,
     UsageAttribution,
+    UsageSource,
     decide_billing,
     merge_facts,
 )
@@ -123,8 +124,31 @@ class CallUsageService:
                 report_count=existing.report_count + 1,
                 first_reported_at=existing.first_reported_at,
                 last_reported_at=received_at,
+                source=existing.source,
             )
         )
+
+    async def create_from_reconciliation(self, facts: CallUsageFacts) -> CallUsageRecord | None:
+        """A call Vapi has but no end-of-call report ever reached: recorded
+        through the same attribution and billing rules as a report would be,
+        with `report_count` 0. Returns None when a row already exists (a
+        report won the race), so the caller reconciles that row instead.
+        Raises on failure: the reconciliation run decides what that costs."""
+        now = self._clock()
+        organization_id, conversation_id, attribution = await self._attribute(facts)
+        record = CallUsageRecord(
+            id=uuid.uuid4(),
+            organization_id=organization_id,
+            conversation_id=conversation_id,
+            attribution=attribution,
+            facts=facts,
+            decision=decide_billing(facts, received_at=now),
+            report_count=0,
+            first_reported_at=now,
+            last_reported_at=now,
+            source=UsageSource.RECONCILIATION,
+        )
+        return record if await self._usage.insert_if_absent(record) else None
 
     async def _attribute(
         self, facts: CallUsageFacts

@@ -28,7 +28,14 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
-from app.domain.usage import DurationSource, ExclusionReason, PeriodBasis, UsageAttribution
+from app.domain.usage import (
+    DurationSource,
+    ExclusionReason,
+    PeriodBasis,
+    UsageAttribution,
+    UsageSource,
+)
+from app.domain.usage_reconciliation import ReconciliationOutcome, ReconciliationRunStatus
 from app.infrastructure.database.models.mixins import TimestampMixin, UUIDPrimaryKeyMixin
 from app.infrastructure.database.session import Base
 
@@ -94,8 +101,82 @@ class CallUsageRecordModel(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
 
     report_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    source: Mapped[UsageSource] = mapped_column(
+        SAEnum(UsageSource, name="usage_source", native_enum=False, length=20),
+        nullable=False,
+        default=UsageSource.WEBHOOK,
+        server_default="WEBHOOK",
+    )
     first_reported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_reported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class UsageReconciliationRunModel(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """One reconciliation run — see `app/domain/usage_reconciliation.py`.
+    A dry run leaves no row: it is rolled back with everything else."""
+
+    __tablename__ = "usage_reconciliation_runs"
+
+    window_start: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    window_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    status: Mapped[ReconciliationRunStatus] = mapped_column(
+        SAEnum(ReconciliationRunStatus, name="usage_reconciliation_run_status",
+               native_enum=False, length=20),
+        nullable=False,
+    )
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    counts: Mapped[dict[str, int] | None] = mapped_column(JSONB, nullable=True)
+    # Exception type name only.
+    error: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+
+class VapiCallReconciliationModel(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """The latest reconciliation of one Vapi call: the outcome, and Vapi's
+    own view of the call beside (never on top of) `call_usage_records`."""
+
+    __tablename__ = "vapi_call_reconciliations"
+    __table_args__ = (
+        Index("ix_vapi_call_reconciliations_outcome", "outcome"),
+    )
+
+    vapi_call_id: Mapped[str] = mapped_column(String(128), unique=True, nullable=False)
+    call_usage_record_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("call_usage_records.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    last_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("usage_reconciliation_runs.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    outcome: Mapped[ReconciliationOutcome] = mapped_column(
+        SAEnum(ReconciliationOutcome, name="usage_reconciliation_outcome",
+               native_enum=False, length=20),
+        nullable=False,
+    )
+    # [Discrepancy value, ...] and [facts field name, ...].
+    discrepancies: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    filled_fields: Mapped[list[str]] = mapped_column(JSONB, nullable=False, default=list)
+    checked_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    check_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+    # Vapi's view, as its call API reported it.
+    vapi_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    vapi_assistant_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    vapi_phone_number_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    vapi_created_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    vapi_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    vapi_started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    vapi_ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    vapi_ended_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    vapi_cost: Mapped[Decimal | None] = mapped_column(Numeric(14, 6), nullable=True)
+    vapi_cost_breakdown: Mapped[dict[str, str] | None] = mapped_column(JSONB, nullable=True)
+    vapi_minutes_normal: Mapped[Decimal | None] = mapped_column(Numeric(12, 4), nullable=True)
+    vapi_minutes_overage: Mapped[Decimal | None] = mapped_column(Numeric(12, 4), nullable=True)
+    transport_minutes: Mapped[Decimal | None] = mapped_column(Numeric(12, 4), nullable=True)
+    vapi_usage_incomplete: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
 
 
 class ConversationLLMUsageModel(UUIDPrimaryKeyMixin, TimestampMixin, Base):

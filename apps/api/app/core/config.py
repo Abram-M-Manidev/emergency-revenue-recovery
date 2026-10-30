@@ -115,16 +115,26 @@ class Settings(BaseSettings):
     # gpt-4.1-mini is not a reasoning model; sending the parameter to one
     # that doesn't support it is a 400, so this stays unset by default.
     OPENAI_REALTIME_REASONING_EFFORT: ReasoningEffort | None = None
-    # VAPI_API_KEY: unused by application code. Provisioning (creating the
-    # Vapi assistant, importing the Twilio number) is an ops-side step done
-    # outside this app. TWILIO_*: read only by emergency paging, and only
-    # when PAGING_PROVIDER=twilio (TWILIO_PHONE_NUMBER is the sender of every
-    # page SMS and call). VAPI_SERVER_SECRET is
-    # the one Vapi-related setting the backend actually reads: it verifies
-    # inbound webhook requests really came from our Vapi account (see
-    # `app/api/deps.py`'s `verify_vapi_secret`).
+    # VAPI_API_KEY: Vapi's PRIVATE key. Read ONLY by the operator-run usage
+    # reconciliation CLI (`app/cli/usage_reconcile.py`), which makes
+    # read-only GETs to Vapi's call API. The web app and the call path never
+    # use it. Provisioning (creating the Vapi assistant, importing the Twilio
+    # number) is still an ops-side step done outside this app. TWILIO_*: read
+    # only by emergency paging, and only when PAGING_PROVIDER=twilio
+    # (TWILIO_PHONE_NUMBER is the sender of every page SMS and call).
+    # VAPI_SERVER_SECRET verifies inbound webhook requests really came from
+    # our Vapi account (see `app/api/deps.py`'s `verify_vapi_secret`).
     VAPI_API_KEY: str | None = None
     VAPI_SERVER_SECRET: str | None = None
+    # Usage reconciliation (M2). The base URL must be https on vapi.ai (the
+    # client refuses anything else, because the key goes in every request).
+    VAPI_API_BASE_URL: str = "https://api.vapi.ai"
+    # Calls that ended this recently are left for the next run: Vapi can
+    # still be settling their cost.
+    USAGE_RECONCILE_SETTLE_MINUTES: int = Field(default=15, ge=0)
+    # Default window when the CLI is given no --since. Must stay shorter
+    # than Vapi's call retention, or old calls start reading as missing.
+    USAGE_RECONCILE_LOOKBACK_DAYS: int = Field(default=7, ge=1, le=31)
     TWILIO_ACCOUNT_SID: str | None = None
     TWILIO_AUTH_TOKEN: str | None = None
     TWILIO_PHONE_NUMBER: str | None = None

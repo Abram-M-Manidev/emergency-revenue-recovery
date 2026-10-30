@@ -43,6 +43,16 @@ async def _hold_advisory_xact_lock(session: AsyncSession, key: str) -> AsyncIter
     yield
 
 
+async def try_advisory_xact_lock(session: AsyncSession, key: str) -> bool:
+    """Non-blocking twin of `_hold_advisory_xact_lock`, for work that should
+    give up rather than queue (a second usage-reconciliation run). Same
+    transaction-scoped release; callers namespace their own keys."""
+    result = await session.execute(
+        text("SELECT pg_try_advisory_xact_lock(:key)"), {"key": _advisory_key(key)}
+    )
+    return bool(result.scalar_one())
+
+
 class PostgresAdvisoryCallLock(CallLock):
     """Serialises on `pg_advisory_xact_lock`, which Postgres releases
     automatically when the surrounding transaction commits or rolls back.

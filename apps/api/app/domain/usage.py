@@ -24,6 +24,11 @@ never silently re-describes an old month. The rules (agreed 2026-10-29):
 
 Nothing here enforces an allowance or changes how a call is handled. This
 module only records.
+
+`m2-2026-10-30` changed one thing: the fault vocabulary, checked against
+Vapi's published `endedReason` enum (638 values), gained the start-up and
+assistant-request failures M1 had missed. A record keeps the version it
+was decided under; nothing re-decides old records to the new rules.
 """
 
 from __future__ import annotations
@@ -35,7 +40,7 @@ from datetime import date, datetime, timezone
 from decimal import Decimal
 from enum import Enum
 
-RULES_VERSION = "m1-2026-10-29"
+RULES_VERSION = "m2-2026-10-30"
 MINIMUM_BILLABLE_SECONDS = 10
 
 
@@ -52,6 +57,18 @@ class UsageAttribution(str, Enum):
     UNATTRIBUTED = "unattributed"
     """No mapping matched. Kept, operator-only, because Vapi still bills it —
     never guessed onto a tenant."""
+
+
+class UsageSource(str, Enum):
+    """Where the record came from."""
+
+    WEBHOOK = "webhook"
+    """Vapi's end-of-call report."""
+
+    RECONCILIATION = "reconciliation"
+    """Vapi's call API, because no end-of-call report ever arrived (see
+    `app/domain/usage_reconciliation.py`). A report that arrives later
+    merges into it like any repeat delivery."""
 
 
 class DurationSource(str, Enum):
@@ -74,15 +91,18 @@ class ExclusionReason(str, Enum):
 
 # Vapi's `endedReason` vocabulary for calls that failed rather than ended.
 # Prefixes cover Vapi's families of pipeline/provider errors; the exact set
-# covers single values. Not verified against a complete list from Vapi:
-# an unrecognised reason is treated as a normal end (billable), and every
-# record keeps its raw `ended_reason`, so a missed fault is visible and
-# correctable rather than hidden.
+# covers single values. Checked 2026-10-30 against the `endedReason` enum in
+# Vapi's OpenAPI spec. An unrecognised reason is still treated as a normal
+# end (billable), and every record keeps its raw `ended_reason`;
+# reconciliation flags any billed call whose reason looks like a failure.
 _FAULT_PREFIXES = (
     "pipeline-error-",
     "call.in-progress.error-",
     "call.start.error-",
     "call.ringing.error-",
+    # m2: `call-start-error-neither-assistant-nor-server-set` is hyphenated,
+    # so the dotted prefix above never matched it.
+    "call-start-error-",
 )
 _FAULT_REASONS = frozenset(
     {
@@ -95,6 +115,15 @@ _FAULT_REASONS = frozenset(
         "twilio-failed-to-connect-call",
         "vonage-failed-to-connect-call",
         "vonage-rejected",
+        # m2 additions. Deliberately NOT added:
+        # `assistant-request-returned-forwarding-phone-number` (a deliberate
+        # forward) and `vonage-disconnected` (not evidently a failure).
+        "assistant-request-returned-unspeakable-error",
+        "assistant-request-returned-invalid-assistant",
+        "assistant-request-returned-no-assistant",
+        "call.start.assistant-version-error-validation",
+        "call.start.squad-version-error-validation",
+        "worker-shutdown",
     }
 )
 
@@ -228,6 +257,9 @@ class CallUsageRecord:
     report_count: int
     first_reported_at: datetime
     last_reported_at: datetime
+    # `report_count` counts end-of-call reports only, so a record that
+    # reconciliation created and no report ever reached has 0.
+    source: UsageSource = UsageSource.WEBHOOK
 
     @property
     def vapi_call_id(self) -> str:

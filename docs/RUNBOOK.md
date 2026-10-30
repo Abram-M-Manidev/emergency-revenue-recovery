@@ -420,6 +420,71 @@ the advice is up to the model, as directed by the prompt.
 
 ---
 
+## Usage reconciliation (Vapi vs. recorded usage)
+
+Every ended call gets one row in `call_usage_records`, written from Vapi's
+end-of-call webhook. Reconciliation checks those rows against Vapi's own
+call API. It records calls whose webhook never arrived, fills fields a
+report lacked, and records every disagreement for a person to look at.
+**It bills nobody, and nothing schedules it yet.** You run it.
+
+**Needs** `VAPI_API_KEY` in `apps/api/.env`. This must be Vapi's
+**private** key: Dashboard → Organization → API Keys. The key is used only
+for read-only `GET /call` and `GET /call/{id}`. Nothing is written to Vapi.
+
+```bash
+# see what it would record, then roll back (always do this first)
+essr exec api python -m app.cli.usage_reconcile --dry-run
+# record it (default window: the last 7 days, ending 15 minutes ago)
+essr exec api python -m app.cli.usage_reconcile
+# a specific window (dates are midnight UTC; max 31 days)
+essr exec api python -m app.cli.usage_reconcile --since 2026-10-01 --until 2026-11-01
+```
+
+Exit codes: `0` completed, `1` failed with nothing recorded, `2` refused
+(bad window or no key), `75` another run is in progress.
+
+Run it at least weekly, and always **within Vapi's call retention**. Once
+Vapi has deleted a call, our record of it reads as `missing_at_vapi`.
+
+| Outcome | Meaning | What to do |
+|---|---|---|
+| `matched` | Both sides agree | Nothing |
+| `filled` | We lacked a value (usually cost); filled from Vapi | Nothing |
+| `missing_locally` | Vapi has the call, our webhook never arrived; recorded from Vapi | Check webhook delivery in Vapi's webhook logs. Many of these means the Server URL or secret is wrong |
+| `discrepant` | A value disagrees; ours is kept | Read `discrepancies` (below) |
+| `missing_at_vapi` | We have it, Vapi returns 404 | Expected past retention; otherwise investigate |
+| `not_ended` | Vapi does not show it ended yet | Nothing; the next run checks again |
+
+Discrepancies: `duration` (more than 1 s apart), `ended_reason`, `cost`
+(more than $0.0001 apart), `fault_classification` (Vapi's end reason is a
+failure, yet we billed minutes; the record was decided under older rules
+or on a different reason), and `cost_incomplete` (Vapi says its own cost
+may be understated).
+
+A filled field never changes a call's billing period or tenant. The billing
+decision is re-made only for a call whose duration was unknown.
+
+```bash
+# what needs a look
+essr exec postgres psql -U errs -d errs -c "
+  SELECT vapi_call_id, outcome, discrepancies, filled_fields, checked_at
+    FROM vapi_call_reconciliations WHERE outcome <> 'MATCHED'
+   ORDER BY checked_at DESC LIMIT 50;"
+# recent runs (a FAILED row names the error type only)
+essr exec postgres psql -U errs -d errs -c "
+  SELECT started_at, window_start, window_end, status, counts, error
+    FROM usage_reconciliation_runs ORDER BY started_at DESC LIMIT 10;"
+```
+
+Failures: `VapiAuthError` means the key is wrong, or is the public key.
+`VapiUnavailableError` means Vapi kept timing out or rate-limiting through
+4 attempts; rerun later. `VapiPagingError` means more than 1000 calls were
+created within one second, so the listing cannot be proven complete. A run
+is all-or-nothing, so rerunning is always safe.
+
+---
+
 ## Disabling one tenant's voice assistant
 
 When a business's assistant is misbehaving and you need it to stop **now**.

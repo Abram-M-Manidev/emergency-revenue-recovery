@@ -1,4 +1,5 @@
-"""Reads the usage facts out of a Vapi end-of-call report.
+"""Reads the usage facts out of a Vapi end-of-call report, and (M2) the
+usage-relevant part of a `Call` object from Vapi's call API.
 
 The report's cost and timing fields are NOT verified against a real payload
 yet (Vapi's server-event docs do not specify them). So every field is
@@ -16,6 +17,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from app.domain.usage import CallUsageFacts
+from app.domain.usage_reconciliation import VapiCallSummary
 
 _ID_MAX_LENGTH = 128
 _ENDED_REASON_MAX_LENGTH = 128
@@ -24,8 +26,11 @@ _ENDED_REASON_MAX_LENGTH = 128
 _MAX_DURATION_SECONDS = Decimal(48 * 3600)
 _MAX_CALL_COST = Decimal(10_000)
 _MAX_BREAKDOWN_VALUE = Decimal(10**12)
-# The components Vapi's SDK documents on `CostBreakdown`. Anything else is
-# dropped rather than stored unvetted.
+_STATUS_MAX_LENGTH = 32
+_MAX_COST_MINUTES = Decimal(48 * 60)
+# The numeric components of `CostBreakdown` in Vapi's OpenAPI spec (checked
+# 2026-10-30). Anything else, including the nested `analysisCostBreakdown`,
+# is dropped rather than stored unvetted.
 _BREAKDOWN_KEYS = frozenset(
     {
         "transport",
@@ -33,9 +38,11 @@ _BREAKDOWN_KEYS = frozenset(
         "llm",
         "tts",
         "vapi",
+        "chat",
         "total",
         "llmPromptTokens",
         "llmCompletionTokens",
+        "llmCachedPromptTokens",
         "ttsCharacters",
     }
 )
@@ -62,6 +69,66 @@ def parse_end_of_call_usage(message: dict[str, Any], vapi_call_id: str) -> CallU
     )
 
 
+def parse_vapi_call(call: Any) -> VapiCallSummary | None:
+    """One element of `GET /call`, or the body of `GET /call/{id}`, reduced
+    to what reconciliation compares. Field names are from Vapi's OpenAPI
+    spec, which (unlike the end-of-call report) documents them: `Call` has
+    no duration field, and `costs[]` holds typed line items. None when the
+    object has no usable id."""
+    if not isinstance(call, dict):
+        return None
+    vapi_call_id = _identifier(call.get("id"))
+    if vapi_call_id is None:
+        return None
+    normal, overage, transport, incomplete = _line_items(call.get("costs"))
+    return VapiCallSummary(
+        vapi_call_id=vapi_call_id,
+        status=_text(call.get("status"), _STATUS_MAX_LENGTH),
+        vapi_assistant_id=_identifier(call.get("assistantId")),
+        vapi_phone_number_id=_identifier(call.get("phoneNumberId")),
+        created_at=_timestamp(call.get("createdAt")),
+        updated_at=_timestamp(call.get("updatedAt")),
+        started_at=_timestamp(call.get("startedAt")),
+        ended_at=_timestamp(call.get("endedAt")),
+        ended_reason=_text(call.get("endedReason")),
+        cost=_amount(call.get("cost"), _MAX_CALL_COST),
+        cost_breakdown=_breakdown(call.get("costBreakdown")),
+        vapi_minutes_normal=normal,
+        vapi_minutes_overage=overage,
+        transport_minutes=transport,
+        usage_incomplete=incomplete,
+    )
+
+
+def _line_items(
+    costs: Any,
+) -> tuple[Decimal | None, Decimal | None, Decimal | None, bool]:
+    """Sums `VapiCost.minutes` by `subType` and `TransportCost.minutes`, and
+    notes any `ModelCost.usageComplete: false`. A malformed item is skipped;
+    a total stays None unless at least one valid item contributed to it."""
+    totals: dict[str, Decimal] = {}
+    incomplete = False
+    for item in costs if isinstance(costs, list) else []:
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("type")
+        if kind == "model" and item.get("usageComplete") is False:
+            incomplete = True
+            continue
+        if kind == "vapi":
+            key = item.get("subType")
+            if key not in ("normal", "overage"):
+                continue
+        elif kind == "transport":
+            key = "transport"
+        else:
+            continue
+        minutes = _amount(item.get("minutes"), _MAX_COST_MINUTES)
+        if minutes is not None:
+            totals[key] = totals.get(key, Decimal(0)) + minutes
+    return totals.get("normal"), totals.get("overage"), totals.get("transport"), incomplete
+
+
 def _first(message: dict[str, Any], call: dict[str, Any], key: str) -> Any:
     value = message.get(key)
     return value if value is not None else call.get(key)
@@ -73,10 +140,10 @@ def _identifier(value: Any) -> str | None:
     return value.strip()
 
 
-def _text(value: Any) -> str | None:
+def _text(value: Any, max_length: int = _ENDED_REASON_MAX_LENGTH) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return None
-    return value.strip()[:_ENDED_REASON_MAX_LENGTH]
+    return value.strip()[:max_length]
 
 
 def _timestamp(value: Any) -> datetime | None:
