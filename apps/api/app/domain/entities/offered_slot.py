@@ -51,6 +51,10 @@ class OfferedSlot:
     offered_turn_index: int
     selected_at: datetime | None = None
     selected_turn_index: int | None = None
+    # Set when the turn that read this time out was interrupted (see
+    # `OfferedSlotRepository.withdraw_unheard_offers`). Kept for the record;
+    # a withdrawn offer can never be selected or booked.
+    withdrawn_at: datetime | None = None
 
     @property
     def is_selected(self) -> bool:

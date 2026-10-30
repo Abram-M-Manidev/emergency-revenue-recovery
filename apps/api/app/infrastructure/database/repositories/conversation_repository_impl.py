@@ -35,6 +35,7 @@ def _message_to_entity(model: ConversationMessageModel) -> ConversationMessage:
         role=MessageRole(model.role),
         content=model.content,
         created_at=model.created_at,
+        interrupted_at=model.interrupted_at,
     )
 
 
@@ -113,6 +114,30 @@ class SqlAlchemyConversationRepository(ConversationRepository):
         await self._session.flush()
         await self._session.refresh(model)
         return _to_entity(model)
+
+    async def reopen(self, conversation_id: uuid.UUID) -> Conversation:
+        result = await self._session.execute(
+            select(ConversationModel).where(ConversationModel.id == conversation_id)
+        )
+        model = result.scalar_one()
+        model.status = ConversationStatus.ACTIVE
+        model.ended_at = None
+        await self._session.flush()
+        await self._session.refresh(model)
+        return _to_entity(model)
+
+    async def mark_messages_interrupted(
+        self, message_ids: list[uuid.UUID], *, at: datetime | None
+    ) -> None:
+        if not message_ids:
+            return
+        result = await self._session.execute(
+            select(ConversationMessageModel).where(ConversationMessageModel.id.in_(message_ids))
+        )
+        # Through the ORM, so a later `list_messages` in this session sees it.
+        for model in result.scalars().all():
+            model.interrupted_at = at
+        await self._session.flush()
 
     # --- Analytics (Milestone 8) aggregate queries ---
 

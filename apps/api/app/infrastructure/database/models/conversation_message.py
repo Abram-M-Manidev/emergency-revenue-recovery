@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
 
 class ConversationMessageModel(UUIDPrimaryKeyMixin, Base):
-    """No `updated_at`: messages are append-only, never edited in place."""
+    """No `updated_at`: message text is append-only, never edited in place."""
 
     __tablename__ = "conversation_messages"
 
@@ -34,6 +34,11 @@ class ConversationMessageModel(UUIDPrimaryKeyMixin, Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    # See `ConversationMessage.interrupted_at`. The one field ever written
+    # after insert: it records what happened to the message, not its text.
+    interrupted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
 
     conversation: Mapped[ConversationModel] = relationship(back_populates="messages")

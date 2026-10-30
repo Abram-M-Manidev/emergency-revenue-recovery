@@ -30,3 +30,25 @@ def test_start_conversation_caller_phone_is_optional():
 def test_overlong_caller_phone_is_rejected():
     with pytest.raises(ValidationError):
         StartConversationRequest(caller_phone_number="1" * 33)
+
+
+def test_a_message_without_interruption_serialises_as_before_plus_two_empty_fields():
+    import uuid
+    from datetime import datetime, timezone
+
+    from app.application.schemas.ai_conversations import MessageResponse
+    from app.domain.entities.conversation_message import ConversationMessage, MessageRole
+
+    now = datetime.now(timezone.utc)
+    plain = MessageResponse.model_validate(ConversationMessage(
+        id=uuid.uuid4(), conversation_id=uuid.uuid4(), role=MessageRole.ASSISTANT,
+        content="Hello.", created_at=now,
+    )).model_dump(mode="json")
+    assert plain["interrupted_at"] is None and plain["interrupted"] is False
+    assert {"id", "role", "content", "created_at"} <= plain.keys()
+
+    cut = MessageResponse.model_validate(ConversationMessage(
+        id=uuid.uuid4(), conversation_id=uuid.uuid4(), role=MessageRole.ASSISTANT,
+        content="Hello.", created_at=now, interrupted_at=now,
+    )).model_dump(mode="json")
+    assert cut["interrupted"] is True and cut["interrupted_at"] is not None

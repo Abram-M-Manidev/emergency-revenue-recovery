@@ -51,6 +51,7 @@ from app.application.services.customer_service import CustomerService
 from app.application.services.dispatch_service import DispatchService
 from app.application.services.voice_service import (
     ChatCompletionResult,
+    TurnReceipt,
     VoiceService,
     VoiceTextDelta,
 )
@@ -313,6 +314,12 @@ class _StreamStats:
     first_content_at: float | None = None
     content_frames: int = 0
     end_call_emitted: bool = False
+    # What the turn did that only counts if the caller heard it, and
+    # whether Vapi took the stream's final `[DONE]` frame (a transport
+    # signal, not proof of playback). Read by `_streamed_completion` when
+    # Vapi drops the stream early.
+    receipt: TurnReceipt | None = None
+    done_relayed: bool = False
 
 
 async def _instrumented_stream(
@@ -427,6 +434,8 @@ async def _streamed_completion(
         finally:
             await frames.put(None)
 
+    stats: _StreamStats = turn["stats"]
+    service: VoiceService = turn["service"]
     producer = asyncio.create_task(produce())
     try:
         while True:
@@ -434,14 +443,20 @@ async def _streamed_completion(
             if frame is None:
                 break
             yield frame
+            if frame == _DONE_FRAME:
+                # Vapi asked for the next frame, so it received the whole
+                # response. Transport-level only: not proof the caller
+                # heard it played (see `VoiceService.mark_turn_interrupted`).
+                stats.done_relayed = True
         await producer
     except BaseException:
-        if not producer.done():
-            logger.info("voice_turn_draining_after_hangup")
-            # Shielded: Starlette's cancel scope would otherwise cancel this
-            # wait too, at every await, and the whole point is to let the
-            # turn reach a clean end before the session is torn down.
-            with anyio.CancelScope(shield=True):
+        with anyio.CancelScope(shield=True):
+            if not producer.done():
+                logger.info("voice_turn_draining_after_hangup")
+                # Shielded: Starlette's cancel scope would otherwise cancel
+                # this wait too, at every await, and the whole point is to
+                # let the turn reach a clean end before the session is torn
+                # down.
                 with anyio.move_on_after(_HANGUP_DRAIN_SECONDS):
                     await asyncio.wait({producer})
                 if not producer.done():
@@ -450,8 +465,25 @@ async def _streamed_completion(
                     logger.error("voice_turn_abandoned_after_hangup")
                 else:
                     logger.info("voice_turn_completed_after_hangup")
+            # The turn finished, but Vapi dropped the stream before `[DONE]`:
+            # it never received the whole reply, so the caller cannot have
+            # heard it all (2026-10-30: the notice, a refusal and a
+            # completion were all lost this way). Settled here, inside the
+            # same transaction and before `get_db` commits it.
+            if (
+                stats.receipt is not None
+                and not stats.done_relayed
+                and producer.done()
+                and not producer.cancelled()
+                and producer.exception() is None
+            ):
+                await service.mark_turn_interrupted(stats.receipt)
         raise
+    if stats.receipt is not None and stats.receipt.replay:
+        await service.mark_turn_redelivered(stats.receipt)
 
+
+_DONE_FRAME = "data: [DONE]\n\n"
 
 # How long a turn may keep running after the caller has hung up before it is
 # abandoned. A turn is bounded by the realtime model timeout plus tool rounds;
@@ -509,6 +541,7 @@ async def _turn_frames(
             phone_number_id=payload.call.phoneNumberId or payload.phoneNumberId,
             customer_number=caller_number,
             customer_utterance=customer_utterance,
+            heard_reply=_last_heard_reply(payload),
         ):
             if isinstance(event, VoiceTextDelta):
                 if event.text:
@@ -528,6 +561,7 @@ async def _turn_frames(
                     yield frames.content(event.text)
             else:
                 result = event.result
+                stats.receipt = result.receipt
     except VoiceAssistantDisabledError:
         # The tenant switched its own assistant off. Same truthful sentence
         # the non-streaming path uses, and the call ends here rather than
@@ -909,6 +943,21 @@ def _latest_customer_utterance(payload: VapiChatCompletionRequest) -> str | None
     return None
 
 
+def _last_heard_reply(payload: VapiChatCompletionRequest) -> str | None:
+    """Vapi's own record of the assistant's last words before the caller's
+    latest utterance: what Vapi says it spoke (its static first message
+    included). None when the transcript has no such message."""
+    seen_user = False
+    for message in reversed(payload.messages):
+        if message.role == "user" and message.content:
+            if seen_user:
+                return None
+            seen_user = True
+        elif seen_user and message.role in ("assistant", "bot") and message.content:
+            return message.content
+    return None
+
+
 def _end_call_tool_call() -> dict[str, Any]:
     """The `endCall` tool call the AI Brain's "conversation is complete"
     signal is expressed as. The assistant must have `endCall` in its Vapi
@@ -976,7 +1025,7 @@ class _SseFrameWriter:
         return self._frame({}, finish_reason)
 
     def done(self) -> str:
-        return "data: [DONE]\n\n"
+        return _DONE_FRAME
 
 
 async def _completion_chunks(content: str, *, should_end_call: bool) -> AsyncIterator[str]:

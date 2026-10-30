@@ -168,6 +168,20 @@ class FakeConversationRepository(ConversationRepository):
         self._conversations[conversation_id] = updated
         return updated
 
+    async def reopen(self, conversation_id):
+        updated = replace(
+            self._conversations[conversation_id], status=ConversationStatus.ACTIVE, ended_at=None
+        )
+        self._conversations[conversation_id] = updated
+        return updated
+
+    async def mark_messages_interrupted(self, message_ids, *, at):
+        wanted = set(message_ids)
+        for conversation_id, messages in self._messages.items():
+            self._messages[conversation_id] = [
+                replace(m, interrupted_at=at) if m.id in wanted else m for m in messages
+            ]
+
     # --- Analytics (Milestone 8) ---
 
     def _in_range(self, organization_id, *, start, end):
@@ -1178,6 +1192,10 @@ class FakeOfferedSlotRepository(OfferedSlotRepository):
 
     def __init__(self) -> None:
         self.offers: dict[tuple[uuid.UUID, uuid.UUID, datetime], OfferedSlot] = {}
+        # Withdrawn offers, as audit rows, with the interrupted reply's id.
+        # Kept out of `offers`, which therefore holds active offers only,
+        # mirroring the real repository's `withdrawn_at IS NULL` filter.
+        self.withdrawn: list[tuple[OfferedSlot, uuid.UUID | None]] = []
 
     async def record_offered(self, organization_id, conversation_id, slots, turn_index):
         for slot in slots:
@@ -1239,6 +1257,24 @@ class FakeOfferedSlotRepository(OfferedSlotRepository):
                 self.offers[key] = replace(
                     offered, selected_at=None, selected_turn_index=None
                 )
+
+    async def withdraw_unheard_offers(
+        self, organization_id, conversation_id, turn_index, *, interrupted_message_id
+    ):
+        doomed = [
+            key
+            for key, offered in self.offers.items()
+            if key[0] == organization_id
+            and key[1] == conversation_id
+            and offered.offered_turn_index == turn_index
+            and not offered.is_selected
+        ]
+        for key in doomed:
+            offered = self.offers.pop(key)
+            self.withdrawn.append(
+                (replace(offered, withdrawn_at=datetime.now(timezone.utc)), interrupted_message_id)
+            )
+        return len(doomed)
 
 
 class FakeBookingLock(BookingLock):

@@ -11,7 +11,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, UniqueConstraint, func, text
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, func, text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -25,8 +25,14 @@ class OfferedSlotModel(UUIDPrimaryKeyMixin, Base):
         # One row per offered start time, so re-offering the same slot — which
         # happens whenever `check_availability` runs twice in a conversation —
         # updates rather than duplicates.
-        UniqueConstraint(
-            "conversation_id", "slot_start_at", name="uq_offered_slot_conversation_start"
+        # One ACTIVE offer per (conversation, start). Partial, so a withdrawn
+        # offer stays on record while the same time is offered again.
+        Index(
+            "uq_offered_slot_conversation_start_active",
+            "conversation_id",
+            "slot_start_at",
+            unique=True,
+            postgresql_where=text("withdrawn_at IS NULL"),
         ),
         # At most one live selection per conversation, enforced by the
         # database rather than by the read-modify-write in
@@ -70,3 +76,13 @@ class OfferedSlotModel(UUIDPrimaryKeyMixin, Base):
         DateTime(timezone=True), nullable=True
     )
     selected_turn_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # See `OfferedSlot.withdrawn_at`. The reply that read the time out but
+    # never reached the caller; SET NULL so the audit row outlives it.
+    withdrawn_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    withdrawn_message_id: Mapped[uuid.UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("conversation_messages.id", ondelete="SET NULL"),
+        nullable=True,
+    )

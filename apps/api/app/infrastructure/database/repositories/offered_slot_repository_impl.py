@@ -13,6 +13,10 @@ from app.domain.entities.offered_slot import OfferedSlot
 from app.domain.repositories.offered_slot_repository import OfferedSlotRepository
 from app.infrastructure.database.models.offered_slot import OfferedSlotModel
 
+# Every read and write below works on active offers only: a withdrawn one is
+# audit history, never something a caller can choose or book.
+_ACTIVE = OfferedSlotModel.withdrawn_at.is_(None)
+
 
 class SqlAlchemyOfferedSlotRepository(OfferedSlotRepository):
     def __init__(self, session: AsyncSession) -> None:
@@ -55,7 +59,8 @@ class SqlAlchemyOfferedSlotRepository(OfferedSlotRepository):
         )
         await self._session.execute(
             statement.on_conflict_do_update(
-                constraint="uq_offered_slot_conversation_start",
+                index_elements=["conversation_id", "slot_start_at"],
+                index_where=_ACTIVE,
                 set_={"duration_minutes": statement.excluded.duration_minutes},
             )
         )
@@ -69,6 +74,7 @@ class SqlAlchemyOfferedSlotRepository(OfferedSlotRepository):
             .where(
                 OfferedSlotModel.organization_id == organization_id,
                 OfferedSlotModel.conversation_id == conversation_id,
+                _ACTIVE,
             )
             .order_by(OfferedSlotModel.slot_start_at.asc())
         )
@@ -85,6 +91,7 @@ class SqlAlchemyOfferedSlotRepository(OfferedSlotRepository):
                 OfferedSlotModel.organization_id == organization_id,
                 OfferedSlotModel.conversation_id == conversation_id,
                 OfferedSlotModel.slot_start_at == start_at,
+                _ACTIVE,
             )
         )
         return result.scalar_one_or_none()
@@ -100,6 +107,7 @@ class SqlAlchemyOfferedSlotRepository(OfferedSlotRepository):
                 OfferedSlotModel.organization_id == organization_id,
                 OfferedSlotModel.conversation_id == conversation_id,
                 OfferedSlotModel.slot_start_at == start_at,
+                _ACTIVE,
             )
         )
         model = result.scalar_one_or_none()
@@ -112,6 +120,13 @@ class SqlAlchemyOfferedSlotRepository(OfferedSlotRepository):
         start_at: datetime,
         turn_index: int,
     ) -> OfferedSlot | None:
+        # Only an active offer can be chosen. Checked BEFORE clearing: a
+        # refused choice (a time never offered, or one withdrawn because its
+        # turn was not delivered) must leave the caller's real choice alone.
+        # `FakeOfferedSlotRepository` always behaved this way; this
+        # repository used to clear first.
+        if await self.get_offered(organization_id, conversation_id, start_at) is None:
+            return None
         # Clear first, then set — in that order and in one transaction, so the
         # partial unique index over selected rows is never transiently
         # violated by a second selection existing alongside the first.
@@ -124,6 +139,7 @@ class SqlAlchemyOfferedSlotRepository(OfferedSlotRepository):
                 OfferedSlotModel.organization_id == organization_id,
                 OfferedSlotModel.conversation_id == conversation_id,
                 OfferedSlotModel.slot_start_at == start_at,
+                _ACTIVE,
             )
             .values(selected_at=selected_at, selected_turn_index=turn_index)
         )
@@ -142,6 +158,7 @@ class SqlAlchemyOfferedSlotRepository(OfferedSlotRepository):
                 OfferedSlotModel.organization_id == organization_id,
                 OfferedSlotModel.conversation_id == conversation_id,
                 OfferedSlotModel.selected_at.is_not(None),
+                _ACTIVE,
             )
         )
         model = result.scalar_one_or_none()
@@ -161,6 +178,31 @@ class SqlAlchemyOfferedSlotRepository(OfferedSlotRepository):
         )
         await self._session.flush()
 
+    async def withdraw_unheard_offers(
+        self,
+        organization_id: uuid.UUID,
+        conversation_id: uuid.UUID,
+        turn_index: int,
+        *,
+        interrupted_message_id: uuid.UUID | None,
+    ) -> int:
+        result = await self._session.execute(
+            update(OfferedSlotModel)
+            .where(
+                OfferedSlotModel.organization_id == organization_id,
+                OfferedSlotModel.conversation_id == conversation_id,
+                OfferedSlotModel.offered_turn_index == turn_index,
+                OfferedSlotModel.selected_at.is_(None),
+                _ACTIVE,
+            )
+            .values(
+                withdrawn_at=datetime.now(timezone.utc),
+                withdrawn_message_id=interrupted_message_id,
+            )
+        )
+        await self._session.flush()
+        return int(getattr(result, "rowcount", 0) or 0)
+
 
 def _to_entity(model: OfferedSlotModel) -> OfferedSlot:
     return OfferedSlot(
@@ -171,4 +213,5 @@ def _to_entity(model: OfferedSlotModel) -> OfferedSlot:
         offered_turn_index=model.offered_turn_index,
         selected_at=model.selected_at,
         selected_turn_index=model.selected_turn_index,
+        withdrawn_at=model.withdrawn_at,
     )

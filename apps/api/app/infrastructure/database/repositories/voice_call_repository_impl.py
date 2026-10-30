@@ -110,3 +110,12 @@ class SqlAlchemyVoiceCallRepository(VoiceCallRepository):
         model.disclosed_recording = recording
         await self._session.flush()
         return True
+
+    async def clear_disclosure(self, voice_call_id: uuid.UUID) -> None:
+        model = await self._session.get(VoiceCallModel, voice_call_id)
+        if model is None:
+            return
+        model.disclosure_sent_at = None
+        model.disclosed_ai = None
+        model.disclosed_recording = None
+        await self._session.flush()

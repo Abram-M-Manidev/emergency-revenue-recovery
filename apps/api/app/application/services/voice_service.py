@@ -18,6 +18,7 @@ import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
+from difflib import SequenceMatcher
 
 import structlog
 from structlog.contextvars import bind_contextvars
@@ -45,10 +46,12 @@ from app.domain.exceptions import (
 )
 from app.domain.locks import CallLock, NullCallLock
 from app.domain.repositories.conversation_repository import ConversationRepository
+from app.domain.repositories.offered_slot_repository import OfferedSlotRepository
 from app.domain.repositories.organization_repository import OrganizationRepository
 from app.domain.repositories.voice_call_repository import VoiceCallRepository
 from app.domain.repositories.voice_line_repository import VoiceLineRepository
 from app.domain.transactions import NullSavepoints, Savepoints
+from app.domain.turn_delivery import normalised_words
 
 logger = structlog.get_logger("app.voice")
 
@@ -151,11 +154,33 @@ _SUPERSESSION = TranscriptSupersession()
 
 
 @dataclass(frozen=True, slots=True)
+class TurnReceipt:
+    """What a streamed turn did that only counts if the caller heard it.
+
+    The transport decides that, not this service: only it knows whether
+    Vapi took the whole reply or dropped the request first (see
+    `mark_turn_interrupted`)."""
+
+    organization_id: uuid.UUID
+    conversation_id: uuid.UUID
+    voice_call_id: uuid.UUID
+    # This turn's customer and assistant messages; for a replay, the
+    # earlier interrupted pair being spoken again.
+    message_ids: tuple[uuid.UUID, ...] = ()
+    turn_index: int | None = None
+    disclosure_given: bool = False
+    completed_conversation: bool = False
+    # A cached reply re-spoken for a turn that was interrupted earlier.
+    replay: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class ChatCompletionResult:
     reply_text: str
     should_end_call: bool
     organization_id: uuid.UUID
     conversation_id: uuid.UUID
+    receipt: TurnReceipt | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,6 +220,27 @@ class EndedCall:
 class _AnsweredTurn:
     customer_utterance: str
     reply_text: str
+    message_ids: tuple[uuid.UUID, ...] = ()
+    interrupted: bool = False
+
+
+# Below this, Vapi's record of the last reply and ours are judged to differ.
+# Loose on purpose: Vapi's copy also carries what ERRS speaks but does not
+# store (the caller notice, a holding phrase) and its own punctuation.
+_HEARD_SIMILARITY_FLOOR = 0.9
+
+
+def _normalised(text: str) -> str:
+    return " ".join(normalised_words(text))
+
+
+def heard_similarity(stored: str, heard: str) -> float:
+    """1.0 when Vapi's copy of the last reply contains ours; otherwise how
+    alike the two are. Compares words only, never logs either text."""
+    ours, theirs = _normalised(stored), _normalised(heard)
+    if not ours or ours in theirs:
+        return 1.0
+    return SequenceMatcher(None, ours, theirs).ratio()
 
 
 def _last_answered_turn(history: list[ConversationMessage]) -> _AnsweredTurn | None:
@@ -206,9 +252,42 @@ def _last_answered_turn(history: list[ConversationMessage]) -> _AnsweredTurn | N
         and history[-2].role is MessageRole.CUSTOMER
     ):
         return _AnsweredTurn(
-            customer_utterance=history[-2].content, reply_text=history[-1].content
+            customer_utterance=history[-2].content,
+            reply_text=history[-1].content,
+            message_ids=(history[-2].id, history[-1].id),
+            interrupted=history[-1].interrupted_at is not None,
         )
     return None
+
+
+def _check_heard_history(history: list[ConversationMessage], heard_reply: str | None) -> None:
+    """Measurement only: does Vapi's record of the last reply match the last
+    reply ERRS believes the caller heard?
+
+    `mark_turn_interrupted` catches a reply Vapi dropped mid-stream. It
+    cannot catch one Vapi received in full and then did not speak (the
+    caller started talking again before playback). Vapi's transcript, sent
+    with every request, is the only evidence of that. This logs the gap so
+    its frequency can be measured before anything acts on it. Lengths and a
+    score only: neither text is logged."""
+    stored = next(
+        (
+            m.content
+            for m in reversed(history)
+            if m.role is MessageRole.ASSISTANT and m.interrupted_at is None
+        ),
+        None,
+    )
+    if stored is None or heard_reply is None:
+        return
+    similarity = heard_similarity(stored, heard_reply)
+    if similarity < _HEARD_SIMILARITY_FLOOR:
+        logger.warning(
+            "voice_history_divergence",
+            similarity=round(similarity, 2),
+            stored_chars=len(stored),
+            heard_chars=len(heard_reply),
+        )
 
 
 class VoiceService:
@@ -234,6 +313,9 @@ class VoiceService:
         # construction site keeps working; absent, ERRS speaks no notice and
         # the opening request keeps its old behaviour.
         disclosure_service: CallDisclosureService | None = None,
+        # Withdraws appointment times offered in a turn the caller never
+        # heard. Optional so every existing construction site keeps working.
+        offered_slot_repository: OfferedSlotRepository | None = None,
     ) -> None:
         self._voice_lines = voice_line_repository
         self._voice_calls = voice_call_repository
@@ -244,6 +326,7 @@ class VoiceService:
         self._organizations = organization_repository
         self._savepoints = savepoints or NullSavepoints()
         self._disclosure = disclosure_service
+        self._offered_slots = offered_slot_repository
 
     # --- Admin-facing reads ---
 
@@ -303,6 +386,7 @@ class VoiceService:
         phone_number_id: str | None,
         customer_number: str | None,
         customer_utterance: str,
+        heard_reply: str | None = None,
     ) -> AsyncIterator[VoiceStreamEvent]:
         """Streaming twin of `handle_chat_completion`, preserving P1 whole.
 
@@ -347,6 +431,7 @@ class VoiceService:
                 yield VoiceTextDelta(notice + " ")
 
             history = await self._conversations.list_messages(conversation_id)
+            _check_heard_history(history, heard_reply)
             cached_reply = _last_answered_turn(history)
             redundant = cached_reply is not None and (
                 cached_reply.customer_utterance == customer_utterance
@@ -366,7 +451,21 @@ class VoiceService:
                     organization_id, conversation_id, cached_reply.reply_text
                 )
                 yield VoiceTextDelta(cached_reply.reply_text)
-                yield VoiceTurnComplete(result)
+                yield VoiceTurnComplete(
+                    replace(
+                        result,
+                        receipt=TurnReceipt(
+                            organization_id=organization_id,
+                            conversation_id=conversation_id,
+                            voice_call_id=voice_call.id,
+                            # Only an interrupted pair has anything to
+                            # settle: this replay may be its first hearing.
+                            message_ids=cached_reply.message_ids if cached_reply.interrupted else (),
+                            disclosure_given=bool(notice),
+                            replay=cached_reply.interrupted,
+                        ),
+                    )
+                )
                 return
 
             # Tracks whether the caller has heard anything at all this turn,
@@ -405,14 +504,30 @@ class VoiceService:
                         logger.info("voice_holding_phrase_emitted", tools=list(event.tool_names))
                         yield VoiceTextDelta(_progress_phrase(event.tool_names))
                 else:
+                    completed = event.result.conversation.status is ConversationStatus.COMPLETED
+                    customer_message = event.result.customer_message
                     yield VoiceTurnComplete(
                         ChatCompletionResult(
                             reply_text=event.result.reply_message.content,
-                            should_end_call=(
-                                event.result.conversation.status is ConversationStatus.COMPLETED
-                            ),
+                            should_end_call=completed,
                             organization_id=organization_id,
                             conversation_id=conversation_id,
+                            receipt=TurnReceipt(
+                                organization_id=organization_id,
+                                conversation_id=conversation_id,
+                                voice_call_id=voice_call.id,
+                                message_ids=(
+                                    (customer_message.id, event.result.reply_message.id)
+                                    if customer_message is not None
+                                    else (event.result.reply_message.id,)
+                                ),
+                                turn_index=event.result.turn_index,
+                                disclosure_given=bool(notice),
+                                # A completed conversation refuses new turns
+                                # before they start, so COMPLETED here means
+                                # this turn completed it.
+                                completed_conversation=completed,
+                            ),
                         )
                     )
 
@@ -543,6 +658,100 @@ class VoiceService:
             organization_id=organization_id,
             conversation_id=conversation_id,
         )
+
+    # --- Turns the caller never heard ---
+
+    async def mark_turn_interrupted(self, receipt: TurnReceipt) -> None:
+        """Settles a streamed turn whose reply Vapi did not take in full: the
+        stream was dropped before its final `[DONE]` frame, because the
+        caller kept talking (Vapi re-sends their words, grown, in a newer
+        request) or hung up.
+
+        `[DONE]` is a transport signal: it says whether Vapi received the
+        whole HTTP response, not whether the caller heard it played. A reply
+        Vapi received in full can still go unspoken. That case is only
+        measured (`voice_history_divergence`), never acted on here.
+
+        The turn's real effects stay: a ticket, its alert, a booking. Its
+        caller message stays too: those words did reach ERRS (see
+        `app/domain/turn_delivery.py` for how a re-sent copy is not counted
+        twice). What is undone is everything only true if the caller HEARD
+        the reply:
+        - the turn's messages are marked interrupted: the reply is left out
+          of the model's history, and the caller message is marked as
+          "never answered";
+        - a caller notice it carried is forgotten, so the next reply gives it;
+        - appointment times it read out are withdrawn: kept on record, linked
+          to this reply, never selectable or bookable;
+        - a completion it made is reopened, so the caller's next words get
+          an answer rather than "this call has already been completed".
+
+        All four happened on the 2026-10-30 test call. Runs in the turn's
+        own transaction, before it commits and before the call lock lets the
+        next request in. Never raises: at worst the turn is left exactly as
+        it was before this existed."""
+        reopened = False
+        withdrawn = 0
+        try:
+            # Savepoint inside the `try`: catching a database error does not
+            # un-abort a Postgres transaction.
+            async with self._savepoints.isolate():
+                if receipt.message_ids and not receipt.replay:
+                    await self._conversations.mark_messages_interrupted(
+                        list(receipt.message_ids), at=datetime.now(timezone.utc)
+                    )
+                if (
+                    receipt.turn_index is not None
+                    and self._offered_slots is not None
+                    and not receipt.replay
+                ):
+                    withdrawn = await self._offered_slots.withdraw_unheard_offers(
+                        receipt.organization_id,
+                        receipt.conversation_id,
+                        receipt.turn_index,
+                        # The reply is the pair's second message.
+                        interrupted_message_id=(
+                            receipt.message_ids[-1] if receipt.message_ids else None
+                        ),
+                    )
+                if receipt.disclosure_given:
+                    await self._voice_calls.clear_disclosure(receipt.voice_call_id)
+                if receipt.completed_conversation:
+                    voice_call = await self._voice_calls.get_by_conversation_id(
+                        receipt.conversation_id
+                    )
+                    # Not once the call has ended: the end-of-call report
+                    # completes the conversation, and reopening after it
+                    # would leave a finished call open forever.
+                    if voice_call is not None and voice_call.ended_at is None:
+                        await self._conversations.reopen(receipt.conversation_id)
+                        reopened = True
+        except Exception as exc:
+            logger.error("voice_turn_interrupt_record_failed", error=type(exc).__name__)
+            return
+        logger.info(
+            "voice_turn_interrupted",
+            replay=receipt.replay,
+            messages_marked=0 if receipt.replay else len(receipt.message_ids),
+            notice_reset=receipt.disclosure_given,
+            offers_withdrawn=withdrawn,
+            completion_reopened=reopened,
+        )
+
+    async def mark_turn_redelivered(self, receipt: TurnReceipt) -> None:
+        """A reply from an interrupted turn, re-spoken from cache, reached
+        the caller this time: it is part of what they heard after all."""
+        if not receipt.replay or not receipt.message_ids:
+            return
+        try:
+            async with self._savepoints.isolate():
+                await self._conversations.mark_messages_interrupted(
+                    list(receipt.message_ids), at=None
+                )
+        except Exception as exc:
+            logger.error("voice_turn_redelivery_record_failed", error=type(exc).__name__)
+            return
+        logger.info("voice_turn_redelivered")
 
     # --- Caller disclosure ---
 

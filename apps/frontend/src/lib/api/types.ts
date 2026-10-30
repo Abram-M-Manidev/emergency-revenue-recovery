@@ -152,6 +152,12 @@ export interface ConversationMessage {
   role: MessageRole;
   content: string;
   created_at: string;
+  /** Voice only. Set on both messages of a turn whose reply Vapi did not
+   * receive in full (a transport signal, not proof of playback): an
+   * assistant message was never delivered; a customer message reached ESSR
+   * but was never answered. Optional for older API responses. */
+  interrupted_at?: string | null;
+  interrupted?: boolean;
 }
 
 export type CallClassification = "emergency" | "non_emergency" | "unknown";

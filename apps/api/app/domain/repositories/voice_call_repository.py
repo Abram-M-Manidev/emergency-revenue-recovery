@@ -49,3 +49,9 @@ class VoiceCallRepository(ABC):
         """Records the notice given on this call — once. Returns False (and
         changes nothing) when one is already recorded."""
         ...
+
+    @abstractmethod
+    async def clear_disclosure(self, voice_call_id: uuid.UUID) -> None:
+        """Forgets a recorded notice the caller never heard (its turn was
+        interrupted), so the next reply gives it again."""
+        ...

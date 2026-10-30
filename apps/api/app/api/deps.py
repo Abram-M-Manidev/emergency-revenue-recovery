@@ -466,6 +466,8 @@ def get_voice_service(
         # The caller notice: spoken by ERRS before its first reply on a call
         # (or as the call's opening), decided here and never by the model.
         disclosure_service=disclosure_service,
+        # Withdraws times offered in a turn the caller never heard.
+        offered_slot_repository=SqlAlchemyOfferedSlotRepository(db),
     )
 
 

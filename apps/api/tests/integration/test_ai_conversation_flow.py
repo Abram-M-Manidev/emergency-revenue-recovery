@@ -10,6 +10,7 @@ disposable database. Skips gracefully if no database is reachable, same as
 test_auth_flow.py."""
 
 import uuid
+from datetime import datetime, timezone
 
 import pytest
 import pytest_asyncio
@@ -117,6 +118,25 @@ async def test_emergency_conversation_flow(client: AsyncClient, fake_ai_provider
     detail = detail_resp.json()
     assert len(detail["messages"]) == 2
     assert detail["outcome"]["classification"] == "emergency"
+
+    # Ordinary messages carry the new fields, empty: older clients that
+    # ignore them see exactly what they saw before.
+    assert all(m["interrupted_at"] is None and m["interrupted"] is False
+               for m in detail["messages"])
+
+    # A turn whose reply was never delivered is visibly marked.
+    from app.infrastructure.database.repositories.conversation_repository_impl import (
+        SqlAlchemyConversationRepository,
+    )
+
+    async with AsyncSessionLocal() as session:
+        await SqlAlchemyConversationRepository(session).mark_messages_interrupted(
+            [uuid.UUID(m["id"]) for m in detail["messages"]], at=datetime.now(timezone.utc)
+        )
+        await session.commit()
+    marked = (await client.get(f"/api/v1/ai/conversations/{conversation_id}",
+                               headers=headers)).json()["messages"]
+    assert all(m["interrupted"] is True and m["interrupted_at"] for m in marked)
 
     # Conversation already completed: another message is rejected.
     followup_resp = await client.post(

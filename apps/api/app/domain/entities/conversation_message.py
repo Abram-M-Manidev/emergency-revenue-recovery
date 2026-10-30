@@ -18,3 +18,11 @@ class ConversationMessage:
     role: MessageRole
     content: str
     created_at: datetime
+    # Set on both messages of a turn whose reply Vapi did not take in full
+    # (the stream was dropped before `[DONE]`: a transport signal, not proof
+    # of playback). On the reply it means "not delivered", and the reply is
+    # left out of the model's history. On the caller message it means "these
+    # words reached ERRS but were never answered". They stay in the history
+    # unless the caller's next message repeats them (see
+    # `app/domain/turn_delivery.py`).
+    interrupted_at: datetime | None = None

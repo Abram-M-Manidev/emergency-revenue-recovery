@@ -3,7 +3,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, computed_field
 
 from app.domain.entities.conversation import ConversationChannel, ConversationStatus
 from app.domain.entities.conversation_message import MessageRole
@@ -43,6 +43,18 @@ class MessageResponse(BaseModel):
     role: MessageRole
     content: str
     created_at: datetime
+    # Additive, so existing clients are unaffected. Set on both messages of
+    # a voice turn whose reply Vapi did not take in full (a transport-level
+    # signal, not proof of playback). On an assistant message: never
+    # delivered to the caller. On a customer message: reached ERRS but never
+    # answered. Null for every ordinary message.
+    interrupted_at: datetime | None = None
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def interrupted(self) -> bool:
+        """`interrupted_at is not None`, for clients that only need to know."""
+        return self.interrupted_at is not None
 
 
 # --- Outcomes ---

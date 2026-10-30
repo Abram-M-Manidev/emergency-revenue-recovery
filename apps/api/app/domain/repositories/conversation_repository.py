@@ -49,6 +49,20 @@ class ConversationRepository(ABC):
         """Marks the conversation COMPLETED and stamps ended_at."""
         ...
 
+    @abstractmethod
+    async def reopen(self, conversation_id: uuid.UUID) -> Conversation:
+        """Undoes `complete`: ACTIVE again, ended_at cleared. Only for a
+        completion the caller never heard (see
+        `VoiceService.mark_turn_interrupted`)."""
+        ...
+
+    @abstractmethod
+    async def mark_messages_interrupted(
+        self, message_ids: list[uuid.UUID], *, at: datetime | None
+    ) -> None:
+        """Sets (or, with None, clears) `interrupted_at` on these messages."""
+        ...
+
     # --- Analytics (Milestone 8) aggregate queries ---
 
     @abstractmethod

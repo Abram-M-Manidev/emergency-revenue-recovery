@@ -73,6 +73,7 @@ from app.domain.repositories.service_area_repository import ServiceAreaRepositor
 from app.domain.repositories.service_repository import ServiceRepository
 from app.domain.repositories.usage_repository import LLMUsageRepository
 from app.domain.transactions import NullSavepoints, Savepoints
+from app.domain.turn_delivery import delivered_once_owed, model_history
 from app.shared.logging.timing import elapsed_ms, now
 from app.shared.utils.phone import storable_phone_number
 
@@ -86,6 +87,11 @@ class ConversationTurnResult:
     conversation: Conversation
     reply_message: ConversationMessage
     outcome: ConversationOutcome
+    # The other half of the pair `_write_turn` persisted, and the turn's
+    # index (see `_prepare_turn`): what a transport needs to mark the turn
+    # interrupted if the caller never heard it.
+    customer_message: ConversationMessage | None = None
+    turn_index: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,7 +238,7 @@ class AIBrainService:
         self, organization_id: uuid.UUID, conversation_id: uuid.UUID, customer_message: str
     ) -> ConversationTurnResult:
         usage = TokenUsageTally()
-        conversation, request, services, safety_prefix = await self._prepare_turn(
+        conversation, request, services, safety_prefix, turn_index = await self._prepare_turn(
             organization_id, conversation_id, customer_message, usage_sink=usage
         )
         try:
@@ -243,7 +249,8 @@ class AIBrainService:
         await self._record_llm_usage(conversation, usage)
         reply = _with_safety_prefix(generated, safety_prefix)
         return await self._persist_turn(
-            conversation, conversation_id, services, reply, customer_message
+            conversation, conversation_id, services, reply, customer_message,
+            turn_index=turn_index,
         )
 
     async def send_message_stream(
@@ -257,10 +264,16 @@ class AIBrainService:
         completion rule. Nothing is written from a partial response, so a
         stream that dies halfway leaves no half-formed outcome behind."""
         usage = TokenUsageTally()
-        conversation, request, services, safety_prefix = await self._prepare_turn(
+        conversation, request, services, safety_prefix, turn_index = await self._prepare_turn(
             organization_id, conversation_id, customer_message, usage_sink=usage
         )
 
+        # Everything the model said this turn, across every tool round. The
+        # final reply alone is only the last round: on the 2026-10-30 test
+        # call the caller heard "...this qualifies as an emergency eligible
+        # issue..." before the tool ran, and the stored reply (and so the
+        # model's own history) had no trace of it.
+        spoken: list[str] = []
         if safety_prefix:
             # Spoken before the model has produced anything — and before the
             # model is even asked — so it cannot be delayed, reworded or
@@ -271,8 +284,11 @@ class AIBrainService:
         try:
             async for event in self._ai.stream_reply(request):
                 if isinstance(event, AITextDelta):
+                    spoken.append(event.text)
                     yield ConversationTextDelta(event.text)
                 elif isinstance(event, AIToolPhase):
+                    # Rounds are separate sentences to the listener.
+                    spoken.append(" ")
                     yield ConversationToolPhase(event.tool_names, event.model_already_spoke)
                 else:
                     reply = event.reply
@@ -291,6 +307,9 @@ class AIBrainService:
             # would persist nothing and silently end the caller's turn.
             raise AIProviderUnavailableError("The AI Brain returned an incomplete response.")
 
+        said = " ".join("".join(spoken).split())
+        if said:
+            reply = replace(reply, message_to_customer=said)
         yield ConversationTurnComplete(
             await self._persist_turn(
                 conversation,
@@ -298,6 +317,7 @@ class AIBrainService:
                 services,
                 _with_safety_prefix(reply, safety_prefix),
                 customer_message,
+                turn_index=turn_index,
             )
         )
 
@@ -310,7 +330,7 @@ class AIBrainService:
         customer_message: str,
         *,
         usage_sink: TokenUsageSink | None = None,
-    ) -> tuple[Conversation, AIRequest, list[Service], str | None]:
+    ) -> tuple[Conversation, AIRequest, list[Service], str | None, int]:
         conversation = await self.get_conversation(organization_id, conversation_id)
         if conversation.status is ConversationStatus.COMPLETED:
             raise ConversationCompletedError()
@@ -354,12 +374,20 @@ class AIBrainService:
         # turn gets the fixed instruction spoken before anything else; once
         # reported, the directive binds every later turn of the call.
         emergency_number = emergency_number_for(profile.country if profile else None)
-        earlier_hazards = hazards_in(
-            m.content for m in history if m.role is MessageRole.CUSTOMER
+        # What the model sees: the caller's words (a re-sent copy only once)
+        # and only the replies that reached the caller. See
+        # `app/domain/turn_delivery.py`.
+        heard = model_history(history, customer_message)
+        # A hazard the caller reported binds the call from then on, even on a
+        # turn whose reply was dropped. But the spoken instruction counts as
+        # given only once a reply that carried it got through.
+        reported_hazards = hazards_in(
+            m.content for m in heard if m.role is MessageRole.CUSTOMER
         )
+        instructed_hazards = delivered_once_owed(history, detect_hazards)
         current_hazards = detect_hazards(customer_message)
-        new_hazards = current_hazards - earlier_hazards
-        all_hazards = earlier_hazards | current_hazards
+        new_hazards = (current_hazards | reported_hazards) - instructed_hazards
+        all_hazards = reported_hazards | current_hazards
         safety_prefix = (
             safety_instruction(new_hazards, emergency_number=emergency_number)
             if new_hazards
@@ -402,7 +430,7 @@ class AIBrainService:
                 role="customer" if m.role is MessageRole.CUSTOMER else "assistant",
                 content=m.content,
             )
-            for m in history
+            for m in heard
         )
         request = AIRequest(
             system_prompt=system_prompt,
@@ -430,7 +458,7 @@ class AIBrainService:
             ),
             usage_sink=usage_sink,
         )
-        return conversation, request, services, safety_prefix
+        return conversation, request, services, safety_prefix, len(history)
 
     async def _record_llm_usage(self, conversation: Conversation, usage: TokenUsageTally) -> None:
         """Adds this turn's provider-reported tokens to the conversation's
@@ -557,6 +585,8 @@ class AIBrainService:
         services: list[Service],
         reply: AIReply,
         customer_message: str,
+        *,
+        turn_index: int | None = None,
     ) -> ConversationTurnResult:
         """Records the turn in isolation from everything else the request
         has already done.
@@ -573,7 +603,8 @@ class AIBrainService:
         try:
             async with self._savepoints.isolate():
                 return await self._write_turn(
-                    conversation, conversation_id, services, reply, customer_message
+                    conversation, conversation_id, services, reply, customer_message,
+                    turn_index=turn_index,
                 )
         except DomainError:
             raise
@@ -594,6 +625,8 @@ class AIBrainService:
         services: list[Service],
         reply: AIReply,
         customer_message: str,
+        *,
+        turn_index: int | None = None,
     ) -> ConversationTurnResult:
         # Wraps the assistant message + outcome upsert + completion flag.
         # Bracketed rather than timed as a whole from outside because this
@@ -609,7 +642,7 @@ class AIBrainService:
         # timestamp (`server_default=func.now()`), so insertion order is
         # what actually separates them — as it already did before H3, when
         # the two writes were in the same transaction but further apart.
-        await self._conversations.add_message(
+        customer_entry = await self._conversations.add_message(
             conversation_id, role=MessageRole.CUSTOMER, content=customer_message
         )
         reply_message = await self._conversations.add_message(
@@ -712,7 +745,11 @@ class AIBrainService:
         )
 
         return ConversationTurnResult(
-            conversation=conversation, reply_message=reply_message, outcome=outcome
+            conversation=conversation,
+            reply_message=reply_message,
+            outcome=outcome,
+            customer_message=customer_entry,
+            turn_index=turn_index,
         )
 
     async def _load_business_knowledge(

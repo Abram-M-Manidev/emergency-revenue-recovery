@@ -176,3 +176,25 @@ class OfferedSlotRepository(ABC):
         must not survive to authorise a later retry of a time the caller can
         no longer have."""
         ...
+
+    @abstractmethod
+    async def withdraw_unheard_offers(
+        self,
+        organization_id: uuid.UUID,
+        conversation_id: uuid.UUID,
+        turn_index: int,
+        *,
+        interrupted_message_id: uuid.UUID | None,
+    ) -> int:
+        """Withdraws the still-active offers first made in turn `turn_index`
+        that nobody has selected, and returns how many. Used for a turn
+        whose reply never reached the caller: an offer only counts if it was
+        read out.
+
+        Soft: each row is kept with `withdrawn_at` set and linked to the
+        interrupted reply (`interrupted_message_id`), so the record shows
+        what was generated and why it did not count. Every other method on
+        this port ignores withdrawn rows, so a withdrawn time can never be
+        selected or booked. A later `check_availability` offers the same
+        time again as a new, active row, at the turn the caller does hear."""
+        ...

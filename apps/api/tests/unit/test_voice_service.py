@@ -143,6 +143,13 @@ class FakeVoiceCallRepository(VoiceCallRepository):
                     call, disclosure_sent_at=sent_at, disclosed_ai=ai, disclosed_recording=recording
                 )
                 return True
+
+    async def clear_disclosure(self, voice_call_id):
+        for key, call in self._calls.items():
+            if call.id == voice_call_id:
+                self._calls[key] = replace(
+                    call, disclosure_sent_at=None, disclosed_ai=None, disclosed_recording=None
+                )
         return False
 
 
