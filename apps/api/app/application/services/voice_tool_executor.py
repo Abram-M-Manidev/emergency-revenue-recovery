@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import date as py_date
 from datetime import datetime, time, timedelta, timezone
 from typing import Any
@@ -186,8 +187,12 @@ class VoiceToolExecutor(ToolExecutorFactory):
         organization_id: uuid.UUID,
         conversation_id: uuid.UUID,
         turn_index: int,
+        *,
+        hazard_reported: bool = False,
     ) -> ToolExecutor:
-        return _BoundToolExecutor(self, organization_id, conversation_id, turn_index)
+        return _BoundToolExecutor(
+            self, organization_id, conversation_id, turn_index, hazard_reported=hazard_reported
+        )
 
     async def describe_progress(
         self, organization_id: uuid.UUID, conversation_id: uuid.UUID
@@ -1566,8 +1571,11 @@ class _BoundToolExecutor(ToolExecutor):
         organization_id: uuid.UUID,
         conversation_id: uuid.UUID,
         turn_index: int,
+        *,
+        hazard_reported: bool = False,
     ) -> None:
         self._parent = parent
+        self._hazard_reported = hazard_reported
         self._organization_id = organization_id
         self._conversation_id = conversation_id
         # Fixed for the life of this turn. Every tool call the model makes
@@ -1618,11 +1626,38 @@ class _BoundToolExecutor(ToolExecutor):
             return {"success": False, "error": ToolErrors.UNKNOWN_TOOL, "tool_name": invocation.name}
 
         handler = getattr(self._parent, handler_name)
+        overridden = False
+        if (
+            self._hazard_reported
+            and invocation.name == CREATE_SERVICE_REQUEST.name
+            and invocation.arguments.get("classification") != "emergency"
+        ):
+            # The hazard floor. A caller who reported gas, carbon monoxide,
+            # smoke, sparking or flooding gets an emergency ticket — the
+            # model may raise urgency, never lower it below this. Decided
+            # from the caller's words by fixed patterns, not by the model.
+            invocation = replace(
+                invocation, arguments={**invocation.arguments, "classification": "emergency"}
+            )
+            overridden = True
+            logger.warning(
+                "hazard_classification_floor_applied",
+                organization_id=str(self._organization_id),
+                conversation_id=str(self._conversation_id),
+                where="tool",
+            )
         try:
-            return await asyncio.wait_for(
+            content = await asyncio.wait_for(
                 self._isolated(handler, invocation),
                 timeout=self._parent._settings.AI_TOOL_TIMEOUT_SECONDS,
             )
+            if overridden:
+                content["classification_overridden"] = (
+                    "The caller reported a safety hazard, so this was recorded as an "
+                    "emergency. Treat it as one: no appointment, and follow the "
+                    "life-safety instructions."
+                )
+            return content
         except TimeoutError:
             # `asyncio.TimeoutError` is an alias of the builtin from 3.11.
             logger.warning("voice_tool_timed_out", tool_name=invocation.name)

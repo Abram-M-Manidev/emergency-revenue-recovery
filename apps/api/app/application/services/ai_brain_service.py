@@ -38,7 +38,9 @@ from app.domain.entities.conversation_message import ConversationMessage, Messag
 from app.domain.entities.conversation_outcome import (
     CUSTOMER_ADDRESS_MAX_LENGTH,
     CUSTOMER_NAME_MAX_LENGTH,
+    CallClassification,
     ConversationOutcome,
+    RecommendedAction,
     bounded_contact_text,
 )
 from app.domain.entities.emergency_keyword import EmergencyKeyword
@@ -54,6 +56,8 @@ from app.domain.exceptions import (
     TurnPersistenceError,
 )
 from app.domain.life_safety import (
+    Hazard,
+    describe_hazards,
     detect_hazards,
     emergency_number_for,
     hazards_in,
@@ -231,8 +235,10 @@ class AIBrainService:
         self, organization_id: uuid.UUID, conversation_id: uuid.UUID, customer_message: str
     ) -> ConversationTurnResult:
         usage = TokenUsageTally()
-        conversation, request, services, safety_prefix, turn_index = await self._prepare_turn(
-            organization_id, conversation_id, customer_message, usage_sink=usage
+        conversation, request, services, safety_prefix, turn_index, hazards = (
+            await self._prepare_turn(
+                organization_id, conversation_id, customer_message, usage_sink=usage
+            )
         )
         try:
             generated = await self._ai.generate_reply(request)
@@ -243,7 +249,7 @@ class AIBrainService:
         reply = _with_safety_prefix(generated, safety_prefix)
         return await self._persist_turn(
             conversation, conversation_id, services, reply, customer_message,
-            turn_index=turn_index,
+            turn_index=turn_index, hazards=hazards,
         )
 
     async def send_message_stream(
@@ -257,8 +263,10 @@ class AIBrainService:
         completion rule. Nothing is written from a partial response, so a
         stream that dies halfway leaves no half-formed outcome behind."""
         usage = TokenUsageTally()
-        conversation, request, services, safety_prefix, turn_index = await self._prepare_turn(
-            organization_id, conversation_id, customer_message, usage_sink=usage
+        conversation, request, services, safety_prefix, turn_index, hazards = (
+            await self._prepare_turn(
+                organization_id, conversation_id, customer_message, usage_sink=usage
+            )
         )
 
         # Everything the model said this turn, across every tool round. The
@@ -311,6 +319,7 @@ class AIBrainService:
                 _with_safety_prefix(reply, safety_prefix),
                 customer_message,
                 turn_index=turn_index,
+                hazards=hazards,
             )
         )
 
@@ -323,7 +332,7 @@ class AIBrainService:
         customer_message: str,
         *,
         usage_sink: TokenUsageSink | None = None,
-    ) -> tuple[Conversation, AIRequest, list[Service], str | None, int]:
+    ) -> tuple[Conversation, AIRequest, list[Service], str | None, int, frozenset[Hazard]]:
         conversation = await self.get_conversation(organization_id, conversation_id)
         if conversation.status is ConversationStatus.COMPLETED:
             raise ConversationCompletedError()
@@ -449,14 +458,17 @@ class AIBrainService:
                 # the caller has spoken since an offer was made. See
                 # `ToolExecutorFactory.bind`.
                 self._tool_executors.bind(
-                    organization_id, conversation_id, len(history)
+                    organization_id,
+                    conversation_id,
+                    len(history),
+                    hazard_reported=bool(all_hazards),
                 )
                 if self._tools_enabled and self._tool_executors is not None
                 else None
             ),
             usage_sink=usage_sink,
         )
-        return conversation, request, services, safety_prefix, len(history)
+        return conversation, request, services, safety_prefix, len(history), all_hazards
 
     async def _record_llm_usage(self, conversation: Conversation, usage: TokenUsageTally) -> None:
         """Adds this turn's provider-reported tokens to the conversation's
@@ -541,6 +553,7 @@ class AIBrainService:
         customer_message: str,
         *,
         turn_index: int | None = None,
+        hazards: frozenset[Hazard] = frozenset(),
     ) -> ConversationTurnResult:
         """Records the turn in isolation from everything else the request
         has already done.
@@ -559,6 +572,7 @@ class AIBrainService:
                 return await self._write_turn(
                     conversation, conversation_id, services, reply, customer_message,
                     turn_index=turn_index,
+                    hazards=hazards,
                 )
         except DomainError:
             raise
@@ -581,6 +595,7 @@ class AIBrainService:
         customer_message: str,
         *,
         turn_index: int | None = None,
+        hazards: frozenset[Hazard] = frozenset(),
     ) -> ConversationTurnResult:
         # Wraps the assistant message + outcome upsert + completion flag.
         # Bracketed rather than timed as a whole from outside because this
@@ -630,11 +645,30 @@ class AIBrainService:
             customer_name = existing_outcome.customer_name or customer_name
             customer_address = existing_outcome.customer_address or customer_address
             customer_phone = existing_outcome.customer_phone or customer_phone
+        classification = reply.classification
+        recommended_action = reply.recommended_action
+        summary = reply.summary
+        if hazards and classification is not CallClassification.EMERGENCY:
+            # The hazard floor, as in the tool executor: a reported hazard is
+            # an emergency whatever the model decided, so the outcome sync
+            # opens a ticket (and its alert) even if no tool recorded one.
+            classification = CallClassification.EMERGENCY
+            recommended_action = RecommendedAction.CREATE_EMERGENCY_TICKET
+            # The model's own summary was written for a call it did not
+            # think urgent ("Routine inquiry."), and it becomes the
+            # ticket a dispatcher reads; it must say why this is urgent.
+            summary = f"Caller reported {describe_hazards(hazards)}. {reply.summary}"
+            logger.warning(
+                "hazard_classification_floor_applied",
+                conversation_id=str(conversation_id),
+                where="outcome",
+                model_classification=reply.classification.value,
+            )
         outcome = await self._outcomes.upsert(
             conversation_id,
-            classification=reply.classification,
+            classification=classification,
             confidence=reply.confidence,
-            recommended_action=reply.recommended_action,
+            recommended_action=recommended_action,
             matched_service_id=matched_service_id,
             # Bounded to the column: an over-long value is not merely
             # untidy, it is a failed write that rolls back the whole turn.
@@ -646,7 +680,7 @@ class AIBrainService:
             # turn, nine digits of a ten-digit number another (2026-10-31).
             customer_phone=customer_phone,
             customer_address=customer_address,
-            summary=reply.summary,
+            summary=summary,
         )
 
         # The one place a conversation is marked COMPLETED, and therefore the

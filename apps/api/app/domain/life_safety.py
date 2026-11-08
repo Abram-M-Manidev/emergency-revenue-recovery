@@ -181,6 +181,12 @@ _DESCRIPTIONS = {
 }
 
 
+def describe_hazards(hazards: Iterable[Hazard]) -> str:
+    """Plain words for the reported hazards, most lethal first — for a
+    ticket a dispatcher reads, never for anything the caller hears."""
+    return ", ".join(_DESCRIPTIONS[h] for h in _ordered(hazards))
+
+
 def life_safety_directive(
     hazards: Iterable[Hazard], *, emergency_number: str, instruction_given: str | None
 ) -> str | None:

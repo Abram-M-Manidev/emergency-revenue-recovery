@@ -896,3 +896,28 @@ def test_a_service_list_limits_what_may_be_booked():
     assert "do not record a service request or book" in with_services
     # A business with no catalogue is not told it handles nothing.
     assert "These are the only services" not in without_services
+
+
+def test_the_prompt_defines_urgency_and_speaking_style():
+    """Audit B4 and B2. The caller's own label is evidence, not the verdict;
+    "(emergency-eligible)" is defined; at most one risk question; uncertainty
+    goes to a person. Replies are short, one question at a time, with
+    critical details read back."""
+    prompt = build_system_prompt(
+        profile=None,
+        weekly_hours=[],
+        hours_exceptions=[],
+        services=[],
+        service_areas=[],
+        faqs=[],
+        emergency_keywords=[],
+        today=_NOW.date(),
+        emergency_keyword_hint=False,
+    )
+    assert "You decide, not the caller" in prompt
+    assert '"(emergency-eligible)" CAN be an emergency' in prompt
+    assert "ask ONE short question" in prompt
+    assert "offer to\nconnect" not in prompt  # wording is on one logical line
+    assert "treat it as urgent and offer to connect the caller with someone" in prompt
+    assert "at most ONE question per reply" in prompt
+    assert "read back in groups" in prompt

@@ -257,7 +257,8 @@ export interface CallTransferAttempt {
 export type FollowUpReason =
   | "ai_unavailable"
   | "ended_before_request_recorded"
-  | "transferred_before_request_recorded";
+  | "transferred_before_request_recorded"
+  | "unscheduled_request";
 
 export interface CallFollowUp {
   id: string;
@@ -580,4 +581,18 @@ export interface CallDisclosureSettings {
 export interface ConfigureCallDisclosurePayload {
   ai_disclosure_enabled: boolean;
   recording_notice_enabled: boolean;
+}
+
+// --- Usage (metering M3) ---
+
+export interface UsageSummary {
+  billing_period: string;
+  calls: number;
+  billable_calls: number;
+  billable_minutes: number;
+  excluded_calls: Record<string, number>;
+  reconciliation: Record<string, number>;
+  unreconciled_calls: number;
+  rules_versions: string[];
+  llm_usage: { model: string; requests: number; prompt_tokens: number; completion_tokens: number }[];
 }

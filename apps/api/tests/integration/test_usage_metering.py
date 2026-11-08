@@ -267,9 +267,15 @@ async def test_broken_call_metering_never_costs_the_emergency(client, monkeypatc
         classification=CallClassification.UNKNOWN, recommended_action=RecommendedAction.NONE))
     _, assistant = await _tenant()
     call_id = _call_id()
-    await _turn(client, call_id, assistant, "There's smoke coming out of my furnace")
+    # The hazard is only in Vapi's end-of-call transcript, so it is the
+    # end-of-call report — the work under test — that must ticket it. (Said
+    # during a turn, the hazard floor would already have ticketed it.)
+    await _turn(client, call_id, assistant, "Hi, I need some help.")
 
-    await _end(client, call_id, assistant)
+    await _end(client, call_id, assistant, artifact={"messages": [
+        {"role": "user", "message": "Hi, I need some help."},
+        {"role": "user", "message": "There's smoke coming out of my furnace"},
+    ]})
 
     voice_call = await _voice_call(call_id)
     assert voice_call.ended_at is not None

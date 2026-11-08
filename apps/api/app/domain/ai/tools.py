@@ -112,7 +112,13 @@ class ToolExecutorFactory(ABC):
         organization_id: uuid.UUID,
         conversation_id: uuid.UUID,
         turn_index: int,
-    ) -> ToolExecutor: ...
+        *,
+        hazard_reported: bool = False,
+    ) -> ToolExecutor:
+        """`hazard_reported`: the caller has described a life-safety hazard
+        on this call (decided by `app/domain/life_safety.py`, never by the
+        model). A request recorded on such a call is always an emergency."""
+        ...
 
     @abstractmethod
     async def describe_progress(

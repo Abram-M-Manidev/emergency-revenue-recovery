@@ -24,6 +24,7 @@ export const FOLLOW_UP_REASON_LABEL: Record<FollowUpReason, string> = {
   ai_unavailable: "Assistant could not take the call",
   ended_before_request_recorded: "Hung up before details were taken",
   transferred_before_request_recorded: "Transferred — confirm someone answered",
+  unscheduled_request: "Asked for a visit — no time booked, call back to schedule",
 };
 
 function formatWhen(value: string | null): string {

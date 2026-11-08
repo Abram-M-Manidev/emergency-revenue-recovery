@@ -30,6 +30,7 @@ from app.application.services.appointment_service import AppointmentService
 from app.application.services.call_transfer_service import CallTransferService
 from app.application.services.dispatch_service import DispatchService
 from app.domain.call_transfer.attempt import TransferReason
+from app.domain.entities.appointment import AppointmentStatus
 from app.domain.entities.conversation_message import MessageRole
 from app.domain.exceptions import EntityNotFoundError
 from app.domain.follow_ups import CallFollowUp, FollowUpReason
@@ -202,6 +203,19 @@ class CallFollowUpService:
                 )
             return existing
 
+        if await self._unscheduled_request(organization_id, conversation_id):
+            # Neutral signals on purpose: this caller's request WAS handled
+            # and classified (an emergency would have a ticket, and a
+            # reported hazard always does — the hazard floor). Re-reading
+            # their words for keywords here would open a false "unconfirmed
+            # emergency" for every routine call that said "no cooling".
+            return await self._record(
+                organization_id,
+                conversation_id,
+                reason=FollowUpReason.UNSCHEDULED_REQUEST,
+                signals=_Signals(hazards=frozenset(), keywords=()),
+                context="the caller asked for a visit but no time was booked",
+            )
         if await self._request_recorded(organization_id, conversation_id):
             return None
         if not any(word.strip() for word in words):
@@ -359,6 +373,22 @@ class CallFollowUpService:
             organization_id, conversation_id
         )
         return appointment is not None
+
+    async def _unscheduled_request(
+        self, organization_id: uuid.UUID, conversation_id: uuid.UUID
+    ) -> bool:
+        """A standard request is on record but no time was booked, and there
+        is no emergency ticket for the call."""
+        if await self._dispatch.get_ticket_for_conversation(organization_id, conversation_id):
+            return False
+        appointment = await self._appointments.get_appointment_for_conversation(
+            organization_id, conversation_id
+        )
+        return (
+            appointment is not None
+            and appointment.scheduled_start_at is None
+            and appointment.status is AppointmentStatus.REQUESTED
+        )
 
     async def _caller_words(self, conversation_id: uuid.UUID) -> list[str]:
         messages = await self._conversations.list_messages(conversation_id)

@@ -28,7 +28,7 @@ import pytest
 import pytest_asyncio
 from fastapi import Header
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 import app.api.deps as deps_module
 from app.api.deps import get_ai_provider, get_notification_provider, verify_vapi_secret
@@ -488,10 +488,13 @@ async def test_an_emergency_described_before_the_hang_up_is_ticketed_and_alerted
     await _hang_up(client, call_id)
 
     _, follow_ups, tickets, deliveries, _ = await _records(call_id)
+    # Since the hazard floor (audit B5) the ticket and its alert exist from
+    # the turn itself, not only from the hang-up — and the summary a
+    # dispatcher reads names the hazard rather than the model's guess.
     assert len(tickets) == 1 and len(deliveries) == 1
     assert "smoke" in tickets[0].summary.lower()
-    assert follow_ups[0].possible_emergency is True
-    assert follow_ups[0].emergency_ticket_id == tickets[0].id
+    # The request was recorded during the call, so no callback is owed.
+    assert follow_ups == []
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -532,18 +535,52 @@ async def test_the_assistants_own_words_never_make_a_call_an_emergency(client):
     assert follow_ups[0].possible_emergency is False
 
 
-@pytest.mark.asyncio(loop_scope="session")
-async def test_a_recorded_request_leaves_no_callback(client):
+async def _request_without_a_time(client) -> str:
     scripted = _scripted()
     assistant = await _tenant()
     call_id = f"call_fu_{uuid.uuid4().hex[:8]}"
     scripted.queue_tool_round([("create_service_request", {
-        "customer_name": "Ari", "customer_phone": "6305550177",
+        "customer_name": "Ari", "customer_phone": "+16305550177",
         "service_address": "9 Elm Street, Lisle", "problem_description": "AC not cooling.",
-        "classification": "non_emergency", "service_name": None})])
+        "classification": "non_emergency", "service_name": None,
+        "use_caller_id": False, "confirmed_correction": False})])
     scripted.queue_reply(default_reply(message_to_customer="Got it, I've logged that.",
                                        recommended_action=RecommendedAction.BOOK_APPOINTMENT))
-    await _turn(client, _body(call_id, assistant, "AC not cooling. I'm Ari at 9 Elm Street."))
+    # "no cooling" is one of the tenant's emergency keywords in many setups;
+    # it must NOT turn a handled routine request into an unconfirmed emergency.
+    await _turn(client, _body(call_id, assistant, "AC no cooling. I'm Ari at 9 Elm Street."))
+    return call_id
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_request_with_no_booked_time_is_flagged_for_a_callback(client):
+    """Audit B8. The assistant tells a caller with no suitable time that the
+    office will call back; this follow-up is what makes that true. Before it,
+    an unscheduled request counted as handled and nobody was prompted."""
+    call_id = await _request_without_a_time(client)
+
+    await _hang_up(client, call_id)
+
+    _, follow_ups, tickets, _, _ = await _records(call_id)
+    assert len(follow_ups) == 1
+    assert follow_ups[0].reason is FollowUpReason.UNSCHEDULED_REQUEST
+    assert follow_ups[0].possible_emergency is False
+    assert tickets == []
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_request_with_a_booked_time_leaves_no_callback(client):
+    call_id = await _request_without_a_time(client)
+    conversation_id, _, _, _, _ = await _records(call_id)
+    async with AsyncSessionLocal() as session:
+        await session.execute(
+            text(
+                "UPDATE appointments SET status = 'SCHEDULED', "
+                "scheduled_start_at = now() + interval '1 day' WHERE conversation_id = :c"
+            ),
+            {"c": conversation_id},
+        )
+        await session.commit()
 
     await _hang_up(client, call_id)
 
@@ -592,12 +629,15 @@ async def test_a_repeated_end_of_call_report_is_idempotent(client):
     scripted = _scripted()
     assistant = await _tenant()
     call_id = f"call_fu_{uuid.uuid4().hex[:8]}"
-    scripted.queue_reply(default_reply(message_to_customer="Oh no. What's the address?",
+    scripted.queue_reply(default_reply(message_to_customer="How can I help?",
                                        classification=CallClassification.UNKNOWN))
-    await _turn(client, _body(call_id, assistant, "There's water pouring through my ceiling"))
+    await _turn(client, _body(call_id, assistant, "Hi there."))
+    # The hazard is only in Vapi's transcript (said after the last turn), so
+    # the hang-up path is what must ticket it — exactly once.
+    lines = ["Hi there.", "There's water pouring through my ceiling"]
 
-    await _hang_up(client, call_id)
-    await _hang_up(client, call_id)
+    await _hang_up(client, call_id, caller_lines=lines)
+    await _hang_up(client, call_id, caller_lines=lines)
 
     _, follow_ups, tickets, deliveries, _ = await _records(call_id)
     assert len(follow_ups) == 1 and len(tickets) == 1 and len(deliveries) == 1

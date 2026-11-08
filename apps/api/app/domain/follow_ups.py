@@ -31,6 +31,10 @@ class FollowUpReason(str, Enum):
     AI_UNAVAILABLE = "ai_unavailable"
     ENDED_BEFORE_REQUEST_RECORDED = "ended_before_request_recorded"
     TRANSFERRED_BEFORE_REQUEST_RECORDED = "transferred_before_request_recorded"
+    #: The caller asked for a visit and the request was recorded, but no time
+    #: was booked (none suited them, or none was free). The assistant told
+    #: them the office would call back; this is what makes that true.
+    UNSCHEDULED_REQUEST = "unscheduled_request"
 
 
 @dataclass(frozen=True, slots=True)
