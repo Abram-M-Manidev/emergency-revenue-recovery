@@ -17,7 +17,8 @@ corrections), and the 2026-11-08 launch work:
 - Out-of-scope service rule in the prompt.
 - Website: working early-access lead capture with consent, Privacy/Terms
   draft pages, consistent ESSR naming.
-- Legal drafts, provider readiness, real-call plan, commercial package.
+- Legal drafts, provider readiness and the real-call plan (sales and pricing
+  material is kept outside this public repository).
 
 **Metering scope note:** the repository never defined M3/M4 in writing.
 They were implemented from the launch mandate: M3 = usage reporting per
@@ -65,8 +66,8 @@ Still open:
 | Nov 19–21 | Engineering: audit B4/B5 triage + hazard floor, B2 voice style | Tests green; re-run calls #2, #8, #9 |
 | Nov 22–24 | Lawyer feedback → finalize privacy/terms/DPA/pilot agreement; remove "draft" banners | Documents signed off |
 | Nov 25–28 | Prospect list (50 local HVAC/plumbing/electrical), qualification; outreach starts after legal gate | 50 qualified prospects; first 20 emails sent |
-| Nov 29–Dec 5 | Demos (DEMO_SCRIPT), follow-ups, first pilot agreement | ≥3 demos; ≥1 verbal yes |
-| Dec 6–10 | First customer onboarding (ONBOARDING_AND_IMPLEMENTATION), owner sign-off | Customer line live, 2 days of supervised calls |
+| Nov 29–Dec 5 | Demos, follow-ups, first pilot agreement | ≥3 demos; ≥1 verbal yes |
+| Dec 6–10 | First customer onboarding, owner sign-off | Customer line live, 2 days of supervised calls |
 | Dec 11 | Commercial target: first paid pilot live | Invoice sent for month 1 |
 
 ## 5. Realistic assessment

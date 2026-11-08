@@ -1,7 +1,7 @@
 # Terms of Service — DRAFT pending legal review
 
 Mirrors the public page `/terms`. A paying business is governed by its
-signed agreement (see `docs/commercial/PILOT_AGREEMENT_DRAFT.md`), which
+signed agreement (the pilot agreement, kept outside this repository), which
 takes precedence.
 
 ## The service
