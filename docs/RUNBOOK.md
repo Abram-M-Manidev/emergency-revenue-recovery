@@ -420,6 +420,29 @@ the advice is up to the model, as directed by the prompt.
 
 ---
 
+## Go-live preflight and per-call evidence
+
+```bash
+essr exec api python -m app.cli.preflight                     # 0 FAIL before taking calls
+essr exec api python -m app.cli.call_check <vapi_call_id>     # what one call did
+essr exec api python -m app.cli.call_check <vapi_call_id> --vapi   # + Vapi timeline (one read-only GET)
+```
+
+`preflight` checks what startup validation cannot: migrations at head, the
+alert and paging providers, and for each active voice line whether
+emergencies would reach anyone. `call_check` is the evidence for an
+acceptance test or an incident: ticket, alert delivery status (DELIVERED is
+the only "sent to the team"), page acknowledgement, transfers, follow-up,
+appointment, interrupted replies, address corrections, usage. Neither prints
+secrets, phone numbers, addresses or transcript text.
+
+A transfer Vapi reports as not connected (`call.forwarding.no-answer`,
+`operator-busy`, `error-transfer-failed`) raises a `transfer_not_connected`
+callback even when a request was recorded: on a Twilio number Vapi ends the
+call when a blind transfer is not answered.
+
+---
+
 ## Usage reconciliation (Vapi vs. recorded usage)
 
 Every ended call gets one row in `call_usage_records`, written from Vapi's

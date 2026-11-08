@@ -40,6 +40,9 @@ billing or charging exists or was added.
 | L9 | External monitoring live (uptime + backup heartbeat + usage_health cron) | Founder | Host config |
 | L10 | Push the local commits to GitHub after the pre-push audit (repo is public) | Founder | Authorization |
 
+Execution detail, acceptance criteria and status for L1–L7:
+`docs/launch/L1_L7_EXECUTION.md`.
+
 ## 3. Remaining engineering (not blocking a controlled pilot)
 
 Done 2026-11-08 (second pass): dev DB migrated to `3d4e5f6a7b8c` (backup

@@ -15,6 +15,13 @@ pass/fail, notes. Never record real customer data in this sheet.
   number = operator phone, transfer numbers = operator phone.
 - Vapi assistant: `firstMessageMode` model-generated, empty `firstMessage`,
   `endCallMessage` null, server URL + secret correct.
+- `python -m app.cli.preflight` reports 0 FAIL for the test org's line.
+
+After EVERY scenario run `python -m app.cli.call_check <vapi_call_id> --vapi`
+and paste its output into the sheet. It shows the ticket, whether the alert
+was DELIVERED, whether the page was ACKNOWLEDGED, transfers, the follow-up,
+the appointment, interrupted replies, and (with `--vapi`) when the notice was
+spoken relative to the caller. It prints no transcript text or numbers.
 
 | # | Scenario | Script (caller says) | Pass criteria |
 |---|---|---|---|
@@ -30,6 +37,7 @@ pass/fail, notes. Never record real customer data in this sheet.
 | 10 | Paging **(sends)** | As #8 with paging on | SMS arrives on operator phone; ack link works once; dashboard shows sent → acknowledged |
 | 11 | Human transfer success **(cost)** | "Let me talk to a person" | Transferred to operator phone; dashboard shows attempt accepted |
 | 12 | Transfer failure | Transfer numbers unset/unreachable | Assistant says it can't connect now and offers a callback; follow-up recorded |
+| 12b | Transfer not answered **(cost)** | "Let me talk to a person"; let the operator phone ring out | On a Twilio number Vapi ends the call; `call_check` shows endedReason `call.forwarding.no-answer` (or busy) and follow-up `transfer_not_connected` in the callback queue |
 | 13 | Outage | Temporarily set an invalid `OPENAI_API_KEY` on staging only | Caller hears outage line; emergency words → ticket + transfer attempt; call ends cleanly |
 | 14 | Kill switch | Disable tenant assistant | Caller hears "unavailable… call your local emergency number if in danger"; call ends |
 | 15 | Early hang-up during emergency **(creates records)** | Say "smoke!" and hang up | Follow-up / unconfirmed emergency ticket recorded (B3) |

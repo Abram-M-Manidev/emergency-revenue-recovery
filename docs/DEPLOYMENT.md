@@ -169,6 +169,11 @@ nc -zv YOUR_DOMAIN 5432    # must fail
 # (the service runs one cycle on start), and the B2 setup is correct
 docker compose -f docker-compose.yml -f docker-compose.prod.yml exec backup errs-offsite status
 docker compose -f docker-compose.yml -f docker-compose.prod.yml exec backup errs-offsite check
+
+# go-live preflight: migrations at head, alert/paging providers, and for every
+# active voice line an alert destination, country, hours, services, transfer
+# and paging. Exit 1 (and do not take calls) on any FAIL.
+docker compose -f docker-compose.yml -f docker-compose.prod.yml exec api python -m app.cli.preflight
 ```
 
 Then run the restore drill once, before any real tenant data exists, so the

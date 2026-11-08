@@ -144,6 +144,19 @@ class VapiCallsClient(VapiCallSource):
             raise VapiUnavailableError("GET /call/{id} returned an unusable call")
         return summary
 
+    async def get_call_raw(self, vapi_call_id: str) -> dict[str, Any] | None:
+        """The call object as Vapi returns it, for operator diagnostics that
+        need fields the reconciliation summary drops (the message timeline,
+        artifact). Same pacing, retries and auth as every other read. The
+        result contains transcript text and phone numbers: callers must not
+        print or log it whole."""
+        body = await self._request(f"/call/{quote(vapi_call_id, safe='')}", not_found_is_none=True)
+        if body is None:
+            return None
+        if not isinstance(body, dict):
+            raise VapiUnavailableError("GET /call/{id} returned an unusable call")
+        return body
+
     async def _request(
         self, path: str, *, params: dict[str, Any] | None = None, not_found_is_none: bool = False
     ) -> Any:
