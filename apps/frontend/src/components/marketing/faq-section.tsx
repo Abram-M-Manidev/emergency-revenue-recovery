@@ -5,7 +5,7 @@ import { Container, SectionHeading, focusRing } from "./primitives";
 const FAQS = [
   {
     q: "What is ESSR?",
-    a: "ESSR (Emergency Revenue Recovery System) is an AI-powered call-handling system for home service businesses. It answers incoming calls, works out what the caller needs, and turns the call into a concrete outcome — a booked appointment, an emergency dispatch ticket, or a follow-up for your team — while keeping a record of every interaction.",
+    a: "ESSR is an AI-powered call-handling system for home service businesses. It answers incoming calls, works out what the caller needs, and turns the call into a concrete outcome — a booked appointment, an emergency dispatch ticket, or a follow-up for your team — while keeping a record of every interaction.",
   },
   {
     q: "Who is ESSR designed for?",
@@ -21,7 +21,7 @@ const FAQS = [
   },
   {
     q: "How are emergency requests handled?",
-    a: "Emergency keywords and rules you configure help ESSR recognize urgent situations. When a call qualifies, ESSR collects the details and creates an emergency dispatch ticket for your team. Notifying on-call staff is part of what we're validating with early-access customers. ESSR is not a substitute for 911: callers who report hazards such as a gas leak or a carbon monoxide alarm are told to get to safety and contact emergency services, and ESSR cannot contact emergency services itself.",
+    a: "Emergency keywords and rules you configure help ESSR recognize urgent situations. When a call qualifies, ESSR records an emergency ticket for your team and can send it to the alert channel you choose and page an on-call number you set. It tells the caller only what has actually happened — for example that the alert was sent — never that a technician is on the way. Delivery depends on those channels, and the dashboard shows whether each alert and page went through. ESSR is not a substitute for 911: callers who report hazards such as a gas leak or a carbon monoxide alarm are told to get to safety and contact emergency services, and ESSR cannot contact emergency services itself.",
   },
   {
     q: "Does ESSR replace my existing team?",
@@ -29,7 +29,7 @@ const FAQS = [
   },
   {
     q: "How can I request early access?",
-    a: "Early-access requests will be taken through the form on this page; it's shown as a preview and doesn't submit yet. We're onboarding a small number of service businesses and will work with each one to configure services, hours and emergency rules before any calls are handled.",
+    a: "Use the early-access form on this page. We're onboarding a small number of service businesses and will work with each one to configure services, hours and emergency rules before any calls are handled.",
   },
 ] as const;
 

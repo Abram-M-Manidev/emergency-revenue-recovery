@@ -31,8 +31,8 @@ export function EarlyAccessSection() {
           </h2>
           <p className="max-w-lg text-lg leading-relaxed text-slate-400">
             We&apos;re working with a small group of HVAC, plumbing and electrical businesses to put
-            ESSR on real phone lines. Early-access requests will open here soon, and we&apos;ll
-            follow up with each business about fit and timing.
+            ESSR on real phone lines. Request early access below and we&apos;ll follow up with
+            each business about fit and timing.
           </p>
           <ul className="space-y-3">
             {EXPECTATIONS.map((item) => (

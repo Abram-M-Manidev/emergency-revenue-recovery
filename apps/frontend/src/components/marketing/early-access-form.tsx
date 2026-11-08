@@ -1,71 +1,107 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { Info } from "lucide-react";
 
+import { API_BASE_URL } from "@/lib/constants";
 import { cn } from "@/lib/utils/cn";
 
 import { ctaPrimary, focusRing } from "./primitives";
 
 const BUSINESS_TYPES = ["HVAC", "Plumbing", "Electrical", "Multi-trade", "Other"] as const;
 
+/**
+ * The version of the consent wording below. Must match
+ * `CURRENT_CONSENT_VERSION` in apps/api/app/application/services/lead_service.py;
+ * bump both whenever the wording changes.
+ */
+export const CONSENT_VERSION = "2026-11-08";
+
 const earlyAccessSchema = z.object({
-  name: z.string().trim().min(1, "Enter your name."),
-  businessName: z.string().trim().min(1, "Enter your business name."),
+  name: z.string().trim().min(1, "Enter your name.").max(120, "Use 120 characters or fewer."),
+  businessName: z
+    .string()
+    .trim()
+    .min(1, "Enter your business name.")
+    .max(160, "Use 160 characters or fewer."),
   email: z.string().trim().min(1, "Enter your work email.").email("Enter a valid email address."),
   businessType: z.enum(BUSINESS_TYPES, {
     errorMap: () => ({ message: "Choose your business type." }),
   }),
+  consent: z.literal(true, {
+    errorMap: () => ({ message: "Please agree so we can contact you about early access." }),
+  }),
+  // Hidden from people; anything typed here marks the submission as automated.
+  website: z.string().optional(),
 });
 
 type EarlyAccessValues = z.infer<typeof earlyAccessSchema>;
 
+type SubmitState = "idle" | "submitting" | "sent" | "rate-limited" | "error";
+
 /**
- * Frontend prototype. There is no early-access endpoint in the API yet, so
- * a valid submission is validated and then discarded: nothing is sent,
- * stored or logged. Connecting it needs a backend endpoint (or an
- * explicitly configured form service) plus a privacy notice.
+ * Sends an early-access request to the API (`POST /public/early-access`),
+ * which stores it with the consent version. The API answers the same way for
+ * a new and a repeat address, so this form never learns — or shows — whether
+ * someone was already on the list.
  */
 export function EarlyAccessForm() {
-  const [prototypeNotice, setPrototypeNotice] = useState(false);
+  const [state, setState] = useState<SubmitState>("idle");
   const {
     register,
     handleSubmit,
+    reset,
     formState: { errors },
   } = useForm<EarlyAccessValues>({
     resolver: zodResolver(earlyAccessSchema),
-    defaultValues: { name: "", businessName: "", email: "" },
+    defaultValues: { name: "", businessName: "", email: "", website: "" },
   });
 
-  const onSubmit = () => {
-    setPrototypeNotice(true);
+  const onSubmit = async (values: EarlyAccessValues) => {
+    setState("submitting");
+    try {
+      const response = await fetch(`${API_BASE_URL}/public/early-access`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: values.name,
+          business_name: values.businessName,
+          email: values.email,
+          business_type: values.businessType,
+          consent: values.consent,
+          consent_version: CONSENT_VERSION,
+          website: values.website || null,
+        }),
+      });
+      if (response.status === 202) {
+        setState("sent");
+        reset();
+      } else if (response.status === 429) {
+        setState("rate-limited");
+      } else {
+        setState("error");
+      }
+    } catch {
+      setState("error");
+    }
   };
 
   return (
     <form
       noValidate
       onSubmit={handleSubmit(onSubmit)}
-      aria-describedby="early-access-prototype-note"
-      className="rounded-2xl border border-white/10 bg-[#0a101e] p-6 shadow-2xl shadow-black/40 sm:p-8"
+      className="relative rounded-2xl border border-white/10 bg-[#0a101e] p-6 shadow-2xl shadow-black/40 sm:p-8"
     >
-      <p
-        id="early-access-prototype-note"
-        className="mb-6 flex gap-2.5 rounded-lg border border-amber-300/25 bg-amber-300/[0.07] p-3 text-xs leading-relaxed text-amber-100"
-      >
-        <Info className="mt-0.5 h-4 w-4 shrink-0" aria-hidden="true" />
-        Preview form: submissions are not sent or stored yet. Online sign-up will open once the
-        early-access list is connected.
-      </p>
-
       <div className="grid gap-5 sm:grid-cols-2">
         <Field id="ea-name" label="Name" error={errors.name?.message}>
           <input
             id="ea-name"
             type="text"
             autoComplete="name"
+            maxLength={120}
             aria-invalid={errors.name ? true : undefined}
             aria-describedby={errors.name ? "ea-name-error" : undefined}
             className={inputClass(!!errors.name)}
@@ -77,6 +113,7 @@ export function EarlyAccessForm() {
             id="ea-business"
             type="text"
             autoComplete="organization"
+            maxLength={160}
             aria-invalid={errors.businessName ? true : undefined}
             aria-describedby={errors.businessName ? "ea-business-error" : undefined}
             className={inputClass(!!errors.businessName)}
@@ -88,6 +125,7 @@ export function EarlyAccessForm() {
             id="ea-email"
             type="email"
             autoComplete="email"
+            maxLength={254}
             aria-invalid={errors.email ? true : undefined}
             aria-describedby={errors.email ? "ea-email-error" : undefined}
             className={inputClass(!!errors.email)}
@@ -115,16 +153,58 @@ export function EarlyAccessForm() {
         </Field>
       </div>
 
-      <button type="submit" className={cn(ctaPrimary, "mt-7 w-full")}>
-        Get Early Access
+      {/* Honeypot: off-screen and skipped by keyboard and screen readers. */}
+      <div aria-hidden="true" className="absolute -left-[9999px] h-px w-px overflow-hidden">
+        <label htmlFor="ea-website">Website</label>
+        <input id="ea-website" type="text" tabIndex={-1} autoComplete="off" {...register("website")} />
+      </div>
+
+      <div className="mt-6 space-y-2">
+        <label htmlFor="ea-consent" className="flex items-start gap-3 text-sm text-slate-300">
+          <input
+            id="ea-consent"
+            type="checkbox"
+            aria-invalid={errors.consent ? true : undefined}
+            aria-describedby={errors.consent ? "ea-consent-error" : undefined}
+            className={cn("mt-0.5 h-4 w-4 shrink-0 rounded border-white/20 bg-[#060912]", focusRing)}
+            {...register("consent")}
+          />
+          <span>
+            I agree that ESSR may store these details and email me about early access. I can ask
+            for them to be deleted at any time. See the{" "}
+            <Link href="/privacy" className={cn("rounded text-cyan-300 underline", focusRing)}>
+              Privacy Policy
+            </Link>
+            .
+          </span>
+        </label>
+        {errors.consent ? (
+          <p id="ea-consent-error" className="text-xs text-rose-300">
+            {errors.consent.message}
+          </p>
+        ) : null}
+      </div>
+
+      <button
+        type="submit"
+        disabled={state === "submitting"}
+        className={cn(ctaPrimary, "mt-7 w-full disabled:cursor-wait disabled:opacity-70")}
+      >
+        {state === "submitting" ? "Sending…" : "Request Early Access"}
       </button>
 
-      <div aria-live="polite" className="mt-4 min-h-[1.25rem]">
-        {prototypeNotice ? (
-          <p className="text-sm leading-relaxed text-slate-300">
-            Thanks — your details look complete. Because this form isn&apos;t connected yet,{" "}
-            <span className="font-medium text-white">nothing was sent or saved</span>, and we
-            won&apos;t be able to contact you from it.
+      <div aria-live="polite" className="mt-4 min-h-[1.25rem] text-sm leading-relaxed">
+        {state === "sent" ? (
+          <p className="text-slate-300">
+            Thanks — your request was received. We&apos;ll email you about fit and next steps.
+          </p>
+        ) : null}
+        {state === "rate-limited" ? (
+          <p className="text-amber-200">Too many attempts. Please wait a minute and try again.</p>
+        ) : null}
+        {state === "error" ? (
+          <p className="text-rose-300">
+            Something went wrong and your request was not sent. Please try again.
           </p>
         ) : null}
       </div>

@@ -21,8 +21,7 @@ export function SiteFooter() {
         <div className="space-y-4">
           <Wordmark />
           <p className="max-w-xs text-sm leading-relaxed text-slate-500">
-            Emergency Revenue Recovery System — AI call handling for HVAC, plumbing and electrical
-            service businesses.
+            AI call handling for HVAC, plumbing and electrical service businesses.
           </p>
         </div>
 
@@ -54,6 +53,16 @@ export function SiteFooter() {
             <li>
               <Link href={ROUTES.login} className={linkClass}>
                 Customer sign in
+              </Link>
+            </li>
+            <li>
+              <Link href="/privacy" className={linkClass}>
+                Privacy Policy
+              </Link>
+            </li>
+            <li>
+              <Link href="/terms" className={linkClass}>
+                Terms of Service
               </Link>
             </li>
           </ul>
