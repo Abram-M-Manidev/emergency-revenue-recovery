@@ -64,6 +64,10 @@ from app.domain.repositories.appointment_repository import AppointmentRepository
 from app.domain.repositories.business_hours_repository import BusinessHoursRepository
 from app.domain.repositories.business_profile_repository import BusinessProfileRepository
 from app.domain.repositories.caller_identity_repository import CallerIdentityRepository
+from app.domain.repositories.contact_correction_repository import (
+    ContactCorrectionRepository,
+    ContactCorrectionRequest,
+)
 from app.domain.repositories.conversation_outcome_repository import ConversationOutcomeRepository
 from app.domain.repositories.conversation_repository import ConversationRepository
 from app.domain.repositories.customer_repository import CustomerRepository
@@ -1686,3 +1690,58 @@ class FakeNotificationProvider(NotificationPort):
         return NotificationReceipt(
             status=self.status, provider=self.name, error_code=self.error_code
         )
+
+
+class FakeContactCorrectionRepository(ContactCorrectionRepository):
+    """In-memory `contact_correction_requests`: every proposal kept, at most
+    one pending per (conversation, field), as the partial unique index
+    enforces in Postgres."""
+
+    def __init__(self) -> None:
+        self.requests: list[ContactCorrectionRequest] = []
+
+    async def propose(self, organization_id, conversation_id, *, field, proposed_value, turn_index):
+        now = datetime.now(timezone.utc)
+        self.requests = [
+            replace(r, superseded_at=now)
+            if r.organization_id == organization_id
+            and r.conversation_id == conversation_id
+            and r.field == field
+            and r.is_pending
+            else r
+            for r in self.requests
+        ]
+        request = ContactCorrectionRequest(
+            id=uuid.uuid4(),
+            organization_id=organization_id,
+            conversation_id=conversation_id,
+            field=field,
+            proposed_value=proposed_value,
+            proposed_turn_index=turn_index,
+            confirmed_at=None,
+            superseded_at=None,
+            created_at=now,
+        )
+        self.requests.append(request)
+        return request
+
+    async def get_pending(self, organization_id, conversation_id, *, field):
+        return next(
+            (
+                r
+                for r in self.requests
+                if r.organization_id == organization_id
+                and r.conversation_id == conversation_id
+                and r.field == field
+                and r.is_pending
+            ),
+            None,
+        )
+
+    async def mark_confirmed(self, organization_id, request_id, *, at):
+        self.requests = [
+            replace(r, confirmed_at=at)
+            if r.id == request_id and r.organization_id == organization_id
+            else r
+            for r in self.requests
+        ]

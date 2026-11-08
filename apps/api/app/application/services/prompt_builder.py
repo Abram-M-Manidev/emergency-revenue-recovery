@@ -392,7 +392,16 @@ def build_system_prompt(
             + (" (emergency-eligible)" if s.is_emergency_eligible else "")
             for s in active_services
         ]
-        sections.append("Services offered:\n" + "\n".join(lines))
+        sections.append(
+            "Services offered:\n"
+            + "\n".join(lines)
+            + "\nThese are the only services this business provides. If the "
+            "caller's problem is clearly not one of them (for example plumbing "
+            "at a heating and cooling company), say plainly that the business "
+            "does not handle that, and do not record a service request or book "
+            "an appointment for it; offer to connect them with someone or take a "
+            "callback instead. A hazard still gets the safety instructions above."
+        )
 
     if service_areas:
         lines = [f"- {a.label}" for a in service_areas]

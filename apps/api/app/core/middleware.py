@@ -188,13 +188,13 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         ):
             return await call_next(request)
 
-        is_auth_path = path.startswith(f"{settings.API_V1_PREFIX}/auth")
-        tier = "auth" if is_auth_path else "default"
-        limit = (
-            settings.RATE_LIMIT_AUTH_PER_MINUTE
-            if is_auth_path
-            else settings.RATE_LIMIT_DEFAULT_PER_MINUTE
-        )
+        if path.startswith(f"{settings.API_V1_PREFIX}/auth"):
+            tier, limit = "auth", settings.RATE_LIMIT_AUTH_PER_MINUTE
+        elif path.startswith(f"{settings.API_V1_PREFIX}/public"):
+            # Unauthenticated and reachable by anyone: the strictest tier.
+            tier, limit = "public", settings.RATE_LIMIT_PUBLIC_PER_MINUTE
+        else:
+            tier, limit = "default", settings.RATE_LIMIT_DEFAULT_PER_MINUTE
         key = f"{tier}:{self._identify(request)}"
 
         allowed = self._limiter.check(key, limit=limit, window_seconds=_RATE_LIMIT_WINDOW_SECONDS)

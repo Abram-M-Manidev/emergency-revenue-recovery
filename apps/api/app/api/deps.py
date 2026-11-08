@@ -28,6 +28,7 @@ from app.application.services.emergency_notification_service import (
     EmergencyNotificationService,
 )
 from app.application.services.emergency_paging_service import EmergencyPagingService
+from app.application.services.lead_service import LeadService
 from app.application.services.notification_settings_service import (
     NotificationSettingsService,
 )
@@ -55,12 +56,14 @@ from app.infrastructure.database.repositories import (
     SqlAlchemyBusinessHoursRepository,
     SqlAlchemyBusinessProfileRepository,
     SqlAlchemyCallerIdentityRepository,
+    SqlAlchemyContactCorrectionRepository,
     SqlAlchemyConversationOutcomeRepository,
     SqlAlchemyConversationRepository,
     SqlAlchemyCustomerRepository,
     SqlAlchemyEmergencyKeywordRepository,
     SqlAlchemyEmergencyTicketRepository,
     SqlAlchemyFAQRepository,
+    SqlAlchemyLeadRepository,
     SqlAlchemyNotificationDeliveryRepository,
     SqlAlchemyNotificationSettingsRepository,
     SqlAlchemyOfferedSlotRepository,
@@ -301,6 +304,10 @@ def get_customer_service(
     )
 
 
+def get_lead_service(db: AsyncSession = Depends(get_db)) -> LeadService:
+    return LeadService(lead_repository=SqlAlchemyLeadRepository(db))
+
+
 def get_notification_settings_service(
     db: AsyncSession = Depends(get_db),
     settings: Settings = Depends(get_settings),
@@ -344,6 +351,9 @@ def get_voice_tool_executor(
         emergency_paging_service=emergency_paging_service,
         # The call's own caller ID, as the last-resort callback number.
         conversation_repository=SqlAlchemyConversationRepository(db),
+        # A changed service address is committed only on a later turn whose
+        # read-back reached the caller.
+        contact_correction_repository=SqlAlchemyContactCorrectionRepository(db),
         # One savepoint per tool: a failed tool must not take down what the
         # turn's earlier tools already did.
         savepoints=SqlAlchemySavepoints(db),

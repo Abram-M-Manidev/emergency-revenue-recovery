@@ -10,6 +10,9 @@ from app.infrastructure.database.repositories.business_profile_repository_impl i
 from app.infrastructure.database.repositories.caller_identity_repository_impl import (
     SqlAlchemyCallerIdentityRepository,
 )
+from app.infrastructure.database.repositories.contact_correction_repository_impl import (
+    SqlAlchemyContactCorrectionRepository,
+)
 from app.infrastructure.database.repositories.conversation_outcome_repository_impl import (
     SqlAlchemyConversationOutcomeRepository,
 )
@@ -26,6 +29,7 @@ from app.infrastructure.database.repositories.emergency_ticket_repository_impl i
     SqlAlchemyEmergencyTicketRepository,
 )
 from app.infrastructure.database.repositories.faq_repository_impl import SqlAlchemyFAQRepository
+from app.infrastructure.database.repositories.lead_repository_impl import SqlAlchemyLeadRepository
 from app.infrastructure.database.repositories.notification_repository_impl import (
     SqlAlchemyNotificationDeliveryRepository,
     SqlAlchemyNotificationSettingsRepository,
@@ -61,6 +65,7 @@ __all__ = [
     "SqlAlchemyAppointmentRepository",
     "SqlAlchemyBusinessHoursRepository",
     "SqlAlchemyBusinessProfileRepository",
+    "SqlAlchemyContactCorrectionRepository",
     "SqlAlchemyConversationOutcomeRepository",
     "SqlAlchemyConversationRepository",
     "SqlAlchemyCallerIdentityRepository",
@@ -68,6 +73,7 @@ __all__ = [
     "SqlAlchemyEmergencyKeywordRepository",
     "SqlAlchemyEmergencyTicketRepository",
     "SqlAlchemyFAQRepository",
+    "SqlAlchemyLeadRepository",
     "SqlAlchemyNotificationDeliveryRepository",
     "SqlAlchemyNotificationSettingsRepository",
     "SqlAlchemyOfferedSlotRepository",

@@ -81,6 +81,10 @@ def _build_app() -> FastAPI:
     async def vapi_events() -> dict[str, str]:
         return {"status": "ok"}
 
+    @app.post("/api/v1/public/early-access")
+    async def early_access() -> dict[str, str]:
+        return {"status": "received"}
+
     return app
 
 
@@ -261,3 +265,23 @@ async def test_both_vapi_routes_are_exempt(non_testing_settings):
             assert (
                 await client.post("/api/v1/voice/vapi/events", headers=_vapi_headers())
             ).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_public_tier_is_strict_and_separate_from_the_default_tier(non_testing_settings):
+    """The unauthenticated marketing form gets its own, tightest bucket:
+    flooding it is throttled quickly, and it does not spend a signed-in
+    user's default allowance (or vice versa)."""
+    app = _build_app()
+    limit = non_testing_settings.RATE_LIMIT_PUBLIC_PER_MINUTE
+    assert limit < non_testing_settings.RATE_LIMIT_AUTH_PER_MINUTE
+    transport = ASGITransport(app=app)
+
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        for _ in range(limit):
+            assert (await client.post("/api/v1/public/early-access")).status_code == 200
+        breached = await client.post("/api/v1/public/early-access")
+        default_still_open = await client.get("/api/v1/customers")
+
+    assert breached.status_code == 429
+    assert default_still_open.status_code == 200

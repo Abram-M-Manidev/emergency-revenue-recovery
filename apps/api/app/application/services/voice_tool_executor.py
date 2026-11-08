@@ -87,6 +87,11 @@ from app.domain.exceptions import (
 from app.domain.notifications.emergency import DeliveryStatus, NotificationDelivery
 from app.domain.paging.page import CallerPagingState
 from app.domain.repositories.business_profile_repository import BusinessProfileRepository
+from app.domain.repositories.contact_correction_repository import (
+    SERVICE_ADDRESS,
+    ContactCorrectionRepository,
+    ContactCorrectionRequest,
+)
 from app.domain.repositories.conversation_outcome_repository import ConversationOutcomeRepository
 from app.domain.repositories.conversation_repository import ConversationRepository
 from app.domain.repositories.offered_slot_repository import OfferedSlotRepository
@@ -155,6 +160,10 @@ class VoiceToolExecutor(ToolExecutorFactory):
         # On-call paging, read-only. Optional; absent, the paging state is
         # "off" and the assistant says nothing about anyone being paged.
         emergency_paging_service: EmergencyPagingService | None = None,
+        # Turn-enforced confirmation of a changed service address. Optional;
+        # absent, the change still needs `confirmed_correction`, but the
+        # backend cannot check that the caller heard the read-back first.
+        contact_correction_repository: ContactCorrectionRepository | None = None,
     ) -> None:
         self._appointments = appointment_service
         self._dispatch = dispatch_service
@@ -170,6 +179,7 @@ class VoiceToolExecutor(ToolExecutorFactory):
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._call_transfers = call_transfer_service
         self._paging = emergency_paging_service
+        self._corrections = contact_correction_repository
 
     def bind(
         self,
@@ -454,29 +464,41 @@ class VoiceToolExecutor(ToolExecutorFactory):
         problem = _text_or_none(arguments.get("problem_description"))
 
         request_exists = await self._service_request_exists(organization_id, conversation_id)
+        confirmed_proposal: ContactCorrectionRequest | None = None
         if (
             request_exists
             and existing is not None
             and not _is_blank(existing.customer_address)
             and not _is_blank(customer_address)
             and not _same_text(existing.customer_address, customer_address)
-            and arguments.get("confirmed_correction") is not True
         ):
             # Moving the visit to a different address is the one correction
             # that sends a technician somewhere else, so it needs the caller's
             # explicit agreement. Nothing is written until then.
-            return {
-                "success": False,
-                "error": ToolErrors.CORRECTION_NOT_CONFIRMED,
-                "field": "service_address",
-                "next_step": (
-                    "This changes the service address on a request that already "
-                    "exists. Read the new address back to the caller and ask "
-                    "them to confirm it. Only after they say yes, call "
-                    "create_service_request again with confirmed_correction "
-                    "true. If they say no, keep the address already recorded."
-                ),
-            }
+            assert customer_address is not None
+            confirmed_proposal, refusal_reason = await self._address_change_consent(
+                organization_id,
+                conversation_id,
+                customer_address,
+                turn_index=turn_index,
+                caller_confirmed=arguments.get("confirmed_correction") is True,
+            )
+            if refusal_reason is not None:
+                return {
+                    "success": False,
+                    "error": ToolErrors.CORRECTION_NOT_CONFIRMED,
+                    "field": SERVICE_ADDRESS,
+                    "reason": refusal_reason,
+                    "next_step": (
+                        "This changes the service address on a request that "
+                        "already exists. Read the new address back to the "
+                        "caller now, ask them to confirm it, and stop — your "
+                        "turn ends there. Only after they say yes, on their "
+                        "next turn, call create_service_request again with the "
+                        "same address and confirmed_correction true. If they "
+                        "say no, keep the address already recorded."
+                    ),
+                }
 
         # An emergency needs only what a dispatcher cannot act without: what
         # is wrong and a way to call back. Requiring the name and the address
@@ -508,6 +530,11 @@ class VoiceToolExecutor(ToolExecutorFactory):
                     caller_id_available=caller_id is not None, asked_for_caller_id=use_caller_id
                 )
             return refusal
+
+        if confirmed_proposal is not None and self._corrections is not None:
+            await self._corrections.mark_confirmed(
+                organization_id, confirmed_proposal.id, at=datetime.now(timezone.utc)
+            )
 
         if request_exists and existing is not None:
             corrected = [
@@ -668,6 +695,84 @@ class VoiceToolExecutor(ToolExecutorFactory):
         own configured country, or None, never a default."""
         profile = await self._profiles.get_by_organization_id(organization_id)
         return region_for_country(profile.country if profile else None)
+
+    async def _address_change_consent(
+        self,
+        organization_id: uuid.UUID,
+        conversation_id: uuid.UUID,
+        new_address: str,
+        *,
+        turn_index: int,
+        caller_confirmed: bool,
+    ) -> tuple[ContactCorrectionRequest | None, str | None]:
+        """Whether a change of service address may be committed now.
+
+        Returns the confirmed proposal (or None) and, when the change is
+        refused, the reason. The change is allowed only when the caller
+        confirmed, the SAME address was proposed on an EARLIER turn, and the
+        reply that read it back reached the caller. Anything else records a
+        fresh proposal at this turn, so the read-back the assistant is about
+        to give is what the caller's next answer confirms.
+
+        Without the repository, only the flag is checked: the previous
+        behaviour, and still refusing an unconfirmed change."""
+        if self._corrections is None:
+            return None, (None if caller_confirmed else "not_confirmed")
+
+        pending = await self._corrections.get_pending(
+            organization_id, conversation_id, field=SERVICE_ADDRESS
+        )
+        if (
+            caller_confirmed
+            and pending is not None
+            and _same_text(pending.proposed_value, new_address)
+            and pending.proposed_turn_index < turn_index
+            and await self._reply_was_heard(
+                organization_id, conversation_id, pending.proposed_turn_index
+            )
+        ):
+            return pending, None
+
+        if not caller_confirmed:
+            reason = "not_confirmed"
+        elif pending is None or not _same_text(pending.proposed_value, new_address):
+            reason = "not_read_back"
+        elif pending.proposed_turn_index >= turn_index:
+            reason = "not_yet_heard"
+        else:
+            reason = "read_back_not_heard"
+        await self._corrections.propose(
+            organization_id,
+            conversation_id,
+            field=SERVICE_ADDRESS,
+            proposed_value=new_address,
+            turn_index=turn_index,
+        )
+        # The reason only, never the address: it is caller PII.
+        logger.info(
+            "service_address_change_needs_confirmation",
+            organization_id=str(organization_id),
+            conversation_id=str(conversation_id),
+            reason=reason,
+        )
+        return None, reason
+
+    async def _reply_was_heard(
+        self, organization_id: uuid.UUID, conversation_id: uuid.UUID, turn_index: int
+    ) -> bool:
+        """Whether the reply of the turn that began at `turn_index` reached
+        the caller. A turn is stored as two messages, so its reply is the
+        message at `turn_index + 1`; P1 marks it interrupted when Vapi never
+        took it in full. Without a conversation repository nothing can be
+        shown, so the answer is no."""
+        if self._conversations is None:
+            return False
+        if await self._conversations.get_by_id(organization_id, conversation_id) is None:
+            return False
+        messages = await self._conversations.list_messages(conversation_id)
+        if len(messages) <= turn_index + 1:
+            return False
+        return messages[turn_index + 1].interrupted_at is None
 
     async def _service_request_exists(
         self, organization_id: uuid.UUID, conversation_id: uuid.UUID

@@ -12,6 +12,9 @@ from app.infrastructure.database.models.call_transfer import (
     CallTransferAttemptModel,
     OrganizationCallTransferSettingsModel,
 )
+from app.infrastructure.database.models.contact_correction import (
+    ContactCorrectionRequestModel,
+)
 from app.infrastructure.database.models.conversation import ConversationModel
 from app.infrastructure.database.models.conversation_message import ConversationMessageModel
 from app.infrastructure.database.models.conversation_outcome import ConversationOutcomeModel
@@ -23,6 +26,7 @@ from app.infrastructure.database.models.disclosure import OrganizationDisclosure
 from app.infrastructure.database.models.emergency_keyword import EmergencyKeywordModel
 from app.infrastructure.database.models.emergency_ticket import EmergencyTicketModel
 from app.infrastructure.database.models.faq_entry import FAQEntryModel
+from app.infrastructure.database.models.lead import MarketingLeadModel
 from app.infrastructure.database.models.notification import (
     EmergencyNotificationDeliveryModel,
     OrganizationNotificationSettingsModel,
@@ -62,6 +66,7 @@ __all__ = [
     "CallUsageRecordModel",
     "ConversationLLMUsageModel",
     "ConversationMessageModel",
+    "ContactCorrectionRequestModel",
     "ConversationModel",
     "ConversationOutcomeModel",
     "CustomerCallerIdentityModel",
@@ -73,6 +78,7 @@ __all__ = [
     "EmergencyTicketModel",
     "FAQEntryModel",
     "HoursExceptionModel",
+    "MarketingLeadModel",
     "OfferedSlotModel",
     "OrganizationCallTransferSettingsModel",
     "OrganizationDisclosureSettingsModel",

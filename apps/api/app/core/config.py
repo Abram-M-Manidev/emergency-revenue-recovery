@@ -263,6 +263,9 @@ class Settings(BaseSettings):
     # (limit x worker count) — an accepted trade-off, not a bug.
     RATE_LIMIT_DEFAULT_PER_MINUTE: int = 100
     RATE_LIMIT_AUTH_PER_MINUTE: int = 10
+    # Unauthenticated marketing endpoints (`/api/v1/public/*`): a form a
+    # person fills in once, so a handful per minute per IP is generous.
+    RATE_LIMIT_PUBLIC_PER_MINUTE: int = 5
 
     # --- Request limits ---
     MAX_REQUEST_BODY_BYTES: int = 1_048_576  # 1 MiB

@@ -28,6 +28,7 @@ from app.domain.ai.tools import CREATE_SERVICE_REQUEST, ToolErrors, ToolInvocati
 from app.domain.entities.business_hours import WeeklyHours
 from app.domain.entities.business_profile import BusinessProfile, BusinessType
 from app.domain.entities.conversation import ConversationChannel
+from app.domain.entities.conversation_message import MessageRole
 from app.domain.exceptions import EntityAlreadyExistsError, InvalidPhoneNumberError
 from app.infrastructure.scheduling.database_availability_provider import (
     DatabaseAvailabilityProvider,
@@ -49,6 +50,7 @@ from tests.fakes import (
     FakeBusinessHoursRepository,
     FakeBusinessProfileRepository,
     FakeCallerIdentityRepository,
+    FakeContactCorrectionRepository,
     FakeConversationOutcomeRepository,
     FakeConversationRepository,
     FakeCustomerRepository,
@@ -143,6 +145,7 @@ class _Harness:
         )
         services = FakeServiceRepository([])
         offered = FakeOfferedSlotRepository()
+        self.corrections = FakeContactCorrectionRepository()
         self.customer_service = CustomerService(
             customer_repository=self.customers,
             conversation_outcome_repository=self.outcomes,
@@ -190,6 +193,7 @@ class _Harness:
             offered_slot_repository=offered,
             settings=self.settings,
             conversation_repository=self.conversations,
+            contact_correction_repository=self.corrections,
         )
 
     async def call_from(self, caller_id: str | None, *, org: uuid.UUID = _ORG_ID) -> uuid.UUID:
@@ -199,9 +203,40 @@ class _Harness:
         return conversation.id
 
     async def tool(
-        self, conversation_id: uuid.UUID, arguments: dict, *, org: uuid.UUID = _ORG_ID
+        self,
+        conversation_id: uuid.UUID,
+        arguments: dict,
+        *,
+        org: uuid.UUID = _ORG_ID,
+        heard: bool = True,
     ) -> dict:
-        executor = self.factory.bind(org, conversation_id, 4)
+        """One whole caller turn: the tool runs at the turn's real index (the
+        number of messages stored before it), then the turn's two messages
+        are stored — marked interrupted when the reply never reached the
+        caller, as P1 does."""
+        turn_index = len(await self.conversations.list_messages(conversation_id))
+        result = await self.tool_at(turn_index, conversation_id, arguments, org=org)
+        customer = await self.conversations.add_message(
+            conversation_id, role=MessageRole.CUSTOMER, content="..."
+        )
+        reply = await self.conversations.add_message(
+            conversation_id, role=MessageRole.ASSISTANT, content="..."
+        )
+        if not heard:
+            await self.conversations.mark_messages_interrupted(
+                [customer.id, reply.id], at=datetime.now(timezone.utc)
+            )
+        return result
+
+    async def tool_at(
+        self,
+        turn_index: int,
+        conversation_id: uuid.UUID,
+        arguments: dict,
+        *,
+        org: uuid.UUID = _ORG_ID,
+    ) -> dict:
+        executor = self.factory.bind(org, conversation_id, turn_index)
         result = await executor.execute(
             ToolInvocation(id="call_1", name=CREATE_SERVICE_REQUEST.name, arguments=arguments)
         )
@@ -603,9 +638,11 @@ async def test_an_address_change_after_the_request_exists_needs_confirmation():
 
     assert unconfirmed["success"] is False
     assert unconfirmed["error"] == ToolErrors.CORRECTION_NOT_CONFIRMED
+    assert unconfirmed["reason"] == "not_confirmed"
     appointment = await harness.appointments.get_by_conversation_id(conversation)
     assert appointment is not None and appointment.customer_address == "12 Birch Street"
 
+    # The caller heard the read-back and agreed, on a later turn.
     confirmed = await harness.tool(
         conversation, _request(service_address="14 Birch Street", confirmed_correction=True)
     )
@@ -615,6 +652,100 @@ async def test_an_address_change_after_the_request_exists_needs_confirmation():
     assert appointment is not None and appointment.customer_address == "14 Birch Street"
     (customer,) = harness.customers._customers.values()
     assert customer.address == "14 Birch Street"
+    # Audit trail: the proposal is kept, marked confirmed.
+    (proposal,) = harness.corrections.requests
+    assert proposal.confirmed_at is not None
+    assert proposal.proposed_value == "14 Birch Street"
+
+
+@pytest.mark.asyncio
+async def test_the_flag_alone_cannot_change_the_address():
+    """The model claiming the caller agreed is not enough: with no read-back
+    on an earlier turn, the change is refused and recorded as a proposal for
+    the caller to confirm next."""
+    harness = _Harness()
+    conversation = await harness.call_from(_CALLER_ID)
+    await harness.tool(conversation, _request(service_address="12 Birch Street"))
+
+    result = await harness.tool(
+        conversation, _request(service_address="14 Birch Street", confirmed_correction=True)
+    )
+
+    assert result["error"] == ToolErrors.CORRECTION_NOT_CONFIRMED
+    assert result["reason"] == "not_read_back"
+    appointment = await harness.appointments.get_by_conversation_id(conversation)
+    assert appointment is not None and appointment.customer_address == "12 Birch Street"
+
+
+@pytest.mark.asyncio
+async def test_proposing_and_confirming_in_one_turn_is_refused():
+    harness = _Harness()
+    conversation = await harness.call_from(_CALLER_ID)
+    await harness.tool(conversation, _request(service_address="12 Birch Street"))
+    turn = len(await harness.conversations.list_messages(conversation))
+
+    await harness.tool_at(turn, conversation, _request(service_address="14 Birch Street"))
+    same_breath = await harness.tool_at(
+        turn,
+        conversation,
+        _request(service_address="14 Birch Street", confirmed_correction=True),
+    )
+
+    assert same_breath["error"] == ToolErrors.CORRECTION_NOT_CONFIRMED
+    assert same_breath["reason"] == "not_yet_heard"
+
+
+@pytest.mark.asyncio
+async def test_a_read_back_the_caller_never_heard_cannot_be_confirmed():
+    """P1: a reply Vapi never took in full was not heard, so the caller's
+    "yes" cannot be agreement to it."""
+    harness = _Harness()
+    conversation = await harness.call_from(_CALLER_ID)
+    await harness.tool(conversation, _request(service_address="12 Birch Street"))
+    await harness.tool(conversation, _request(service_address="14 Birch Street"), heard=False)
+
+    result = await harness.tool(
+        conversation, _request(service_address="14 Birch Street", confirmed_correction=True)
+    )
+
+    assert result["error"] == ToolErrors.CORRECTION_NOT_CONFIRMED
+    assert result["reason"] == "read_back_not_heard"
+    appointment = await harness.appointments.get_by_conversation_id(conversation)
+    assert appointment is not None and appointment.customer_address == "12 Birch Street"
+
+
+@pytest.mark.asyncio
+async def test_confirming_a_different_address_than_was_read_back_is_refused():
+    harness = _Harness()
+    conversation = await harness.call_from(_CALLER_ID)
+    await harness.tool(conversation, _request(service_address="12 Birch Street"))
+    await harness.tool(conversation, _request(service_address="14 Birch Street"))
+
+    result = await harness.tool(
+        conversation, _request(service_address="41 Birch Street", confirmed_correction=True)
+    )
+
+    assert result["reason"] == "not_read_back"
+    pending = await harness.corrections.get_pending(
+        _ORG_ID, conversation, field="service_address"
+    )
+    assert pending is not None and pending.proposed_value == "41 Birch Street"
+    assert len(harness.corrections.requests) == 2  # the earlier one is superseded, not lost
+
+
+@pytest.mark.asyncio
+async def test_a_pending_proposal_does_not_carry_across_tenants():
+    harness = _Harness()
+    conversation = await harness.call_from(_CALLER_ID)
+    await harness.tool(conversation, _request(service_address="12 Birch Street"))
+    await harness.tool(conversation, _request(service_address="14 Birch Street"))
+
+    assert (
+        await harness.corrections.get_pending(
+            _OTHER_ORG_ID, conversation, field="service_address"
+        )
+        is None
+    )
 
 
 @pytest.mark.asyncio
@@ -683,6 +814,7 @@ async def test_an_emergency_ticket_takes_corrections_too():
     await harness.tool(conversation, _emergency(customer_name="Meera"))
 
     await harness.tool(conversation, _emergency(customer_name="Myra"))
+    await harness.tool(conversation, _emergency(service_address="14 Birch Street"))
     await harness.tool(
         conversation,
         _emergency(service_address="14 Birch Street", confirmed_correction=True),
@@ -730,3 +862,37 @@ async def test_a_correction_cannot_reach_another_tenants_request():
     assert appointment is not None
     assert appointment.organization_id == _ORG_ID
     assert appointment.customer_name == "Myra"
+
+
+def test_a_service_list_limits_what_may_be_booked():
+    """Audit C3: a sink leak at a heating-and-cooling company must not be
+    recorded or booked as if it were a job the business does."""
+    from app.domain.entities.service import Service
+
+    service = Service(
+        id=uuid.uuid4(),
+        organization_id=_ORG_ID,
+        name="AC repair",
+        description=None,
+        category=None,
+        is_emergency_eligible=False,
+        is_active=True,
+        default_duration_minutes=60,
+    )
+    common = dict(
+        profile=None,
+        weekly_hours=[],
+        hours_exceptions=[],
+        service_areas=[],
+        faqs=[],
+        emergency_keywords=[],
+        today=_NOW.date(),
+        emergency_keyword_hint=False,
+    )
+    with_services = build_system_prompt(services=[service], **common)
+    without_services = build_system_prompt(services=[], **common)
+
+    assert "These are the only services this business provides" in with_services
+    assert "do not record a service request or book" in with_services
+    # A business with no catalogue is not told it handles nothing.
+    assert "These are the only services" not in without_services
