@@ -124,6 +124,79 @@ def hazards_in(texts: Iterable[str]) -> frozenset[Hazard]:
     return frozenset(found)
 
 
+# --- Asserted vs. merely mentioned -------------------------------------------
+#
+# `detect_hazards` answers "might this caller be in danger?" and is used for
+# what is SAID (the safety instruction), where generosity costs nothing:
+# telling someone who asked "what should I do if I smell gas?" to leave and
+# call 911 is good advice. The hazard FLOOR is different: it forces an
+# emergency ticket and an alert to a real person. That needs the caller to be
+# reporting the hazard as happening — not denying it ("there's no gas leak"),
+# recalling it ("I previously had a gas leak"), asking about it ("what should
+# I do if…", "could it be carbon monoxide?"). Those are left to the model,
+# which is told to ask ONE question to confirm and to treat yes-or-unclear
+# as an emergency. A present report is never qualified away: cues are read
+# only in the clause that names the hazard ("there's no smoke but I smell
+# gas" still asserts gas), and a negation counts only in the three words
+# right before the hazard ("I can't breathe, there is smoke" still asserts
+# smoke). Someone else's hazard is deliberately NOT excluded: "my
+# neighbour's house is on fire" is a danger to the caller too.
+
+_CLAUSE_SPLIT = re.compile(r"[.!?;,]+|\bbut\b|\bhowever\b|\balthough\b")
+# A negation immediately before the hazard words (the last three words).
+_NEGATION = re.compile(r"\b(no|not|never|without|nothing|none|any|\w+n't|cannot)\b")
+# A hypothetical anywhere in the clause BEFORE the hazard words.
+_HYPOTHETICAL = re.compile(
+    r"\b(if|what if|in case|suppose|supposing|hypothetically|how do i know|what do i do"
+    r"|what should)\b"
+)
+# Read anywhere in the clause.
+_CLAUSE_QUALIFIERS = re.compile(
+    r"\b(previously|used to|in the past|once had|last (?:week|month|year|time|winter|summer)"
+    r"|(?:a few |two |three |\d+ )?(?:days?|weeks?|months?|years?) ago|back in \d{4})\b"
+)
+_QUESTION_OPENERS = re.compile(r"^\s*(is|are|could|can|would|should|might|does|do|what|how|why)\b")
+
+
+def asserted_hazards(text: str | None) -> frozenset[Hazard]:
+    """The hazards the caller reports as happening, first-hand. A subset of
+    `detect_hazards(text)`; see the comment above for what is excluded."""
+    if not text:
+        return frozenset()
+    found: set[Hazard] = set()
+    for sentence in re.split(r"(?<=[.!?])\s+", text.lower()):
+        is_question = sentence.rstrip().endswith("?")
+        for clause in _CLAUSE_SPLIT.split(sentence):
+            if not clause.strip():
+                continue
+            if is_question and _QUESTION_OPENERS.search(clause):
+                continue
+            if _CLAUSE_QUALIFIERS.search(clause):
+                continue
+            for hazard, patterns in _PATTERNS.items():
+                if hazard in found:
+                    continue
+                for pattern in patterns:
+                    match = pattern.search(clause)
+                    if match is None:
+                        continue
+                    prefix = clause[: match.start()]
+                    if _HYPOTHETICAL.search(prefix):
+                        continue
+                    if _NEGATION.search(" ".join(prefix.split()[-3:])):
+                        continue
+                    found.add(hazard)
+                    break
+    return frozenset(found)
+
+
+def asserted_hazards_in(texts: Iterable[str]) -> frozenset[Hazard]:
+    found: set[Hazard] = set()
+    for text in texts:
+        found |= asserted_hazards(text)
+    return frozenset(found)
+
+
 def emergency_number_for(country: str | None) -> str:
     """The emergency number to name. Only stated where it is known; anywhere
     else the caller is pointed at "your local emergency number" rather than
@@ -188,7 +261,11 @@ def describe_hazards(hazards: Iterable[Hazard]) -> str:
 
 
 def life_safety_directive(
-    hazards: Iterable[Hazard], *, emergency_number: str, instruction_given: str | None
+    hazards: Iterable[Hazard],
+    *,
+    emergency_number: str,
+    instruction_given: str | None,
+    asserted: Iterable[Hazard] | None = None,
 ) -> str | None:
     """The prompt section binding the model for the rest of a call on which a
     hazard has been reported."""
@@ -196,10 +273,22 @@ def life_safety_directive(
     if not ordered:
         return None
     described = ", ".join(_DESCRIPTIONS[h] for h in ordered)
-    lines = [
-        f"LIFE-SAFETY — this caller has reported {described}. Their safety comes "
-        "before anything else on this call.",
-    ]
+    # None means "treat every mention as reported" — the behaviour before
+    # `asserted_hazards` existed, kept for any caller that does not say.
+    confirmed = set(ordered if asserted is None else asserted)
+    unconfirmed = [h for h in ordered if h not in confirmed]
+    if confirmed:
+        lines = [
+            f"LIFE-SAFETY — this caller has reported {described}. Their safety comes "
+            "before anything else on this call.",
+        ]
+    else:
+        lines = [
+            f"LIFE-SAFETY — this caller has mentioned {described}, but in a way that "
+            "may not mean it is happening now where they are (they denied it, "
+            "described the past, or asked about it). Their safety still comes "
+            "first.",
+        ]
     if instruction_given:
         lines.append(f'The system has already told them: "{instruction_given}"')
     lines += [
@@ -213,8 +302,21 @@ def life_safety_directive(
         f"- Never suggest waiting for a technician instead of calling {emergency_number}.",
         "- You cannot contact emergency services or the gas company, and nobody "
         "has. Never say they have been called, notified or are coming.",
-        "- Still record the emergency with create_service_request (classification "
-        '"emergency") as soon as possible, without waiting for a name or address, '
-        "so the business is alerted.",
     ]
+    if confirmed:
+        lines.append(
+            "- Still record the emergency with create_service_request (classification "
+            '"emergency") as soon as possible, without waiting for a name or address, '
+            "so the business is alerted."
+        )
+    if unconfirmed:
+        lines.append(
+            "- For "
+            + ", ".join(_DESCRIPTIONS[h] for h in unconfirmed)
+            + ": ask ONE short question to find out whether it is happening now at "
+            "their location. If yes, or if the answer is unclear, record the "
+            "emergency with create_service_request (classification \"emergency\") "
+            "straight away. Only if they clearly say it is not happening, carry on "
+            "with what they called about."
+        )
     return "\n".join(lines)

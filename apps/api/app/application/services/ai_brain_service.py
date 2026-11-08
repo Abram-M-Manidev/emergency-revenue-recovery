@@ -57,6 +57,7 @@ from app.domain.exceptions import (
 )
 from app.domain.life_safety import (
     Hazard,
+    asserted_hazards_in,
     describe_hazards,
     detect_hazards,
     emergency_number_for,
@@ -390,6 +391,13 @@ class AIBrainService:
         current_hazards = detect_hazards(customer_message)
         new_hazards = (current_hazards | reported_hazards) - instructed_hazards
         all_hazards = reported_hazards | current_hazards
+        # The subset reported as happening, first-hand: only these force an
+        # emergency (the hazard floor). A mention that was denied, in the
+        # past, or hypothetical still gets the spoken instruction above, and
+        # the directive below makes the model confirm it with one question.
+        asserted = asserted_hazards_in(
+            [*(m.content for m in heard if m.role is MessageRole.CUSTOMER), customer_message]
+        )
         safety_prefix = (
             safety_instruction(new_hazards, emergency_number=emergency_number)
             if new_hazards
@@ -406,6 +414,7 @@ class AIBrainService:
             all_hazards,
             emergency_number=emergency_number,
             instruction_given=safety_instruction(all_hazards, emergency_number=emergency_number),
+            asserted=asserted,
         )
 
         # No known-caller grounding. It used to place the name on file for
@@ -461,14 +470,14 @@ class AIBrainService:
                     organization_id,
                     conversation_id,
                     len(history),
-                    hazard_reported=bool(all_hazards),
+                    hazard_reported=bool(asserted),
                 )
                 if self._tools_enabled and self._tool_executors is not None
                 else None
             ),
             usage_sink=usage_sink,
         )
-        return conversation, request, services, safety_prefix, len(history), all_hazards
+        return conversation, request, services, safety_prefix, len(history), asserted
 
     async def _record_llm_usage(self, conversation: Conversation, usage: TokenUsageTally) -> None:
         """Adds this turn's provider-reported tokens to the conversation's

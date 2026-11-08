@@ -37,7 +37,7 @@ billing or charging exists or was added.
 | L7 | Recording-before-notice behaviour verified on a real call; decide mitigation | Founder | Real call |
 | L8 | Transfer-not-answered fallback configured in Vapi (B5) | Founder | Vapi config |
 | L9 | External monitoring live (uptime + backup heartbeat + usage_health cron) | Founder | Host config |
-| L10 | Push the 8+ local commits to GitHub (repo is public — review first) | Founder | Authorization |
+| L10 | Push the local commits to GitHub after the pre-push audit (repo is public) | Founder | Authorization |
 
 ## 3. Remaining engineering (not blocking a controlled pilot)
 
