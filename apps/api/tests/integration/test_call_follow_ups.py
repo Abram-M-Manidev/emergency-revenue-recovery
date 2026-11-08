@@ -625,6 +625,61 @@ async def test_a_transferred_call_with_no_recorded_request_is_flagged_for_confir
 
 
 @pytest.mark.asyncio(loop_scope="session")
+@pytest.mark.parametrize(
+    "ended_reason",
+    ["call.forwarding.no-answer", "call.forwarding.operator-busy",
+     "call.in-progress.error-transfer-failed"],
+)
+async def test_a_transfer_that_did_not_connect_is_flagged_even_with_a_request(
+    client, ended_reason
+):
+    """On a Twilio number Vapi ENDS the call when a blind transfer is not
+    answered, and no server message reports it; the end-of-call reason is
+    the only signal. A recorded request does not help a caller who asked for
+    a person and was dropped, so this outranks "request recorded"."""
+    scripted = _scripted()
+    assistant = await _tenant(transfer=True)
+    call_id = f"call_fu_{uuid.uuid4().hex[:8]}"
+    scripted.queue_tool_round([("create_service_request", {
+        "customer_name": "Ari", "customer_phone": "+16305550177",
+        "service_address": "9 Elm Street, Lisle", "problem_description": "AC not cooling.",
+        "classification": "non_emergency", "service_name": None,
+        "use_caller_id": False, "confirmed_correction": False})])
+    scripted.queue_reply(default_reply(message_to_customer="Logged.",
+                                       recommended_action=RecommendedAction.BOOK_APPOINTMENT))
+    await _turn(client, _body(call_id, assistant, "AC not cooling. I'm Ari at 9 Elm Street."))
+    scripted.queue_tool_round([("transfer_to_human", {"reason": "caller_requested",
+                                                      "is_emergency": False})])
+    scripted.queue_reply(default_reply(message_to_customer="",
+                                       recommended_action=RecommendedAction.ESCALATE_TO_HUMAN))
+    await _turn(client, _body(call_id, assistant, "Actually let me talk to a person."))
+
+    await _hang_up(client, call_id, ended_reason=ended_reason)
+
+    _, follow_ups, tickets, _, _ = await _records(call_id)
+    assert [f.reason for f in follow_ups] == [FollowUpReason.TRANSFER_NOT_CONNECTED]
+    assert follow_ups[0].possible_emergency is False
+    assert tickets == []
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_a_not_connected_reason_without_any_transfer_attempt_flags_nothing_new(client):
+    """The reason alone is not trusted: without an initiated transfer on the
+    call, the ordinary rules apply."""
+    scripted = _scripted()
+    assistant = await _tenant()
+    call_id = f"call_fu_{uuid.uuid4().hex[:8]}"
+    scripted.queue_reply(default_reply(message_to_customer="We open at 8. Thank you for calling.",
+                                       is_conversation_complete=True))
+    await _turn(client, _body(call_id, assistant, "What time do you open?"))
+
+    await _hang_up(client, call_id, ended_reason="call.forwarding.no-answer")
+
+    _, follow_ups, _, _, _ = await _records(call_id)
+    assert follow_ups == []
+
+
+@pytest.mark.asyncio(loop_scope="session")
 async def test_a_repeated_end_of_call_report_is_idempotent(client):
     scripted = _scripted()
     assistant = await _tenant()

@@ -25,6 +25,7 @@ export const FOLLOW_UP_REASON_LABEL: Record<FollowUpReason, string> = {
   ended_before_request_recorded: "Hung up before details were taken",
   transferred_before_request_recorded: "Transferred — confirm someone answered",
   unscheduled_request: "Asked for a visit — no time booked, call back to schedule",
+  transfer_not_connected: "Transfer to a person did not connect — call back now",
 };
 
 function formatWhen(value: string | null): string {

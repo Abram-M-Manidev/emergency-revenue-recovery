@@ -33,7 +33,7 @@ from app.domain.call_transfer.attempt import TransferReason
 from app.domain.entities.appointment import AppointmentStatus
 from app.domain.entities.conversation_message import MessageRole
 from app.domain.exceptions import EntityNotFoundError
-from app.domain.follow_ups import CallFollowUp, FollowUpReason
+from app.domain.follow_ups import CallFollowUp, FollowUpReason, transfer_not_connected
 from app.domain.life_safety import (
     Hazard,
     detect_hazards,
@@ -182,6 +182,7 @@ class CallFollowUpService:
         conversation_id: uuid.UUID,
         completed_by_assistant: bool,
         caller_lines: Iterable[str] = (),
+        ended_reason: str | None = None,
     ) -> CallFollowUp | None:
         """`caller_lines` are the caller's own lines from Vapi's transcript:
         speech that may never have reached ERRS (an utterance still in
@@ -202,6 +203,26 @@ class CallFollowUpService:
                     context="the call ended before the caller's details were recorded",
                 )
             return existing
+
+        if transfer_not_connected(ended_reason) and (
+            await self._attempts.get_initiated_for_conversation(conversation_id) is not None
+        ):
+            # Checked before "a request was recorded": a recorded request does
+            # not help a caller whose transfer rang out and whose call Vapi
+            # then ended. They asked for a person and got silence.
+            logger.warning(
+                "transfer_not_connected",
+                organization_id=str(organization_id),
+                conversation_id=str(conversation_id),
+                ended_reason=ended_reason,
+            )
+            return await self._record(
+                organization_id,
+                conversation_id,
+                reason=FollowUpReason.TRANSFER_NOT_CONNECTED,
+                signals=signals,
+                context="the caller asked for a person and the transfer did not connect",
+            )
 
         if await self._unscheduled_request(organization_id, conversation_id):
             # Neutral signals on purpose: this caller's request WAS handled

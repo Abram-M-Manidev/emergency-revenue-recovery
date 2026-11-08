@@ -834,6 +834,7 @@ async def vapi_events(
                 conversation_id=ended.conversation_id,
                 completed_by_assistant=ended.completed_by_assistant,
                 caller_lines=_caller_lines(message),
+                ended_reason=_bounded_text(message.get("endedReason"), _ENDED_REASON_MAX_LENGTH),
             )
         except Exception as exc:
             logger.error("call_follow_up_on_end_failed", error=type(exc).__name__)

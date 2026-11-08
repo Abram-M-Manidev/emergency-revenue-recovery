@@ -35,6 +35,29 @@ class FollowUpReason(str, Enum):
     #: was booked (none suited them, or none was free). The assistant told
     #: them the office would call back; this is what makes that true.
     UNSCHEDULED_REQUEST = "unscheduled_request"
+    #: A transfer to a person was handed to Vapi, and the call then ended
+    #: with Vapi reporting the destination did not connect (no answer,
+    #: busy, transfer failed). On Twilio numbers Vapi ends the call in that
+    #: case, so the caller was dropped: someone must call them back.
+    TRANSFER_NOT_CONNECTED = "transfer_not_connected"
+
+
+#: Vapi `endedReason` values that mean a transfer was attempted and did not
+#: reach a person (docs.vapi.ai/tools/transfer-call, checked 2026-11-08).
+#: No server message reports a failed transfer while the call is live; this
+#: end-of-call reason is the only signal.
+_TRANSFER_NOT_CONNECTED_REASONS = frozenset(
+    {
+        "call.forwarding.no-answer",
+        "call.forwarding.operator-busy",
+        "call.in-progress.error-transfer-failed",
+    }
+)
+
+
+def transfer_not_connected(ended_reason: str | None) -> bool:
+    reason = (ended_reason or "").strip().lower()
+    return reason in _TRANSFER_NOT_CONNECTED_REASONS or "transfer-failed" in reason
 
 
 @dataclass(frozen=True, slots=True)

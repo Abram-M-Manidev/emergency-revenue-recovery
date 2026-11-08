@@ -258,7 +258,8 @@ export type FollowUpReason =
   | "ai_unavailable"
   | "ended_before_request_recorded"
   | "transferred_before_request_recorded"
-  | "unscheduled_request";
+  | "unscheduled_request"
+  | "transfer_not_connected";
 
 export interface CallFollowUp {
   id: string;
