@@ -487,6 +487,86 @@ is all-or-nothing, so rerunning is always safe.
 
 ---
 
+### Usage reports and the usage health check (M3/M4)
+
+Each business can see its own usage for a billing period (UTC month):
+`GET /api/v1/usage/summary?period=YYYY-MM` (needs `analytics:read`). It
+returns calls, billable calls and minutes, excluded calls by reason, the
+reconciliation outcome per call, the rules versions in effect, and LLM
+tokens by model. It is a report, not an invoice: nothing in ESSR charges
+anyone, and unattributed calls are never counted against a tenant.
+
+The health check says whether the usage data can be trusted right now:
+
+```bash
+essr exec api python -m app.cli.usage_health        # exit 0 ok, 1 problems, 2 could not run
+```
+
+Each problem is printed and logged at ERROR as `usage_health_problem
+problem=<code>`. Codes and what to do:
+
+| Code | Meaning | Action |
+|---|---|---|
+| `reconciliation_never_run` | No run recorded | Run `usage_reconcile` |
+| `reconciliation_last_run_failed` | Latest run FAILED | Read its `error`, fix, rerun |
+| `reconciliation_stale` | No success in 26 h | Check the scheduler; rerun |
+| `calls_missing_usage` | A call >2 h old has no usage record (webhook missed) | Rerun reconciliation; it backfills |
+| `unattributed_usage` | Vapi billed a call no tenant owns | Check `voice_lines` provisioning |
+| `reconciliation_discrepancies` | Outcome not MATCHED/FILLED/NOT_ENDED | Query below, investigate |
+
+### Scheduled operator jobs (set up on the host — nothing schedules them today)
+
+```cron
+# Reconcile the last 2 days, then check health; alert on a non-zero exit.
+15 2 * * *  cd /srv/essr && docker compose -f docker-compose.yml -f docker-compose.prod.yml exec -T api python -m app.cli.usage_reconcile && docker compose -f docker-compose.yml -f docker-compose.prod.yml exec -T api python -m app.cli.usage_health || /usr/local/bin/notify-operator "ESSR usage health"
+# Retention (only once the window is agreed with every customer; see below).
+# 30 3 * * 0  cd /srv/essr && docker compose -f docker-compose.yml -f docker-compose.prod.yml exec -T api python -m app.cli.retention --days 90 --apply
+```
+
+`notify-operator` is a placeholder for whatever reaches you (the same
+heartbeat service as the backup monitor works: ping its URL only on success).
+
+---
+
+## Transcript and recording retention
+
+`python -m app.cli.retention --days N` (dry run) shows how many transcript
+messages and recording links on COMPLETED calls older than N days would be
+redacted; `--apply` does it. Message text becomes `[redacted after N days]`
+and `voice_calls.recording_url` is cleared. Tickets, appointments,
+customers, outcomes and usage records are NOT touched: they are the
+business's job records, deleted on the business's instruction. The
+recording itself lives at Vapi (14-day retention on the current plan);
+clearing the link does not delete it there. The window must match what each
+customer agreed to (`docs/legal/DATA_RETENTION_POLICY.md`). Minimum 7 days.
+
+## Early-access leads (public website)
+
+The website form posts to `POST /api/v1/public/early-access` (rate limited
+to `RATE_LIMIT_PUBLIC_PER_MINUTE` per IP, default 5). Leads are stored in
+`marketing_leads` with the consent version and time; they are operator data,
+not tenant data, and no tenant API reads them. Export:
+
+```bash
+essr exec api python -m app.cli.leads > leads.csv   # personal data: store it accordingly
+```
+
+To delete a person's lead on request:
+`DELETE FROM marketing_leads WHERE email = lower('<address>');` (one row).
+When the consent wording on the site changes, bump `CURRENT_CONSENT_VERSION`
+(API) and `CONSENT_VERSION` (frontend form) together.
+
+## Service-address corrections
+
+A caller changing the service address of an existing request is held as a
+proposal (`contact_correction_requests`) until a LATER turn in which the
+caller confirms the read-back that reached them. Log event
+`service_address_change_needs_confirmation reason=...`. Rows are the audit
+trail (proposed / superseded / confirmed); they hold the address and are
+cascade-deleted with the conversation.
+
+---
+
 ## Disabling one tenant's voice assistant
 
 When a business's assistant is misbehaving and you need it to stop **now**.
@@ -846,8 +926,10 @@ Stated so nobody discovers it during an incident:
   seconds.
 - **Rate limits are per worker**, so the effective ceiling is roughly 4× the
   configured value.
-- **No data-deletion / retention tooling.** Transcripts and customer records
-  accumulate indefinitely; there is no self-serve erasure path yet.
+- **Retention is operator-run, not automatic.** `app.cli.retention` redacts
+  transcripts and recording links by age, but nothing schedules it, and
+  customer / ticket / appointment records are deleted only by hand on a
+  business's request. There is no self-serve erasure path yet.
 - **Voice line provisioning has no UI** — it is done with the operator CLI
   (`python -m app.cli.voice_lines`, `docs/PILOT_LAUNCH.md` §5), never by
   hand-written SQL.

@@ -13,6 +13,7 @@ from app.api.v1.endpoints import (
     paging,
     public,
     team,
+    usage,
     vapi_webhooks,
     version,
     voice,
@@ -34,3 +35,4 @@ api_router.include_router(team.router)
 api_router.include_router(organizations.router)
 api_router.include_router(paging.router)
 api_router.include_router(public.router)
+api_router.include_router(usage.router)

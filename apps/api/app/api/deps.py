@@ -35,6 +35,7 @@ from app.application.services.notification_settings_service import (
 from app.application.services.organization_service import OrganizationService
 from app.application.services.paging_settings_service import PagingSettingsService
 from app.application.services.team_service import TeamService
+from app.application.services.usage_report_service import UsageReportService
 from app.application.services.voice_service import VoiceService
 from app.application.services.voice_tool_executor import VoiceToolExecutor
 from app.core.config import Settings, get_settings
@@ -90,6 +91,9 @@ from app.infrastructure.database.repositories.disclosure_repository_impl import 
 from app.infrastructure.database.repositories.paging_repository_impl import (
     SqlAlchemyEmergencyPageRepository,
     SqlAlchemyPagingSettingsRepository,
+)
+from app.infrastructure.database.repositories.usage_report_repository_impl import (
+    SqlAlchemyUsageReportRepository,
 )
 from app.infrastructure.database.repositories.usage_repository_impl import (
     SqlAlchemyCallUsageRepository,
@@ -302,6 +306,10 @@ def get_customer_service(
         # The business's country, for staff-entered national-format numbers.
         business_profile_repository=SqlAlchemyBusinessProfileRepository(db),
     )
+
+
+def get_usage_report_service(db: AsyncSession = Depends(get_db)) -> UsageReportService:
+    return UsageReportService(usage_report_repository=SqlAlchemyUsageReportRepository(db))
 
 
 def get_lead_service(db: AsyncSession = Depends(get_db)) -> LeadService:
