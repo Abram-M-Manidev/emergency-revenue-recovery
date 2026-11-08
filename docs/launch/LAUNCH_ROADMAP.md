@@ -41,12 +41,16 @@ billing or charging exists or was added.
 
 ## 3. Remaining engineering (not blocking a controlled pilot)
 
-- Triage risk question for heat/cool loss with vulnerable occupants (audit B4)
-  and deterministic hazard floor on classification (audit B5): prompt/code
-  changes with tests — high value, ~2 days.
-- Voice style rules (shorter turns, one question per turn) — audit B2.
-- Callback follow-up when no availability is found — audit B8.
-- Dashboard page for the usage report (API exists).
+Done 2026-11-08 (second pass): dev DB migrated to `3d4e5f6a7b8c` (backup
+verified first); hazard floor (B5: a reported hazard always records an
+emergency, in the tool and the outcome, with the hazard named on the
+ticket); urgency triage and speaking-style rules (B4, B2: prompt only —
+needs real-call validation); callback follow-up for requests with no
+booked time (B8); Usage section on the Analytics page.
+
+Still open:
+- Real-call validation of the B2/B4 prompt changes (they are instructions
+  to the model; only calls show whether it follows them).
 - Self-serve data export/erasure for businesses.
 - Reschedule/cancel by phone; calendar/FSM integrations.
 

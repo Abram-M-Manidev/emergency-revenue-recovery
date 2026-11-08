@@ -12,6 +12,7 @@ import { useToast } from "@/hooks/use-toast";
 import { BreakdownBarChart } from "./breakdown-bar-chart";
 import { StatCard } from "./stat-card";
 import { TrendChart } from "./trend-chart";
+import { UsageSection } from "./usage-section";
 
 const RANGE_OPTIONS: { value: DateRangePreset; label: string }[] = [
   { value: "today", label: "Today" },
@@ -162,6 +163,8 @@ export function AnalyticsDashboard() {
           </div>
         </>
       )}
+
+      <UsageSection />
     </div>
   );
 }
