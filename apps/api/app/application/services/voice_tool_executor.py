@@ -617,8 +617,20 @@ class VoiceToolExecutor(ToolExecutorFactory):
         # nothing, the assistant reported nothing, and the conversation
         # stalled — while three slots existed the following working day.
         # Widening once, and saying so, turns that into a real choice.
+        #
+        # Any narrowing counts, not just a named day. On the 2026-10-31 test
+        # call the model asked for `days_to_search=3` on a Friday evening:
+        # Friday's hours were over and the weekend is closed, so it found
+        # nothing and told the caller so — while the default search found
+        # three Monday slots on every turn of the same call.
         widened = False
-        if not result.slots and (preferred_date is not None or query.earliest_time is not None):
+        narrowed = (
+            preferred_date is not None
+            or query.earliest_time is not None
+            or query.latest_time is not None
+            or query.days_to_search is not None
+        )
+        if not result.slots and narrowed:
             # Every constraint is dropped, including `days_to_search`. A
             # caller asking about one specific day usually makes the model
             # narrow the window to that day, and inheriting that narrowing
@@ -661,11 +673,16 @@ class VoiceToolExecutor(ToolExecutorFactory):
             # turn later and actually get booked — without this, the model
             # had no identifier it could still quote and simply re-offered
             # the same list indefinitely.
+            #
+            # Selection comes before booking. This used to say "call
+            # book_appointment right away", which skips the step the system
+            # prompt requires and that `book_for_conversation` enforces — so
+            # following it earned a SLOT_NOT_SELECTED refusal and a wasted turn.
             payload["next_step"] = (
-                "Offer these to the caller with their dates. When they choose "
-                "one, call book_appointment right away — with slot_id if you "
-                "still have it this turn, otherwise with the chosen slot's "
-                "date and start_time."
+                "Offer these to the caller with their dates, then stop and let "
+                "them answer. When they choose one, call select_appointment_slot "
+                "for that time, then book_appointment for the same time, using "
+                "the chosen slot's date and start_time."
             )
             if widened:
                 # Said explicitly so the assistant does not present these as
@@ -674,11 +691,16 @@ class VoiceToolExecutor(ToolExecutorFactory):
                 payload["widened_from"] = (
                     preferred_date.isoformat() if preferred_date else None
                 )
+                # The narrowing may have been the model's own (the 2026-10-31
+                # `days_to_search=3`), so it must not tell the caller they
+                # asked for a window they never mentioned.
                 payload["next_step"] = (
-                    "Nothing was free in the window the caller asked for, so "
-                    "this is the nearest availability instead. Tell them that "
-                    "plainly, offer these times with their dates, and book "
-                    "whichever they choose."
+                    "Nothing was free in the window you searched, so this is "
+                    "the nearest availability instead. If the caller asked for "
+                    "that day or time, tell them plainly it was not free. Offer "
+                    "these times with their dates, then stop and let them "
+                    "answer. When they choose one, call select_appointment_slot "
+                    "for it, then book_appointment for the same time."
                 )
         if not slots:
             # An empty list is a real answer, not a failure — but the

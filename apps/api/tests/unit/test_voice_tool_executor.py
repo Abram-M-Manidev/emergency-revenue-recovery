@@ -114,6 +114,7 @@ class _Harness:
         self,
         *,
         notification_status: DeliveryStatus | None = None,
+        weekly_hours: list[WeeklyHours] | None = None,
         **setting_overrides: object,
     ) -> None:
         self.settings = fake_settings(**setting_overrides)
@@ -127,7 +128,7 @@ class _Harness:
         self.offered_slots = FakeOfferedSlotRepository()
         self.services = FakeServiceRepository([_AC_REPAIR])
         self.profiles = FakeBusinessProfileRepository(_profile())
-        self.hours = FakeBusinessHoursRepository(_standard_week())
+        self.hours = FakeBusinessHoursRepository(weekly_hours or _standard_week())
 
         self.availability = DatabaseAvailabilityProvider(
             appointment_repository=self.appointments,
@@ -277,15 +278,15 @@ def _profile() -> BusinessProfile:
     )
 
 
-def _standard_week() -> list[WeeklyHours]:
+def _standard_week(closed_days: frozenset[int] = frozenset({6})) -> list[WeeklyHours]:
     return [
         WeeklyHours(
             id=uuid.uuid4(),
             organization_id=_ORG_ID,
             day_of_week=day,
-            is_closed=day == 6,
-            open_time=None if day == 6 else time(8, 0),
-            close_time=None if day == 6 else time(17, 0),
+            is_closed=day in closed_days,
+            open_time=None if day in closed_days else time(8, 0),
+            close_time=None if day in closed_days else time(17, 0),
         )
         for day in range(7)
     ]
@@ -922,6 +923,96 @@ async def test_an_unconstrained_search_that_finds_nothing_does_not_claim_to_have
 
     assert result["slots"] == []
     assert "widened_search" not in result
+
+
+@pytest.mark.asyncio
+async def test_a_narrowed_days_to_search_with_nothing_free_widens_and_stays_bookable():
+    """The 2026-10-31 test call. The model asked for `days_to_search=3` on a
+    Friday evening, when Friday's hours were over and the weekend is closed.
+    It found nothing, told the caller nothing was free, and the caller hung
+    up, while the default search found three Monday slots on every turn.
+
+    Here Monday (today) and Tuesday are closed, so a two-day window is empty
+    and the next opening is Wednesday. The widened times must also be
+    recorded as offers, or the caller could choose one and never get it
+    booked."""
+    harness = _Harness(weekly_hours=_standard_week(closed_days=frozenset({0, 1, 6})))
+    request = await harness.call_at(_TURN_INDEX, CREATE_SERVICE_REQUEST.name, **_LUCKY)
+    assert request["success"] is True
+
+    offer = await harness.call_at(_TURN_INDEX, CHECK_AVAILABILITY.name, days_to_search=2)
+
+    assert offer["slots"], "expected the widened search to find the next open day"
+    assert offer["widened_search"] is True
+    # No day was asked for, so none is named as the one that was empty.
+    assert offer["widened_from"] is None
+    assert {slot["date"] for slot in offer["slots"]} == {"2026-08-26"}
+
+    chosen = offer["slots"][0]
+    selected = await harness.call_at(
+        _TURN_INDEX + 2,
+        SELECT_APPOINTMENT_SLOT.name,
+        slot_id=None,
+        date=chosen["date"],
+        start_time=chosen["start_time"],
+    )
+    assert selected["success"] is True
+    booked = await harness.call_at(
+        _TURN_INDEX + 2,
+        BOOK_APPOINTMENT.name,
+        slot_id=None,
+        date=chosen["date"],
+        start_time=chosen["start_time"],
+    )
+    assert booked["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_latest_time_before_opening_widens_to_the_nearest_times():
+    harness = _Harness()
+
+    result = await harness.call(CHECK_AVAILABILITY.name, latest_time="07:00")
+
+    assert result["slots"]
+    assert result["widened_search"] is True
+
+
+@pytest.mark.asyncio
+async def test_a_narrowed_search_with_nothing_anywhere_does_not_claim_to_have_widened():
+    harness = _Harness()
+    user_id = uuid.uuid4()
+    await harness.technicians.create(
+        organization_id=_ORG_ID, user_id=user_id, phone_number="+15550001111"
+    )
+    await harness.technicians.set_on_call(_ORG_ID, user_id, False)
+
+    result = await harness.call(CHECK_AVAILABILITY.name, days_to_search=3)
+
+    assert result["slots"] == []
+    assert "widened_search" not in result
+    assert result["reason"] == "NO_SLOTS_IN_RANGE"
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [{}, {"preferred_date": "2026-08-30", "days_to_search": 1}],
+    ids=["direct", "widened"],
+)
+@pytest.mark.asyncio
+async def test_availability_guidance_selects_the_time_before_booking_it(arguments):
+    """The guidance used to say "call book_appointment right away", which
+    skips `select_appointment_slot` — the step the system prompt requires and
+    booking enforces — and so earned a SLOT_NOT_SELECTED refusal."""
+    harness = _Harness()
+
+    result = await harness.call(CHECK_AVAILABILITY.name, **arguments)
+
+    guidance = result["next_step"]
+    assert result["slots"]
+    assert "right away" not in guidance
+    assert "select_appointment_slot" in guidance
+    assert guidance.index("select_appointment_slot") < guidance.index("book_appointment")
+    assert "let them answer" in guidance
 
 
 # --- Call progress (what the model is told it has already done) --------------
