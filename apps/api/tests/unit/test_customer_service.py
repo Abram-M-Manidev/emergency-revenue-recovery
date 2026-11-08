@@ -46,7 +46,7 @@ async def _seed_outcome(
     conversation_id,
     *,
     recommended_action=RecommendedAction.ANSWER_FAQ,
-    customer_phone="+15551234567",
+    customer_phone="+16305550147",
     customer_name="Jane Doe",
     customer_address="123 Main St",
 ):
@@ -100,7 +100,7 @@ async def test_sync_creates_customer_regardless_of_recommended_action():
 
     assert customer is not None
     assert customer.full_name == "Jane Doe"
-    assert customer.phone_number == "+15551234567"
+    assert customer.phone_number == "+16305550147"
     assert customer.address == "123 Main St"
 
 
@@ -246,7 +246,7 @@ async def test_backfill_never_modifies_phone_email_or_notes():
     existing = await service.create_customer(
         _ORG_ID,
         full_name=None,
-        phone_number="+15551234567",
+        phone_number="+16305550147",
         email="jane@example.com",
         address=None,
         notes="VIP account - do not auto-edit",
@@ -256,7 +256,7 @@ async def test_backfill_never_modifies_phone_email_or_notes():
     await _seed_outcome(
         outcomes,
         conversation_id,
-        customer_phone="+15551234567",
+        customer_phone="+16305550147",
         customer_name="Lucky",
         customer_address="16th Street, California",
     )
@@ -267,7 +267,7 @@ async def test_backfill_never_modifies_phone_email_or_notes():
     assert updated.full_name == "Lucky"
     assert updated.address == "16th Street, California"
     # ...while the three excluded fields are untouched.
-    assert updated.phone_number == "+15551234567"
+    assert updated.phone_number == "+16305550147"
     assert updated.email == "jane@example.com"
     assert updated.notes == "VIP account - do not auto-edit"
     # The repository is never even offered the excluded fields.
@@ -301,7 +301,7 @@ async def test_sync_links_existing_ticket_and_appointment_for_the_conversation()
         conversation_id=conversation_id,
         matched_service_id=None,
         customer_name="Jane Doe",
-        customer_phone="+15551234567",
+        customer_phone="+16305550147",
         customer_address="123 Main St",
         summary="Emergency.",
     )
@@ -310,7 +310,7 @@ async def test_sync_links_existing_ticket_and_appointment_for_the_conversation()
         conversation_id=conversation_id,
         matched_service_id=None,
         customer_name="Jane Doe",
-        customer_phone="+15551234567",
+        customer_phone="+16305550147",
         customer_address="123 Main St",
         summary="Wants a tune-up.",
         duration_minutes=None,
@@ -336,7 +336,7 @@ async def test_sync_does_not_relink_already_linked_ticket():
         conversation_id=conversation_id,
         matched_service_id=None,
         customer_name="Jane Doe",
-        customer_phone="+15551234567",
+        customer_phone="+16305550147",
         customer_address="123 Main St",
         summary="Emergency.",
     )
@@ -370,7 +370,7 @@ async def test_get_customer_history_composes_tickets_and_appointments():
         conversation_id=conversation_id,
         matched_service_id=None,
         customer_name="Jane Doe",
-        customer_phone="+15551234567",
+        customer_phone="+16305550147",
         customer_address="123 Main St",
         summary="Emergency.",
     )
@@ -379,7 +379,7 @@ async def test_get_customer_history_composes_tickets_and_appointments():
         conversation_id=conversation_id,
         matched_service_id=None,
         customer_name="Jane Doe",
-        customer_phone="+15551234567",
+        customer_phone="+16305550147",
         customer_address="123 Main St",
         summary="Wants a tune-up.",
         duration_minutes=None,
@@ -401,7 +401,7 @@ async def test_create_customer_manually():
     service, customers, _, _, _ = _make_service()
 
     customer = await service.create_customer(
-        _ORG_ID, full_name="Walk-in Wanda", phone_number="+15559876543"
+        _ORG_ID, full_name="Walk-in Wanda", phone_number="+16305550176"
     )
 
     assert customer.full_name == "Walk-in Wanda"
@@ -411,24 +411,24 @@ async def test_create_customer_manually():
 @pytest.mark.asyncio
 async def test_create_customer_with_duplicate_phone_raises():
     service, _, _, _, _ = _make_service()
-    await service.create_customer(_ORG_ID, full_name="First", phone_number="+15559876543")
+    await service.create_customer(_ORG_ID, full_name="First", phone_number="+16305550176")
 
     with pytest.raises(EntityAlreadyExistsError):
-        await service.create_customer(_ORG_ID, full_name="Second", phone_number="+15559876543")
+        await service.create_customer(_ORG_ID, full_name="Second", phone_number="+16305550176")
 
 
 @pytest.mark.asyncio
 async def test_update_customer():
     service, _, _, _, _ = _make_service()
     customer = await service.create_customer(
-        _ORG_ID, full_name="Walk-in Wanda", phone_number="+15559876543"
+        _ORG_ID, full_name="Walk-in Wanda", phone_number="+16305550176"
     )
 
     updated = await service.update_customer(
         _ORG_ID,
         customer.id,
         full_name="Wanda Walker",
-        phone_number="+15559876543",
+        phone_number="+16305550176",
         email="wanda@example.com",
         address="1 Elm St",
         notes="Prefers morning appointments.",

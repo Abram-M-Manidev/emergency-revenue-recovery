@@ -12,6 +12,7 @@ to prevent.
 from __future__ import annotations
 
 import uuid
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,6 +26,7 @@ from app.domain.entities.conversation_outcome import (
 from app.shared.utils.phone import normalize_phone_number
 from tests.fakes import (
     FakeAppointmentRepository,
+    FakeBusinessProfileRepository,
     FakeCallerIdentityRepository,
     FakeConversationOutcomeRepository,
     FakeConversationRepository,
@@ -98,11 +100,14 @@ def test_different_numbers_never_collapse_together():
 
 
 # --- The deduplication it repairs --------------------------------------------
+#
+# Since Phase 2 the key is the validated E.164 number, not the digits. The
+# business's country decides how a national-format number is read.
 
 
-def _make_customer_service() -> tuple[
-    CustomerService, FakeCustomerRepository, FakeConversationOutcomeRepository
-]:
+def _make_customer_service(
+    country: str | None = "US",
+) -> tuple[CustomerService, FakeCustomerRepository, FakeConversationOutcomeRepository]:
     conversations = FakeConversationRepository()
     outcomes = FakeConversationOutcomeRepository(conversations)
     customers = FakeCustomerRepository()
@@ -112,6 +117,9 @@ def _make_customer_service() -> tuple[
         emergency_ticket_repository=FakeEmergencyTicketRepository(),
         appointment_repository=FakeAppointmentRepository(),
         caller_identity_repository=FakeCallerIdentityRepository(customers),
+        business_profile_repository=FakeBusinessProfileRepository(
+            SimpleNamespace(country=country)  # type: ignore[arg-type]
+        ),
     )
     return service, customers, outcomes
 
@@ -134,15 +142,15 @@ async def _record_outcome(
 
 @pytest.mark.asyncio
 async def test_two_spellings_of_one_number_across_turns_produce_one_customer():
-    """The regression itself: turn 3 spelled the number out, turn 4 did
+    """The 2026-08-22 regression: turn 3 spelled the number out, turn 4 did
     not."""
     service, customers, outcomes = _make_customer_service()
     conversation_id = uuid.uuid4()
 
-    await _record_outcome(outcomes, conversation_id, "1 2 3 4 5 6 7 8 9")
+    await _record_outcome(outcomes, conversation_id, "6 3 0 5 5 5 0 1 8 4")
     first = await service.sync_customer_from_outcome(_ORG_ID, conversation_id)
 
-    await _record_outcome(outcomes, conversation_id, "123456789")
+    await _record_outcome(outcomes, conversation_id, "+1 630 555 0184")
     second = await service.sync_customer_from_outcome(_ORG_ID, conversation_id)
 
     assert first is not None and second is not None
@@ -151,7 +159,7 @@ async def test_two_spellings_of_one_number_across_turns_produce_one_customer():
 
 
 @pytest.mark.asyncio
-async def test_the_stored_key_is_the_canonical_form():
+async def test_the_stored_key_is_e164():
     service, customers, outcomes = _make_customer_service()
     conversation_id = uuid.uuid4()
     await _record_outcome(outcomes, conversation_id, "(630) 555-0184")
@@ -159,8 +167,7 @@ async def test_the_stored_key_is_the_canonical_form():
     customer = await service.sync_customer_from_outcome(_ORG_ID, conversation_id)
 
     assert customer is not None
-    assert customer.phone_number == "6305550184"
-    assert await customers.get_by_phone_number(_ORG_ID, "6305550184") is not None
+    assert customer.phone_number == "+16305550184"
 
 
 @pytest.mark.asyncio
@@ -174,12 +181,76 @@ async def test_a_repeat_caller_on_a_later_call_matches_the_same_record():
     original = await service.sync_customer_from_outcome(_ORG_ID, first_call)
 
     second_call = uuid.uuid4()
-    await _record_outcome(outcomes, second_call, "6305550184")
+    await _record_outcome(outcomes, second_call, "+16305550184")
     returning = await service.sync_customer_from_outcome(_ORG_ID, second_call)
 
     assert original is not None and returning is not None
     assert original.id == returning.id
     assert len(customers._customers) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("legacy_key", ["6305550184", "16305550184", "+16305550184"])
+async def test_a_customer_keyed_before_e164_is_matched_not_duplicated(legacy_key: str):
+    """A record created before validation keeps its old digits-only key.
+    The returning caller is matched to it rather than given a second record,
+    and nothing about the old record is rewritten or merged."""
+    service, customers, outcomes = _make_customer_service()
+    legacy = await customers.create(
+        organization_id=_ORG_ID, full_name="Lucky", phone_number=legacy_key, address=None
+    )
+    conversation_id = uuid.uuid4()
+    await _record_outcome(outcomes, conversation_id, "+16305550184")
+
+    matched = await service.sync_customer_from_outcome(_ORG_ID, conversation_id)
+
+    assert matched is not None and matched.id == legacy.id
+    assert matched.phone_number == legacy_key
+    assert len(customers._customers) == 1
+
+
+@pytest.mark.asyncio
+async def test_the_nine_digit_number_of_2026_10_31_creates_no_customer():
+    """The caller said nine digits. That is not a number anyone can call
+    back, so it must not become the key of a (second) customer record."""
+    service, customers, outcomes = _make_customer_service()
+    conversation_id = uuid.uuid4()
+    await _record_outcome(outcomes, conversation_id, "630555018")
+
+    assert await service.sync_customer_from_outcome(_ORG_ID, conversation_id) is None
+    assert customers._customers == {}
+
+
+@pytest.mark.asyncio
+async def test_without_a_country_only_an_international_number_is_a_key():
+    """No default country is invented: a national-format number for a
+    business with no country cannot be read, so it creates nothing."""
+    service, customers, outcomes = _make_customer_service(country=None)
+
+    national = uuid.uuid4()
+    await _record_outcome(outcomes, national, "6305550184")
+    assert await service.sync_customer_from_outcome(_ORG_ID, national) is None
+
+    international = uuid.uuid4()
+    await _record_outcome(outcomes, international, "+44 7400 123456")
+    customer = await service.sync_customer_from_outcome(_ORG_ID, international)
+    assert customer is not None and customer.phone_number == "+447400123456"
+
+
+@pytest.mark.asyncio
+async def test_the_same_number_in_two_tenants_is_two_customers():
+    service, customers, outcomes = _make_customer_service()
+    other_org = uuid.uuid4()
+    first, second = uuid.uuid4(), uuid.uuid4()
+    await _record_outcome(outcomes, first, "+16305550184")
+    await _record_outcome(outcomes, second, "+16305550184")
+
+    mine = await service.sync_customer_from_outcome(_ORG_ID, first)
+    theirs = await service.sync_customer_from_outcome(other_org, second)
+
+    assert mine is not None and theirs is not None
+    assert mine.id != theirs.id
+    assert mine.organization_id == _ORG_ID and theirs.organization_id == other_org
 
 
 @pytest.mark.asyncio
@@ -195,8 +266,6 @@ async def test_an_unusable_phone_number_creates_no_customer():
 
 @pytest.mark.asyncio
 async def test_a_missing_phone_number_still_creates_no_customer():
-    """Pre-existing behaviour, retained: this used to be an `is None` check
-    and must not have been widened by the normalisation."""
     service, customers, outcomes = _make_customer_service()
     conversation_id = uuid.uuid4()
     await _record_outcome(outcomes, conversation_id, None)
@@ -246,10 +315,27 @@ def test_an_unusable_report_keeps_the_number_already_known():
 
 
 def test_a_usable_report_still_corrects_what_is_stored():
-    """The successful pilot path: a number that canonicalises wins, including
-    over an earlier one."""
-    assert _phone_to_persist("6 3 0 5 5 5 0 1 8 4", already_stored="123456789") == "6305550184"
-    assert _phone_to_persist("123456789", already_stored=None) == "123456789"
+    """The successful pilot path: a valid number wins, including over an
+    earlier one, and is stored in E.164."""
+    assert (
+        _phone_to_persist("6 3 0 5 5 5 0 1 8 4", already_stored="+16305550111", region="US")
+        == "+16305550184"
+    )
+    assert _phone_to_persist("+44 7400 123456", already_stored=None) == "+447400123456"
+
+
+def test_an_incomplete_report_never_replaces_a_valid_number():
+    """The 2026-10-31 nine digits: not stored, and not allowed to displace a
+    number the caller already gave."""
+    assert (
+        _phone_to_persist("630555018", already_stored="+16305550184", region="US")
+        == "+16305550184"
+    )
+    assert _phone_to_persist("630555018", already_stored=None, region="US") is None
+
+
+def test_a_national_number_without_a_business_country_is_not_guessed():
+    assert _phone_to_persist("6305550184", already_stored=None, region=None) is None
 
 
 def test_nothing_longer_than_the_column_is_ever_returned():

@@ -79,7 +79,7 @@ def _ticket(organization_id: uuid.UUID = _ORG_ID) -> EmergencyTicket:
         matched_service_id=None,
         status=TicketStatus.NEW,
         customer_name="Frank",
-        customer_phone="5550001111",
+        customer_phone="6305550111",
         customer_address="11 69 Street",
         summary="Smell of gas near the furnace.",
         assigned_technician_user_id=None,
@@ -506,7 +506,7 @@ def test_the_webhook_payload_carries_the_job_but_not_the_transcript():
 
     # What a dispatcher needs to act.
     assert "Smell of gas" in str(payload["text"])
-    assert payload["customer_phone"] == "5550001111"
+    assert payload["customer_phone"] == "6305550111"
     assert payload["customer_address"] == "11 69 Street"
     assert payload["event"] == "emergency_ticket_created"
     # Stable dedupe key, derived from the ticket rather than the attempt.
@@ -617,7 +617,7 @@ class _ToolHarness:
                 name=CREATE_SERVICE_REQUEST.name,
                 arguments={
                     "customer_name": "Frank",
-                    "customer_phone": "5550001111",
+                    "customer_phone": "+16305550111",
                     "service_address": "11 69 Street",
                     "problem_description": "Smell of gas near the furnace.",
                     "classification": "emergency",

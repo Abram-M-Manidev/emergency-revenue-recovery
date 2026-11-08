@@ -41,10 +41,8 @@ from tests.fakes import (
     FakeAIProvider,
     FakeBusinessHoursRepository,
     FakeBusinessProfileRepository,
-    FakeCallerIdentityRepository,
     FakeConversationOutcomeRepository,
     FakeConversationRepository,
-    FakeCustomerRepository,
     FakeEmergencyKeywordRepository,
     FakeFAQRepository,
     FakeOrganizationRepository,
@@ -133,9 +131,6 @@ class _Harness:
             faq_repository=FakeFAQRepository(),
             emergency_keyword_repository=FakeEmergencyKeywordRepository(),
             settings=settings,
-            caller_identity_repository=FakeCallerIdentityRepository(
-                FakeCustomerRepository()
-            ),
         )
         self.voice = VoiceService(
             voice_line_repository=FakeVoiceLineRepository(
@@ -156,7 +151,7 @@ class _Harness:
             vapi_call_id=f"call_{uuid.uuid4().hex[:8]}",
             assistant_id=assistant_id,
             phone_number_id=None,
-            customer_number="+15551230000",
+            customer_number="+16305550100",
             customer_utterance="My furnace has stopped working.",
         )
 
@@ -166,7 +161,7 @@ class _Harness:
             vapi_call_id=f"call_{uuid.uuid4().hex[:8]}",
             assistant_id=assistant_id,
             phone_number_id=None,
-            customer_number="+15551230000",
+            customer_number="+16305550100",
             customer_utterance="My furnace has stopped working.",
         ):
             if isinstance(event, VoiceTextDelta):

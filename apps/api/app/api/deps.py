@@ -293,6 +293,11 @@ def get_customer_service(
         # P5: association capture only — C1's field rules are untouched.
         caller_identity_repository=SqlAlchemyCallerIdentityRepository(db),
         savepoints=SqlAlchemySavepoints(db),
+        # So a caller's correction updates a customer record created on the
+        # same call, and only that one.
+        conversation_repository=SqlAlchemyConversationRepository(db),
+        # The business's country, for staff-entered national-format numbers.
+        business_profile_repository=SqlAlchemyBusinessProfileRepository(db),
     )
 
 
@@ -409,9 +414,6 @@ def get_ai_brain_service(
         faq_repository=SqlAlchemyFAQRepository(db),
         emergency_keyword_repository=SqlAlchemyEmergencyKeywordRepository(db),
         settings=settings,
-        # P5: known-caller grounding. Read-only; a lookup failure degrades
-        # to an unrecognised caller rather than failing the turn.
-        caller_identity_repository=SqlAlchemyCallerIdentityRepository(db),
         # Business tools. Gated at the service by `AI_TOOLS_ENABLED`, so
         # passing the factory here does not by itself turn them on.
         tool_executor_factory=tool_executor_factory,

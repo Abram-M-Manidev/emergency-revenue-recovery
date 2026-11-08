@@ -98,7 +98,7 @@ _AC_REPAIR = Service(
 # call, so these tests read as a replay of it.
 _LUCKY = {
     "customer_name": "Lucky",
-    "customer_phone": "123456789",
+    "customer_phone": "6305550184",
     "service_address": "16th Street, California",
     "problem_description": "AC is running but not cooling the house.",
     "classification": "non_emergency",
@@ -312,10 +312,10 @@ async def test_create_service_request_creates_a_real_appointment_and_customer():
     assert appointment is not None
     assert str(appointment.id) == result["service_request_id"]
     # The contact details the 2026-08-22 appointment was missing.
-    assert appointment.customer_phone == "123456789"
+    assert appointment.customer_phone == "+16305550184"  # validated to E.164
     assert appointment.customer_address == "16th Street, California"
     # And it is linked to a real, deduplicable customer record.
-    customer = await harness.customers.get_by_phone_number(_ORG_ID, "123456789")
+    customer = await harness.customers.get_by_phone_number(_ORG_ID, "+16305550184")
     assert customer is not None
     assert appointment.customer_id == customer.id
 

@@ -64,13 +64,13 @@ from app.main import app, fastapi_app
 from tests.fakes import ScriptedToolAIProvider, default_reply
 
 _SECRET = "test-vapi-secret-turn-integrity"
-_CALLER_ID = "+15551230000"
+_CALLER_ID = "+16305550100"
 # The exact string the live model produced on 2026-09-24.
 _SPOKEN_PHONE = "one two three four five six seven eight nine"
 
 _EMERGENCY = {
     "customer_name": "Dana",
-    "customer_phone": "6305550184",
+    "customer_phone": "+16305550184",
     "service_address": "12 Elm Street, Lisle",
     "problem_description": "Smoke is coming from the furnace.",
     "classification": "emergency",
@@ -336,9 +336,9 @@ async def test_a_spoken_phone_number_in_the_tool_call_cannot_roll_back_the_turn(
     on 2026-09-24, still present in the tool. 44 characters into varchar(32)
     aborted the transaction and the turn vanished.
 
-    Now the number the call is coming from is used, the request is created,
-    and the result says where the number came from so the assistant can
-    confirm it with the caller."""
+    Phase 2 reversed the next fix, which silently used the caller ID instead:
+    the caller meant to give a number, so the tool refuses it and the
+    assistant asks again. What must still hold is that the turn survives."""
     provider = ScriptedToolAIProvider()
     _Holder.provider = provider
     _, _, assistant_id = await _organization(client, "Spoken Tool Phone")
@@ -366,14 +366,14 @@ async def test_a_spoken_phone_number_in_the_tool_call_cannot_roll_back_the_turn(
     )
     assert response.status_code == 200, response.text
 
-    created = provider.results[0].content
-    assert created["success"] is True, created
-    assert created["callback_number_source"] == "caller_id"
+    refused = provider.results[0].content
+    assert refused["success"] is False, refused
+    assert refused["error"] == "INVALID_PHONE_NUMBER"
+    assert refused["phone_problem"] == "missing"
 
     conversation_id = await _conversation_for_call(call_id)
-    appointment = await _appointment(conversation_id)
-    assert appointment is not None
-    assert appointment.customer_phone == _CALLER_ID
+    # Not swapped for the caller ID behind the caller's back.
+    assert await _appointment(conversation_id) is None
     # The turn itself persisted: both halves of the exchange.
     assert await _message_count(conversation_id) == 2
 
@@ -414,7 +414,7 @@ async def test_an_unusable_number_with_no_caller_id_is_asked_for_not_invented(
     assert response.status_code == 200, response.text
     refused = provider.results[0].content
     assert refused["success"] is False
-    assert refused["missing_fields"] == ["customer_phone"]
+    assert refused["error"] == "INVALID_PHONE_NUMBER"
     assert "digits" in refused["detail"]
 
     conversation_id = await _conversation_for_call(call_id)
@@ -437,7 +437,7 @@ async def test_over_long_names_and_addresses_are_bounded_not_fatal(client: Async
                 "create_service_request",
                 {
                     "customer_name": long_name,
-                    "customer_phone": "6305550184",
+                    "customer_phone": "+16305550184",
                     "service_address": long_address,
                     "problem_description": "No heat.",
                     "classification": "non_emergency",
@@ -509,8 +509,13 @@ async def test_an_emergency_ticket_exists_before_the_name_and_address_are_known(
     created = provider.results[0].content
     assert created["success"] is True, created
     assert created["service_request_type"] == "emergency_ticket"
-    assert created["callback_number_source"] == "caller_id"
-    assert sorted(created["still_needed"]) == ["customer_name", "service_address"]
+    # The ticket goes ahead on the caller ID, which nobody has confirmed yet.
+    assert created["callback_number_source"] == "caller_id_unconfirmed"
+    assert sorted(created["still_needed"]) == [
+        "customer_name",
+        "customer_phone",
+        "service_address",
+    ]
 
     conversation_id = await _conversation_for_call(call_id)
     ticket = await _ticket(conversation_id)
@@ -533,7 +538,7 @@ async def test_an_emergency_ticket_exists_before_the_name_and_address_are_known(
     ticket = await _ticket(conversation_id)
     assert ticket.customer_name == "Dana"
     assert ticket.customer_address == "12 Elm Street, Lisle"
-    assert ticket.customer_phone == "6305550184"
+    assert ticket.customer_phone == "+16305550184"
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -683,7 +688,7 @@ async def test_a_failed_post_turn_sync_keeps_the_turn_and_the_ticket(
             message_to_customer="Your emergency has been logged.",
             classification=CallClassification.EMERGENCY,
             recommended_action=RecommendedAction.CREATE_EMERGENCY_TICKET,
-            customer_phone="6305550184",
+            customer_phone="+16305550184",
             is_conversation_complete=True,
         )
     )
@@ -869,13 +874,13 @@ async def test_an_emergency_opened_without_the_tool_still_gets_a_callback_number
     assert ticket is not None
     assert ticket.customer_phone == _CALLER_ID
 
-    provider.queue_reply(emergency_reply("6305550184"))
+    provider.queue_reply(emergency_reply("+16305550184"))
     await _turn(client, call_id=call_id, assistant_id=assistant_id, utterance="630 555 0184")
-    assert (await _ticket(conversation_id)).customer_phone == "6305550184"
+    assert (await _ticket(conversation_id)).customer_phone == "+16305550184"
 
     provider.queue_reply(emergency_reply(None))
     await _turn(client, call_id=call_id, assistant_id=assistant_id, utterance="Please hurry.")
-    assert (await _ticket(conversation_id)).customer_phone == "6305550184"
+    assert (await _ticket(conversation_id)).customer_phone == "+16305550184"
 
 
 @pytest.mark.asyncio(loop_scope="session")

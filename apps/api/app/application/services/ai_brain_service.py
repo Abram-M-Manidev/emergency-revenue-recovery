@@ -43,7 +43,6 @@ from app.domain.entities.conversation_outcome import (
 )
 from app.domain.entities.emergency_keyword import EmergencyKeyword
 from app.domain.entities.faq_entry import FAQEntry
-from app.domain.entities.known_caller import KnownCaller
 from app.domain.entities.service import Service
 from app.domain.entities.service_area import ServiceArea
 from app.domain.exceptions import (
@@ -63,7 +62,6 @@ from app.domain.life_safety import (
 )
 from app.domain.repositories.business_hours_repository import BusinessHoursRepository
 from app.domain.repositories.business_profile_repository import BusinessProfileRepository
-from app.domain.repositories.caller_identity_repository import CallerIdentityRepository
 from app.domain.repositories.conversation_outcome_repository import ConversationOutcomeRepository
 from app.domain.repositories.conversation_repository import ConversationRepository
 from app.domain.repositories.disclosure_repository import DisclosureSettingsRepository
@@ -75,7 +73,7 @@ from app.domain.repositories.usage_repository import LLMUsageRepository
 from app.domain.transactions import NullSavepoints, Savepoints
 from app.domain.turn_delivery import delivered_once_owed, model_history
 from app.shared.logging.timing import elapsed_ms, now
-from app.shared.utils.phone import storable_phone_number
+from app.shared.utils.phone import region_for_country, valid_phone_number
 
 from .prompt_builder import build_system_prompt
 
@@ -158,10 +156,6 @@ class AIBrainService:
         faq_repository: FAQRepository,
         emergency_keyword_repository: EmergencyKeywordRepository,
         settings: Settings,
-        # Optional so the text/simulation path, and every existing
-        # construction site, are unaffected: without it P5 grounding is
-        # simply never attempted.
-        caller_identity_repository: CallerIdentityRepository | None = None,
         # Optional for the same reason: without a factory the AI Brain
         # offers no tools and behaves exactly as it did before they existed
         # — a one-line rollback if a live call ever regresses.
@@ -188,7 +182,6 @@ class AIBrainService:
         self._faqs = faq_repository
         self._emergency_keywords = emergency_keyword_repository
         self._settings = settings
-        self._caller_identities = caller_identity_repository
         self._tool_executors = tool_executor_factory
         self._savepoints = savepoints or NullSavepoints()
         self._disclosure_settings = disclosure_settings_repository
@@ -406,7 +399,13 @@ class AIBrainService:
             instruction_given=safety_instruction(all_hazards, emergency_number=emergency_number),
         )
 
-        known_caller = await self._resolve_known_caller(conversation)
+        # No known-caller grounding. It used to place the name on file for
+        # the calling number in the prompt and tell the model an address
+        # existed, and on 2026-10-31 the model told the caller "I have a
+        # record for this phone number". A caller ID can be spoofed, so
+        # whether a number is known, and anything stored against it, stays
+        # in the backend: the customer sync still matches returning callers
+        # by the number they give.
         tool_progress = await self._describe_tool_progress(organization_id, conversation_id)
         system_prompt = build_system_prompt(
             profile=profile,
@@ -418,7 +417,6 @@ class AIBrainService:
             emergency_keywords=emergency_keywords,
             today=_today_in(profile),
             emergency_keyword_hint=keyword_hint,
-            known_caller=known_caller,
             tools_enabled=self._tools_enabled,
             tool_progress=tool_progress,
             life_safety=life_safety,
@@ -506,7 +504,7 @@ class AIBrainService:
     ) -> str | None:
         """What this call has already accomplished, for the prompt.
 
-        Best-effort, like `_resolve_known_caller`: this is context that makes
+        Best-effort: this is context that makes
         the model behave better, not something a live call may be failed
         over. A storage error degrades the turn to the pre-existing
         behaviour rather than dropping the caller."""
@@ -533,50 +531,6 @@ class AIBrainService:
         dashboard behave differently from the phone line it exists to
         rehearse."""
         return self._settings.AI_TOOLS_ENABLED and self._tool_executors is not None
-
-    async def _resolve_known_caller(self, conversation: Conversation) -> KnownCaller | None:
-        """Known-caller grounding (P5). Strictly read-only and strictly
-        best-effort.
-
-        Returns None — leaving the prompt byte-identical to the pre-P5 one
-        — for every case except a caller ID that resolves to exactly one
-        customer: no repository wired, no caller ID (the whole text path),
-        a blank or malformed number, no association, or an ambiguous one.
-
-        Ambiguity is a deliberate refusal, not a gap. A shared household or
-        office line maps to several customers, and there is no honest way
-        to pick between them: the caller is whoever picked up the phone.
-        Guessing would greet the wrong person by name, so nothing is
-        grounded and the ordinary flow collects the details instead.
-
-        A repository failure must never cost the caller their emergency, so
-        it is swallowed after logging: classification, ticket creation, C1
-        persistence, and `endCall` all continue exactly as they would for
-        an unrecognised caller."""
-        if self._caller_identities is None or not conversation.caller_phone_number:
-            return None
-
-        try:
-            # Savepoint inside the `try`, for the reason given in
-            # `_describe_tool_progress`.
-            async with self._savepoints.isolate():
-                customers = await self._caller_identities.find_customers_by_caller_number(
-                    conversation.organization_id, conversation.caller_phone_number
-                )
-        except Exception:
-            # Deliberately broad: any storage-layer failure degrades to an
-            # unknown caller rather than failing a live emergency turn.
-            logger.warning("known_caller_lookup_failed", exc_info=True)
-            return None
-
-        if len(customers) != 1:
-            # No PII in either branch — a count, never a name.
-            logger.info("known_caller_not_grounded", matches=len(customers))
-            return None
-
-        customer = customers[0]
-        logger.info("known_caller_grounded", has_address_on_file=bool(customer.address))
-        return KnownCaller(name=customer.full_name, address=customer.address)
 
     async def _persist_turn(
         self,
@@ -657,6 +611,25 @@ class AIBrainService:
         # see `_phone_to_persist`. An indexed lookup on a unique column, on a
         # row `upsert` is about to select anyway.
         existing_outcome = await self._outcomes.get_by_conversation_id(conversation_id)
+        region = await self._phone_region(conversation.organization_id)
+        # Once a service request exists, the recorded contact details belong
+        # to `create_service_request`: a correction goes through it (and its
+        # address confirmation), and an older value the model repeats in a
+        # later reply cannot quietly undo one. Blanks can still be filled.
+        locked = await self._contact_details_locked(conversation.organization_id, conversation_id)
+        customer_name = bounded_contact_text(reply.customer_name, CUSTOMER_NAME_MAX_LENGTH)
+        customer_address = bounded_contact_text(
+            reply.customer_address, CUSTOMER_ADDRESS_MAX_LENGTH
+        )
+        customer_phone = _phone_to_persist(
+            reply.customer_phone,
+            already_stored=existing_outcome.customer_phone if existing_outcome else None,
+            region=region,
+        )
+        if locked and existing_outcome is not None:
+            customer_name = existing_outcome.customer_name or customer_name
+            customer_address = existing_outcome.customer_address or customer_address
+            customer_phone = existing_outcome.customer_phone or customer_phone
         outcome = await self._outcomes.upsert(
             conversation_id,
             classification=reply.classification,
@@ -665,24 +638,14 @@ class AIBrainService:
             matched_service_id=matched_service_id,
             # Bounded to the column: an over-long value is not merely
             # untidy, it is a failed write that rolls back the whole turn.
-            customer_name=bounded_contact_text(reply.customer_name, CUSTOMER_NAME_MAX_LENGTH),
-            # Canonicalised for the same reason `VoiceToolExecutor` and
-            # `CustomerService` canonicalise: this value becomes the customer
+            customer_name=customer_name,
+            # Validated and in E.164 for the same reason `VoiceToolExecutor`
+            # and `CustomerService` validate: this value becomes the customer
             # deduplication key, and a number captured from speech arrives in
-            # whatever shape the transcript took. Without it here, a turn
-            # whose tool already stored "123456789" would have it overwritten
-            # by the model's "1 2 3 4 5 6 7 8 9" a moment later — which is
-            # exactly what a live call produced, leaving the appointment and
-            # the customer record disagreeing about the same number.
-            customer_phone=_phone_to_persist(
-                reply.customer_phone,
-                already_stored=(
-                    existing_outcome.customer_phone if existing_outcome else None
-                ),
-            ),
-            customer_address=bounded_contact_text(
-                reply.customer_address, CUSTOMER_ADDRESS_MAX_LENGTH
-            ),
+            # whatever shape the transcript took — "1 2 3 4 5 6 7 8 9" one
+            # turn, nine digits of a ten-digit number another (2026-10-31).
+            customer_phone=customer_phone,
+            customer_address=customer_address,
             summary=reply.summary,
         )
 
@@ -752,6 +715,28 @@ class AIBrainService:
             turn_index=turn_index,
         )
 
+    async def _phone_region(self, organization_id: uuid.UUID) -> str | None:
+        """The business's own country as a phone region, or None."""
+        profile = await self._profile.get_by_organization_id(organization_id)
+        return region_for_country(profile.country if profile else None)
+
+    async def _contact_details_locked(
+        self, organization_id: uuid.UUID, conversation_id: uuid.UUID
+    ) -> bool:
+        """See `ToolExecutorFactory.contact_details_locked`. Best-effort,
+        savepoint inside the `try` as in `_describe_tool_progress`: a failure
+        leaves the reply's details in charge, which is the old behaviour."""
+        if not self._tools_enabled or self._tool_executors is None:
+            return False
+        try:
+            async with self._savepoints.isolate():
+                return await self._tool_executors.contact_details_locked(
+                    organization_id, conversation_id
+                )
+        except Exception:
+            logger.warning("contact_details_lock_lookup_failed", exc_info=True)
+            return False
+
     async def _load_business_knowledge(
         self, organization_id: uuid.UUID
     ) -> tuple[
@@ -781,7 +766,9 @@ class AIBrainService:
         )
 
 
-def _phone_to_persist(reported: str | None, *, already_stored: str | None) -> str | None:
+def _phone_to_persist(
+    reported: str | None, *, already_stored: str | None, region: str | None = None
+) -> str | None:
     """What belongs in `conversation_outcomes.customer_phone` after a turn.
 
     The model reports whatever the transcript held, and that is not always a
@@ -819,7 +806,7 @@ def _phone_to_persist(reported: str | None, *, already_stored: str | None) -> st
     number and a phone number in one breath — degrades to "no number learned"
     instead of taking the turn down, which is precisely the failure this
     function was written to end."""
-    canonical = storable_phone_number(reported)
+    canonical = valid_phone_number(reported, region=region)
     if canonical is not None:
         return canonical
     return already_stored

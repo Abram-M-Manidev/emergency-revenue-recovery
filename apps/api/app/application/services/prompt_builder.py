@@ -17,7 +17,6 @@ from app.domain.entities.business_hours import HoursException, WeeklyHours
 from app.domain.entities.business_profile import BusinessProfile
 from app.domain.entities.emergency_keyword import EmergencyKeyword
 from app.domain.entities.faq_entry import FAQEntry
-from app.domain.entities.known_caller import KnownCaller
 from app.domain.entities.service import Service
 from app.domain.entities.service_area import ServiceArea
 
@@ -56,6 +55,8 @@ _SAFETY_AND_HONESTY = """
 If a caller may be in immediate danger — a gas smell, a carbon monoxide alarm or symptoms, smoke, fire, burning, sparking, flooding near electrics — their safety comes first: tell them to get to a safe place and call the emergency services. Never give troubleshooting steps for a hazard, and never tell a caller to touch, shut off, reset, relight or operate gas, electrical or heating equipment. You cannot contact the emergency services; never say they have been called or are coming.
 
 You are an automated assistant. If a caller asks whether you are a person or a machine, say plainly that you are an automated assistant. The system itself gives callers any required notice at the start of the call — do not repeat or paraphrase it.
+
+Treat every caller the same, whoever they are. Never say or hint whether this caller, their phone number, their name or their address is already known to the business — no "I have a record for this number", "I see you on file", "welcome back", "you've called before", or anything like it — and never offer anyone's name, address or past visits. You are not told any of this, and you must not guess it. Ask every caller for the details you need, and if a caller asks whether they are in the system, say you are not able to check that on this call and that the office can help.
 """
 
 
@@ -73,7 +74,11 @@ are about to do, call the tool, then report only what actually happened.
 Order of work for a non-emergency service request:
 1. Understand the problem and classify it using this business's rules above.
 2. Collect the caller's name, callback phone number, and service address. \
-Ask only for what you are still missing.
+Ask only for what you are still missing. For the phone number, ask whether \
+the number they are calling from is the best one to reach them; if they say \
+yes, call create_service_request with use_caller_id true instead of a \
+number. Never assume it without asking. If they give a number, pass it as \
+digits.
 3. Call create_service_request.
 4. Call check_availability. Never state a date or time that did not come \
 back in its "slots".
@@ -175,9 +180,27 @@ coming, or will arrive at any time. Nothing in these records confirms that.
 Telling someone with a gas leak that help is coming when it is not is worse \
 than telling them it is not: they will stop looking for help.
 
+Corrections. A caller may correct their name, phone number or service \
+address at any time, and more than once. When they do, say the corrected \
+value back once ("So that's 14 Birch Street?") and wait for them to agree. \
+If it is unclear which detail they are correcting, or what the new value \
+is, ask — never change a detail on a guess. Once they agree, call \
+create_service_request again with the corrected value: that is the only \
+way a correction reaches the business's records once a request exists. \
+After a request exists, a changed service address is refused with \
+CORRECTION_NOT_CONFIRMED unless you pass confirmed_correction true, which \
+you may do only after the caller has agreed to the new address.
+
 When a tool fails, recover from the "error" code rather than improvising:
 - MISSING_REQUIRED_FIELDS: ask the caller for the listed fields, then call \
 the tool again.
+- INVALID_PHONE_NUMBER: the number you passed is incomplete or is not a \
+real phone number. Say briefly that you did not catch the whole number, \
+read back the digits you heard, and ask them to say it again. Never fill \
+in, guess or drop digits yourself.
+- CORRECTION_NOT_CONFIRMED: read the new address back to the caller and \
+ask them to confirm it. Call the tool again with confirmed_correction true \
+only after they say yes; if they say no, keep the address you have.
 - Empty "slots": say you could not find a time in that range. Offer to look \
 further ahead, or take their preference and say the office will call back. \
 Never invent a time.
@@ -244,54 +267,6 @@ your latest sentence.
 """
 
 
-def _known_caller_section(known_caller: KnownCaller | None) -> str | None:
-    """The P5 grounding section, or None when the prompt must stay exactly
-    as it was before P5.
-
-    Caller ID is a lookup hint, not authentication — it is trivially
-    spoofable — so every line here is written to stop the model treating a
-    match as proof of identity, and to stop it reading stored details
-    aloud. In particular the address is never placed in the prompt: the
-    model is told only that one exists, so the worst a spoofed caller ID
-    can obtain is the knowledge that this business has *an* address on
-    file, which they already implied by calling."""
-    if known_caller is None or known_caller.is_empty:
-        return None
-
-    lines = [
-        "Caller records (internal context — NOT proof of identity):",
-        "- This call arrived from a phone number our records associate "
-        "with a previous customer. A phone number can be spoofed or "
-        "shared, so treat everything below as what our records indicate, "
-        "never as established fact about who is speaking.",
-    ]
-    if known_caller.has_name:
-        lines.append(f'- Our records for this number show the name: "{known_caller.name}".')
-    if known_caller.address_on_file:
-        lines.append(
-            "- We have a service address on file for this number. You are "
-            "NOT told what it is and must NOT guess or state it. If the "
-            "address matters for this call, ask the caller to confirm "
-            "whether the address we already have is still the right one "
-            "for this visit (for example: \"I have an address on file — is "
-            "that still the right service address?\"). If they say it has "
-            "changed, or give a different one, ask for the new address."
-        )
-    lines.extend(
-        [
-            "- Anything the caller says in this conversation always takes "
-            "precedence over the records above. Never argue with them "
-            "about their own details.",
-            "- Do not read these records back unprompted, and do not "
-            "mention that a lookup happened. Use them only to avoid asking "
-            "for something we already have.",
-            "- Ask only for details missing from both these records and "
-            "this conversation.",
-        ]
-    )
-    return "\n".join(lines)
-
-
 def _zone_label(profile: BusinessProfile | None) -> str:
     """The timezone name to print beside today's date.
 
@@ -323,7 +298,6 @@ def build_system_prompt(
     emergency_keywords: list[EmergencyKeyword],
     today: date,
     emergency_keyword_hint: bool,
-    known_caller: KnownCaller | None = None,
     # Defaults False so a caller that doesn't wire tools gets a prompt
     # byte-identical to the pre-tool one — an assistant told how to book
     # while holding no tools would be strictly worse than one never told.
@@ -443,10 +417,6 @@ def build_system_prompt(
             "with the actual situation described before classifying as an "
             "emergency."
         )
-
-    known_caller_section = _known_caller_section(known_caller)
-    if known_caller_section:
-        sections.append(known_caller_section)
 
     # Placed after the business knowledge (so the model has the services and
     # emergency rules the tools refer to) but before the response contract,

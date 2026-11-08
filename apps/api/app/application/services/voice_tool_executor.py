@@ -93,7 +93,12 @@ from app.domain.repositories.offered_slot_repository import OfferedSlotRepositor
 from app.domain.repositories.service_repository import ServiceRepository
 from app.domain.transactions import NullSavepoints, Savepoints
 from app.shared.logging.timing import elapsed_ms, now
-from app.shared.utils.phone import storable_phone_number
+from app.shared.utils.phone import (
+    PhoneCheck,
+    check_phone_number,
+    region_for_country,
+    valid_phone_number,
+)
 
 logger = structlog.get_logger("app.voice.tools")
 
@@ -206,6 +211,12 @@ class VoiceToolExecutor(ToolExecutorFactory):
             return "Progress on this call (from the business's records):\n" + note
         return records + "\n" + note
 
+    async def contact_details_locked(
+        self, organization_id: uuid.UUID, conversation_id: uuid.UUID
+    ) -> bool:
+        """See `ToolExecutorFactory.contact_details_locked`."""
+        return await self._service_request_exists(organization_id, conversation_id)
+
     async def _describe_records(
         self, organization_id: uuid.UUID, conversation_id: uuid.UUID
     ) -> str | None:
@@ -255,9 +266,10 @@ class VoiceToolExecutor(ToolExecutorFactory):
             )
             return (
                 "Progress on this call (from the business's records):\n"
-                "- An emergency ticket has already been created. Do NOT call "
-                "create_service_request again, and do NOT offer or attempt an "
-                "appointment.\n" + reassurance + (f"\n{paging_note}" if paging_note else "")
+                "- An emergency ticket has already been created. Call "
+                "create_service_request again ONLY to add a missing detail or "
+                "to record a correction the caller has confirmed, and do NOT "
+                "offer or attempt an appointment.\n" + reassurance + (f"\n{paging_note}" if paging_note else "")
             )
 
         appointment = await self._appointments.get_appointment_for_conversation(
@@ -271,7 +283,8 @@ class VoiceToolExecutor(ToolExecutorFactory):
             "memory — trust these over your own recollection):",
             "- A service request has already been created for this caller. "
             "Do NOT call create_service_request again unless the caller "
-            "corrects a detail.",
+            "corrects their name, phone number or address; then confirm the "
+            "new value with them and call it again with it.",
         ]
 
         if appointment.scheduled_start_at is not None:
@@ -389,23 +402,41 @@ class VoiceToolExecutor(ToolExecutorFactory):
 
         existing = await self._outcomes.get_by_conversation_id(conversation_id)
 
-        # The phone number is resolved rather than copied, by the same rule
-        # `AIBrainService` persists with: a value that canonicalises wins (so
-        # a correction still lands), otherwise keep what is already stored,
-        # otherwise fall back to the number the call is coming from — and
-        # never the raw utterance. The raw fallback here was the second copy
-        # of the 2026-09-24 defect: "one two three four five six seven eight
-        # nine" is 44 characters into a 32-character column, the write
-        # aborted the transaction, and the turn — ticket and all — rolled
-        # back after the caller had heard it.
-        customer_phone = storable_phone_number(_text_or_none(arguments.get("customer_phone")))
-        phone_source = "stated"
-        if customer_phone is None and existing is not None and existing.customer_phone:
-            customer_phone = existing.customer_phone
-            phone_source = "earlier_in_call"
-        if customer_phone is None:
-            customer_phone = await self._caller_id_for(organization_id, conversation_id)
-            phone_source = "caller_id"
+        # The callback number. Two sources, kept apart:
+        # - a number the caller STATED, validated for the business's country
+        #   and stored in E.164. An invalid one is never stored and never
+        #   silently replaced: on 2026-10-31 a nine-digit number became the
+        #   key of a second customer record for the same caller.
+        # - the CALLER ID, which is only a callback number once the caller has
+        #   said so (`use_caller_id`). Unconfirmed, it is never written to the
+        #   outcome or a customer record; an emergency ticket still gets it,
+        #   from `DispatchService`'s own caller-ID fallback, because a
+        #   dispatcher must be able to call back.
+        region = await self._region_for(organization_id)
+        stated_raw = _text_or_none(arguments.get("customer_phone"))
+        stated = check_phone_number(stated_raw, region=region)
+        caller_id = await self._caller_id_for(organization_id, conversation_id)
+        use_caller_id = arguments.get("use_caller_id") is True
+        phone_problem: PhoneCheck | None = (
+            stated if stated_raw is not None and not stated.is_valid else None
+        )
+
+        customer_phone: str | None
+        if stated.is_valid:
+            customer_phone, phone_source = stated.e164, "stated"
+        elif use_caller_id and caller_id is not None and phone_problem is None:
+            customer_phone, phone_source = caller_id, "caller_id_confirmed"
+        elif existing is not None and existing.customer_phone:
+            customer_phone, phone_source = existing.customer_phone, "earlier_in_call"
+        else:
+            customer_phone, phone_source = None, None
+
+        if phone_problem is not None and not is_emergency:
+            # Refused rather than stored or swapped for another number: the
+            # caller meant to give THIS number, so the only right recovery is
+            # to hear it again. An emergency is never refused for this — its
+            # ticket goes ahead and the problem is reported alongside it.
+            return _invalid_phone_result(phone_problem)
 
         # A blank name or address in this call must not erase one reported
         # earlier in the same conversation: re-calling the tool to correct
@@ -422,16 +453,42 @@ class VoiceToolExecutor(ToolExecutorFactory):
         )
         problem = _text_or_none(arguments.get("problem_description"))
 
+        request_exists = await self._service_request_exists(organization_id, conversation_id)
+        if (
+            request_exists
+            and existing is not None
+            and not _is_blank(existing.customer_address)
+            and not _is_blank(customer_address)
+            and not _same_text(existing.customer_address, customer_address)
+            and arguments.get("confirmed_correction") is not True
+        ):
+            # Moving the visit to a different address is the one correction
+            # that sends a technician somewhere else, so it needs the caller's
+            # explicit agreement. Nothing is written until then.
+            return {
+                "success": False,
+                "error": ToolErrors.CORRECTION_NOT_CONFIRMED,
+                "field": "service_address",
+                "next_step": (
+                    "This changes the service address on a request that already "
+                    "exists. Read the new address back to the caller and ask "
+                    "them to confirm it. Only after they say yes, call "
+                    "create_service_request again with confirmed_correction "
+                    "true. If they say no, keep the address already recorded."
+                ),
+            }
+
         # An emergency needs only what a dispatcher cannot act without: what
         # is wrong and a way to call back. Requiring the name and the address
         # as well meant a caller with smoke coming from the unit who could
         # not give an address produced no ticket and no alert at all — the
         # tool refused, and the assistant kept asking. The ticket now exists
         # first, and the missing details are asked for afterwards and
-        # backfilled onto it by the ticket's contact-detail sync.
+        # backfilled onto it by the ticket's contact-detail sync. For an
+        # emergency the unconfirmed caller ID is enough to go ahead on.
         required: dict[str, str | None] = {
             "problem_description": problem,
-            "customer_phone": customer_phone,
+            "customer_phone": customer_phone or (caller_id if is_emergency else None),
         }
         if not is_emergency:
             required["customer_name"] = customer_name
@@ -446,17 +503,30 @@ class VoiceToolExecutor(ToolExecutorFactory):
                 "error": ToolErrors.MISSING_REQUIRED_FIELDS,
                 "missing_fields": missing,
             }
-            if "customer_phone" in missing and not _is_blank(arguments.get("customer_phone")):
-                # The caller did give a number; it just was not usable as
-                # passed. Saying so stops the assistant asking a caller who
-                # has already answered as if they had not.
-                refusal["detail"] = (
-                    "customer_phone must be the digits of the number, e.g. "
-                    '"6305550184". If the caller said the digits as words, '
-                    "write them as digits; if you are unsure of any digit, "
-                    "read the number back and ask them to confirm it."
+            if "customer_phone" in missing:
+                refusal["detail"] = _missing_phone_detail(
+                    caller_id_available=caller_id is not None, asked_for_caller_id=use_caller_id
                 )
             return refusal
+
+        if request_exists and existing is not None:
+            corrected = [
+                field
+                for field, before, after in (
+                    ("customer_name", existing.customer_name, customer_name),
+                    ("customer_phone", existing.customer_phone, customer_phone),
+                    ("service_address", existing.customer_address, customer_address),
+                )
+                if not _is_blank(before) and not _is_blank(after) and not _same_text(before, after)
+            ]
+            if corrected:
+                # Field names only: the values are the caller's PII.
+                logger.info(
+                    "service_request_contact_corrected",
+                    organization_id=str(organization_id),
+                    conversation_id=str(conversation_id),
+                    fields=corrected,
+                )
 
         matched_service = await self._match_service(organization_id, arguments.get("service_name"))
         recommended_action = (
@@ -472,9 +542,9 @@ class VoiceToolExecutor(ToolExecutorFactory):
             recommended_action=recommended_action,
             matched_service_id=matched_service.id if matched_service else None,
             customer_name=customer_name,
-            # Canonicalised, so the snapshot copied onto the ticket or
-            # appointment matches the customer key rather than whatever
-            # spacing the transcript happened to use.
+            # E.164, so the snapshot copied onto the ticket or appointment
+            # matches the customer key. Only ever a number the caller stated
+            # or confirmed: never the unconfirmed caller ID.
             customer_phone=customer_phone,
             customer_address=customer_address,
             summary=problem or "Service request.",
@@ -483,10 +553,15 @@ class VoiceToolExecutor(ToolExecutorFactory):
             field
             for field, value in (
                 ("customer_name", customer_name),
+                ("customer_phone", customer_phone),
                 ("service_address", customer_address),
             )
             if _is_blank(value)
         ]
+        if customer_phone is None and caller_id is not None:
+            # Only reachable for an emergency: the ticket goes ahead on the
+            # number the call is coming from, which nobody has confirmed.
+            phone_source = "caller_id_unconfirmed"
 
         # The existing AI-Brain -> module seam, called in the same order the
         # webhook already calls it, so a tool-driven turn produces exactly
@@ -527,11 +602,19 @@ class VoiceToolExecutor(ToolExecutorFactory):
                             "The ticket exists. Now ask the caller for the "
                             "missing details and call create_service_request "
                             "again with them, so the dispatcher has them."
+                            + (
+                                " For the phone number, ask whether the number "
+                                "they are calling from is the best one to reach "
+                                "them; if yes, pass use_caller_id true."
+                                if "customer_phone" in still_needed and caller_id is not None
+                                else ""
+                            )
                         ),
                     }
                     if still_needed
                     else {}
                 ),
+                **(_invalid_phone_result(phone_problem, refused=False) if phone_problem else {}),
                 "next_step": _with_paging_step(_dispatcher_next_step(delivery), paging),
             }
 
@@ -564,15 +647,39 @@ class VoiceToolExecutor(ToolExecutorFactory):
     async def _caller_id_for(
         self, organization_id: uuid.UUID, conversation_id: uuid.UUID
     ) -> str | None:
-        """The number this call is coming from, if the telephony layer gave
-        one and it is usable as a callback number. The text/simulation path
-        never has one."""
+        """The number this call is coming from, in E.164, when the telephony
+        layer gave a real one. None for the text/simulation path and for a
+        withheld, unavailable or malformed caller ID: "anonymous", a SIP URI,
+        or a carrier's placeholder number for a blocked caller is nobody's
+        callback number.
+
+        Validated without a region: caller IDs from the telephony layer are
+        in international form, and reading one in the business's region
+        could turn a foreign number into a local one."""
         if self._conversations is None:
             return None
         conversation = await self._conversations.get_by_id(organization_id, conversation_id)
         if conversation is None:
             return None
-        return storable_phone_number(conversation.caller_phone_number)
+        return valid_phone_number(conversation.caller_phone_number)
+
+    async def _region_for(self, organization_id: uuid.UUID) -> str | None:
+        """The region a national-format number is read in: the business's
+        own configured country, or None, never a default."""
+        profile = await self._profiles.get_by_organization_id(organization_id)
+        return region_for_country(profile.country if profile else None)
+
+    async def _service_request_exists(
+        self, organization_id: uuid.UUID, conversation_id: uuid.UUID
+    ) -> bool:
+        if await self._dispatch.get_ticket_for_conversation(organization_id, conversation_id):
+            return True
+        return (
+            await self._appointments.get_appointment_for_conversation(
+                organization_id, conversation_id
+            )
+            is not None
+        )
 
     async def _check_availability(
         self,
@@ -1708,6 +1815,66 @@ def _zone_or_utc(name: str) -> ZoneInfo:
         return ZoneInfo(name)
     except (ZoneInfoNotFoundError, ValueError):
         return ZoneInfo("UTC")
+
+
+def _same_text(a: str | None, b: str | None) -> bool:
+    """Equal once case and spacing are ignored: "14 birch street" is not a
+    correction of "14 Birch  Street"."""
+    return " ".join((a or "").lower().split()) == " ".join((b or "").lower().split())
+
+
+def _missing_phone_detail(*, caller_id_available: bool, asked_for_caller_id: bool) -> str:
+    if asked_for_caller_id and not caller_id_available:
+        return (
+            "The number this call is coming from is withheld or unavailable, so "
+            "it cannot be used. Ask the caller for a callback number."
+        )
+    if caller_id_available:
+        return (
+            "No callback number yet. Ask whether the number they are calling "
+            "from is the best one to reach them. If they say yes, call again "
+            "with use_caller_id true; otherwise ask for the number."
+        )
+    return "No callback number yet. Ask the caller for one."
+
+
+_PHONE_PROBLEM_WORDING = {
+    "missing": (
+        "has no digits in it; write the number the caller said as digits, "
+        "and if you are unsure of any digit, ask them to say it again"
+    ),
+    "incomplete": "is too short to be a complete phone number",
+    "too_long": "has more digits than a phone number can have",
+    "invalid": "is not a valid phone number",
+    "needs_country_code": (
+        "cannot be checked without its country code; ask for the number "
+        "including the country code"
+    ),
+}
+
+
+def _invalid_phone_result(check: PhoneCheck, *, refused: bool = True) -> dict[str, Any]:
+    """What the assistant is told about a stated number that failed
+    validation. Carries how many digits were heard, never the number."""
+    problem = check.problem or "invalid"
+    wording = _PHONE_PROBLEM_WORDING.get(problem, _PHONE_PROBLEM_WORDING["invalid"])
+    detail = (
+        f"The number you passed ({check.digits} digits) {wording}. Read back the "
+        "digits you heard and ask the caller to say the whole number again. "
+        "Never add, drop or guess digits."
+    )
+    if not refused:
+        return {
+            "phone_problem": problem,
+            "phone_problem_detail": detail + " The ticket was created anyway.",
+        }
+    return {
+        "success": False,
+        "error": ToolErrors.INVALID_PHONE_NUMBER,
+        "phone_problem": problem,
+        "digits_heard": check.digits,
+        "detail": detail,
+    }
 
 
 def _is_blank(value: Any) -> bool:

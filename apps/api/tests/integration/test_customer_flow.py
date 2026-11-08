@@ -106,7 +106,7 @@ def _reply_with_phone(**overrides):
         classification=CallClassification.NON_EMERGENCY,
         recommended_action=RecommendedAction.ANSWER_FAQ,
         customer_name="Jane Doe",
-        customer_phone="+15551234567",
+        customer_phone="+16305550147",
         customer_address="123 Main St",
         summary="Routine inquiry.",
     )
@@ -150,7 +150,7 @@ async def test_conversation_with_phone_creates_customer_even_without_ticket_or_a
     customers = customers_resp.json()
     assert len(customers) == 1
     assert customers[0]["full_name"] == "Jane Doe"
-    assert customers[0]["phone_number"] == "+15551234567"
+    assert customers[0]["phone_number"] == "+16305550147"
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -240,7 +240,7 @@ async def test_later_turn_backfills_details_missing_when_the_customer_was_create
     assert history["customer"]["id"] == customer_id
     assert history["customer"]["full_name"] == "Lucky"
     assert history["customer"]["address"] == "16th Street, California"
-    assert history["customer"]["phone_number"] == "+15551234567"
+    assert history["customer"]["phone_number"] == "+16305550147"
 
 
 @pytest.mark.asyncio(loop_scope="session")
@@ -255,7 +255,7 @@ async def test_manual_customer_create_requires_customers_manage(
     # customer by hand is Owner/Admin-only.
     forbidden_create = await client.post(
         "/api/v1/customers",
-        json={"full_name": "Walk-in Wanda", "phone_number": "+15559876543"},
+        json={"full_name": "Walk-in Wanda", "phone_number": "+16305550176"},
         headers=_auth_headers(tech_token),
     )
     assert forbidden_create.status_code == 403
@@ -266,7 +266,7 @@ async def test_manual_customer_create_requires_customers_manage(
 
     create_resp = await client.post(
         "/api/v1/customers",
-        json={"full_name": "Walk-in Wanda", "phone_number": "+15559876543"},
+        json={"full_name": "Walk-in Wanda", "phone_number": "+16305550176"},
         headers=_auth_headers(owner_token),
     )
     assert create_resp.status_code == 201
@@ -276,7 +276,7 @@ async def test_manual_customer_create_requires_customers_manage(
         f"/api/v1/customers/{customer_id}",
         json={
             "full_name": "Wanda Walker",
-            "phone_number": "+15559876543",
+            "phone_number": "+16305550176",
             "email": "wanda@example.com",
         },
         headers=_auth_headers(owner_token),

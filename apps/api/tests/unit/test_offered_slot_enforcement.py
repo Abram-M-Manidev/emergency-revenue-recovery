@@ -88,7 +88,7 @@ _AC_REPAIR = Service(
 
 _FRANK = {
     "customer_name": "Frank",
-    "customer_phone": "1 2 3 4 5 6 7 8 9",
+    "customer_phone": "6 3 0 5 5 5 0 1 8 4",
     "service_address": "11 69 Street, California",
     "problem_description": "AC running but not cooling.",
     "classification": "non_emergency",
@@ -368,7 +368,7 @@ async def test_an_offer_made_to_another_conversation_cannot_be_booked():
     offered_to = uuid.uuid4()
     booking_from = uuid.uuid4()
     await harness.intake(offered_to)
-    await harness.intake(booking_from, customer_phone="5550001111")
+    await harness.intake(booking_from, customer_phone="6305550111")
 
     await harness.call(offered_to, CHECK_AVAILABILITY.name)
 
@@ -417,7 +417,7 @@ async def test_two_callers_racing_one_offered_slot_never_overlap():
     harness = _Harness()
     first, second = uuid.uuid4(), uuid.uuid4()
     await harness.intake(first)
-    await harness.intake(second, customer_phone="5550002222")
+    await harness.intake(second, customer_phone="6305550122")
     await harness.offer(first)
     await harness.offer(second)
     await harness.choose(first, date="2026-08-24", start_time="08:00")
@@ -524,7 +524,7 @@ async def test_a_contactless_appointment_is_backfilled_once_details_are_known():
         recommended_action=RecommendedAction.NONE,
         matched_service_id=None,
         customer_name="Frank",
-        customer_phone="123456789",
+        customer_phone="6305550184",
         customer_address="11 69 Street, California",
         summary="Booked AC repair.",
     )
@@ -533,7 +533,7 @@ async def test_a_contactless_appointment_is_backfilled_once_details_are_known():
     filled = await harness.appointments.get_by_conversation_id(conversation)
     assert filled is not None
     assert filled.customer_name == "Frank"
-    assert filled.customer_phone == "123456789"
+    assert filled.customer_phone == "6305550184"
     assert filled.customer_address == "11 69 Street, California"
 
 
@@ -551,7 +551,7 @@ async def test_the_backfill_still_refuses_to_create_without_a_booking_recommenda
         recommended_action=RecommendedAction.ANSWER_FAQ,
         matched_service_id=None,
         customer_name="Frank",
-        customer_phone="123456789",
+        customer_phone="6305550184",
         customer_address="11 69 Street",
         summary="Just a question.",
     )
@@ -568,14 +568,15 @@ async def test_a_spelled_out_phone_number_still_normalises_to_one_customer():
     harness = _Harness()
     conversation = uuid.uuid4()
 
-    await harness.intake(conversation, customer_phone="1 2 3 4 5 6 7 8 9")
-    await harness.intake(conversation, customer_phone="123456789")
+    await harness.intake(conversation, customer_phone="6 3 0 5 5 5 0 1 8 4")
+    await harness.intake(conversation, customer_phone="6305550184")
 
     assert len(harness.customers._customers) == 1
-    customer = await harness.customers.get_by_phone_number(_ORG_ID, "123456789")
+    # Both spellings validate to the same E.164 key.
+    customer = await harness.customers.get_by_phone_number(_ORG_ID, "+16305550184")
     assert customer is not None
     appointment = await harness.appointments.get_by_conversation_id(conversation)
-    assert appointment is not None and appointment.customer_phone == "123456789"
+    assert appointment is not None and appointment.customer_phone == "+16305550184"
 
 
 # --- Refusal diagnostics ------------------------------------------------------
@@ -654,7 +655,7 @@ async def test_a_refusal_never_logs_caller_details():
 
     entry = _refusal_entry(captured)
     rendered = str(entry)
-    for personal in ("Frank", "123456789", "1 2 3 4", "11 69 Street", "California"):
+    for personal in ("Frank", "6305550184", "1 2 3 4", "11 69 Street", "California"):
         assert personal not in rendered
     assert "arguments" not in entry
 
@@ -1128,7 +1129,7 @@ async def test_a_wrong_year_cannot_reconcile_against_another_conversations_offer
     offered_to = uuid.uuid4()
     booking_from = uuid.uuid4()
     await harness.intake(offered_to)
-    await harness.intake(booking_from, customer_phone="5550001111")
+    await harness.intake(booking_from, customer_phone="6305550111")
 
     # Only the first caller is ever read any times.
     await harness.offer(offered_to, service_name="Air Conditioning Repair")

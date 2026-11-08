@@ -87,7 +87,7 @@ _AC_REPAIR = Service(
 
 _FRANK = {
     "customer_name": "Frank",
-    "customer_phone": "123456789",
+    "customer_phone": "6305550184",
     "service_address": "59th Street, California",
     "problem_description": "AC running but not cooling.",
     "classification": "non_emergency",
@@ -222,7 +222,7 @@ class _Harness:
             vapi_call_id=self.call_id,
             assistant_id=_ASSISTANT_ID,
             phone_number_id=None,
-            customer_number="+15551230000",
+            customer_number="+16305550100",
             customer_utterance=utterance,
         ):
             if isinstance(event, VoiceTextDelta):
@@ -237,7 +237,7 @@ class _Harness:
             vapi_call_id=self.call_id,
             assistant_id=_ASSISTANT_ID,
             phone_number_id=None,
-            customer_number="+15551230000",
+            customer_number="+16305550100",
             customer_utterance=utterance,
         )
 

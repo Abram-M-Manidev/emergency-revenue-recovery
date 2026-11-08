@@ -12,6 +12,9 @@ structlog==24.4.0
 python-dotenv==1.0.1
 greenlet==3.1.1
 tzdata==2024.2
+# Caller phone-number validation and E.164 normalisation
+# (app/shared/utils/phone.py).
+phonenumbers==9.0.30
 openai==1.59.6
 # Already present transitively via openai; declared explicitly because
 # `WebhookNotificationProvider` imports it directly, and an undeclared

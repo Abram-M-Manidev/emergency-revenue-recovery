@@ -31,6 +31,15 @@ class EntityAlreadyExistsError(DomainError):
         super().__init__(f"{entity} with {field} '{value}' already exists.")
 
 
+class InvalidPhoneNumberError(DomainError):
+    """A phone number that is incomplete, impossible, or cannot be read
+    without a country code. Carries the reason, never the number."""
+
+    def __init__(self, problem: str) -> None:
+        self.problem = problem
+        super().__init__(f"The phone number is not valid ({problem}).")
+
+
 class InvalidCredentialsError(DomainError):
     def __init__(self, message: str = "Invalid email or password.") -> None:
         super().__init__(message)

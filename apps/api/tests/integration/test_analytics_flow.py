@@ -132,7 +132,7 @@ async def test_analytics_summary_reports_calls_tickets_appointments_and_revenue(
         default_reply(
             classification=CallClassification.EMERGENCY,
             recommended_action=RecommendedAction.CREATE_EMERGENCY_TICKET,
-            customer_phone="+15551234567",
+            customer_phone="+16305550147",
             customer_name="Jane Doe",
         )
     )
@@ -163,7 +163,7 @@ async def test_analytics_summary_reports_calls_tickets_appointments_and_revenue(
         default_reply(
             classification=CallClassification.NON_EMERGENCY,
             recommended_action=RecommendedAction.BOOK_APPOINTMENT,
-            customer_phone="+15559876543",
+            customer_phone="+16305550176",
             customer_name="John Roe",
         )
     )

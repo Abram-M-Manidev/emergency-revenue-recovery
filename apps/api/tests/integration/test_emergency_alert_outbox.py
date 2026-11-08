@@ -72,7 +72,7 @@ _DESTINATION = "https://hooks.example.invalid/services/T000/B000/outbox"
 
 _EMERGENCY = {
     "customer_name": "Dana",
-    "customer_phone": "6305550184",
+    "customer_phone": "+16305550184",
     "service_address": "12 Elm Street, Lisle",
     "problem_description": "Smoke is coming from the furnace.",
     "classification": "emergency",
@@ -166,7 +166,7 @@ async def _emergency_conversation(org_id: uuid.UUID) -> uuid.UUID:
             recommended_action=RecommendedAction.CREATE_EMERGENCY_TICKET,
             matched_service_id=None,
             customer_name="Dana",
-            customer_phone="6305550184",
+            customer_phone="+16305550184",
             customer_address="12 Elm Street",
             summary="Smoke from the furnace.",
         )

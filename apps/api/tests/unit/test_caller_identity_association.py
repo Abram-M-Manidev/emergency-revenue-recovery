@@ -50,7 +50,7 @@ async def _seed_outcome(outcomes, conversation_id, **overrides):
         recommended_action=RecommendedAction.ANSWER_FAQ,
         matched_service_id=None,
         customer_name="Lucky",
-        customer_phone="123456789",
+        customer_phone="+16305550184",
         customer_address=None,
         summary="Routine inquiry.",
     )
@@ -183,7 +183,7 @@ async def test_two_customers_on_one_line_are_both_recorded():
     is the application's decision, not the repository's."""
     service, _, outcomes, identities = _make_service()
 
-    for phone in ("111", "222"):
+    for phone in ("+16305550111", "+16305550122"):
         conversation_id = uuid.uuid4()
         await _seed_outcome(outcomes, conversation_id, customer_phone=phone)
         await service.sync_customer_from_outcome(

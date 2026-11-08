@@ -31,14 +31,25 @@ from app.domain.entities.appointment import Appointment
 from app.domain.entities.conversation_outcome import ConversationOutcome
 from app.domain.entities.customer import Customer
 from app.domain.entities.emergency_ticket import EmergencyTicket
-from app.domain.exceptions import EntityAlreadyExistsError, EntityNotFoundError
+from app.domain.exceptions import (
+    EntityAlreadyExistsError,
+    EntityNotFoundError,
+    InvalidPhoneNumberError,
+)
 from app.domain.repositories.appointment_repository import AppointmentRepository
+from app.domain.repositories.business_profile_repository import BusinessProfileRepository
 from app.domain.repositories.caller_identity_repository import CallerIdentityRepository
 from app.domain.repositories.conversation_outcome_repository import ConversationOutcomeRepository
+from app.domain.repositories.conversation_repository import ConversationRepository
 from app.domain.repositories.customer_repository import CustomerRepository
 from app.domain.repositories.emergency_ticket_repository import EmergencyTicketRepository
 from app.domain.transactions import NullSavepoints, Savepoints
-from app.shared.utils.phone import normalize_phone_number
+from app.shared.utils.phone import (
+    check_phone_number,
+    legacy_phone_keys,
+    region_for_country,
+    valid_phone_number,
+)
 
 logger = structlog.get_logger("app.customers")
 
@@ -81,6 +92,14 @@ class CustomerService:
         # Makes the best-effort association genuinely best-effort on
         # Postgres; see `_associate_caller_number`.
         savepoints: Savepoints | None = None,
+        # Tells a customer record created during this call (which a caller
+        # correction may update) from one that existed before it (which it
+        # may not). Optional; absent, every record is treated as pre-existing,
+        # which is the previous, strictly additive behaviour.
+        conversation_repository: ConversationRepository | None = None,
+        # The business's country, for reading a national-format number staff
+        # type in. Optional; absent, staff must enter international form.
+        business_profile_repository: BusinessProfileRepository | None = None,
     ) -> None:
         self._customers = customer_repository
         self._outcomes = conversation_outcome_repository
@@ -88,6 +107,8 @@ class CustomerService:
         self._appointments = appointment_repository
         self._caller_identities = caller_identity_repository
         self._savepoints = savepoints or NullSavepoints()
+        self._conversations = conversation_repository
+        self._profiles = business_profile_repository
 
     # --- Automatic customer sync (the AI Brain -> Customers seam) ---
 
@@ -102,20 +123,24 @@ class CustomerService:
         if outcome is None:
             return None
 
-        # Normalised before it is used as the deduplication key. A number
-        # captured from speech arrives in whatever shape the transcript took
-        # — a live call on 2026-08-22 produced "1 2 3 4 5 6 7 8 9" on one
-        # turn and "123456789" on the next, and because this lookup matches
-        # exactly, the same caller got two `Customer` rows and a split
-        # history. The stored value is the canonical form for the same
-        # reason: a key is only useful if every writer agrees on it.
-        phone_number = normalize_phone_number(outcome.customer_phone)
+        # A valid E.164 number is the deduplication key, and nothing else is.
+        # A number captured from speech arrives in whatever shape the
+        # transcript took — "1 2 3 4 5 6 7 8 9" one turn, "123456789" the
+        # next (2026-08-22) — and an incomplete one is not a key at all: on
+        # 2026-10-31 a nine-digit number created a second record for a
+        # caller who already had one. The outcome only ever holds numbers
+        # validated on the way in, in E.164; the business's region is still
+        # applied so an outcome written before validation existed resolves to
+        # the same key. A value that is not a valid number is refused.
+        phone_number = valid_phone_number(
+            outcome.customer_phone, region=await self._region(organization_id)
+        )
         if phone_number is None:
             # No usable phone number to dedupe on — a Customer record is
             # meaningless without a way to match repeat callers.
             return None
 
-        customer = await self._customers.get_by_phone_number(organization_id, phone_number)
+        customer = await self._find_by_phone(organization_id, phone_number)
         if customer is None:
             try:
                 customer = await self._customers.create(
@@ -134,7 +159,10 @@ class CustomerService:
                     raise
         else:
             customer = await self._backfill_contact_details(
-                organization_id, customer, outcome
+                organization_id,
+                customer,
+                outcome,
+                created_this_call=await self._created_during(conversation_id, customer),
             )
 
         await self._link_existing_activity(organization_id, conversation_id, customer.id)
@@ -157,7 +185,7 @@ class CustomerService:
         repository wired. Idempotent, because it runs on every turn of a
         call, not once.
 
-        Best-effort, mirroring `AIBrainService._resolve_known_caller`. This
+        Best-effort, like every other optional lookup on the call path. This
         is the *last* statement of the outcome sync, after C1 and after the
         ticket/appointment links have already succeeded, so an exception
         escaping here would turn a fully successful turn into a broken one:
@@ -194,8 +222,63 @@ class CustomerService:
                 exc_info=True,
             )
 
+    async def _region(self, organization_id: uuid.UUID) -> str | None:
+        """The business's own country as a phone region, or None when no
+        profile repository is wired or no country is configured."""
+        if self._profiles is None:
+            return None
+        profile = await self._profiles.get_by_organization_id(organization_id)
+        return region_for_country(profile.country if profile else None)
+
+    async def _staff_phone_number(self, organization_id: uuid.UUID, raw: str) -> str:
+        """A number typed in by staff, validated and in E.164 — the same key
+        the AI sync matches on, so a staff-created customer and a caller are
+        one record, not two."""
+        check = check_phone_number(raw, region=await self._region(organization_id))
+        if check.e164 is None:
+            raise InvalidPhoneNumberError(check.problem or "invalid")
+        return check.e164
+
+    async def _find_by_phone(
+        self, organization_id: uuid.UUID, phone_number: str
+    ) -> Customer | None:
+        """The customer keyed on this E.164 number — or, failing that, on one
+        of the forms the same number was stored in before numbers were
+        validated (`legacy_phone_keys`). A returning caller whose record
+        predates E.164 is matched rather than given a second record. Nothing
+        is rewritten or merged: the old record keeps its old key."""
+        customer = await self._customers.get_by_phone_number(organization_id, phone_number)
+        if customer is not None:
+            return customer
+        for key in legacy_phone_keys(phone_number):
+            customer = await self._customers.get_by_phone_number(organization_id, key)
+            if customer is not None:
+                return customer
+        return None
+
+    async def _created_during(self, conversation_id: uuid.UUID, customer: Customer) -> bool:
+        """Whether this customer record came into existence during this
+        call, so a correction the caller makes on the call belongs on it.
+
+        A record that existed before the call is left alone except for
+        blanks: the caller ID that matched it can be spoofed, so a stranger
+        must not be able to rename someone else's customer by calling in."""
+        if self._conversations is None:
+            return False
+        outcome_conversation = await self._conversations.get_by_id(
+            customer.organization_id, conversation_id
+        )
+        if outcome_conversation is None:
+            return False
+        return customer.created_at >= outcome_conversation.created_at
+
     async def _backfill_contact_details(
-        self, organization_id: uuid.UUID, customer: Customer, outcome: ConversationOutcome
+        self,
+        organization_id: uuid.UUID,
+        customer: Customer,
+        outcome: ConversationOutcome,
+        *,
+        created_this_call: bool = False,
     ) -> Customer:
         """Copies caller details the AI has since learned onto a customer
         created without them.
@@ -216,11 +299,28 @@ class CustomerService:
         updates = {
             field: getattr(outcome, source)
             for field, source in (("full_name", "customer_name"), ("address", "customer_address"))
-            if _is_blank(getattr(customer, field)) and not _is_blank(getattr(outcome, source))
+            if not _is_blank(getattr(outcome, source))
+            and (
+                _is_blank(getattr(customer, field))
+                # A record made on this call follows the caller's own
+                # corrections; one that predates the call does not.
+                or (created_this_call and getattr(customer, field) != getattr(outcome, source))
+            )
         }
         if not updates:
             return customer
 
+        overwritten = sorted(
+            field for field in updates if not _is_blank(getattr(customer, field))
+        )
+        if overwritten:
+            # Field names only: the values are the caller's PII.
+            logger.info(
+                "customer_contact_details_corrected",
+                organization_id=str(organization_id),
+                customer_id=str(customer.id),
+                fields=overwritten,
+            )
         return await self._customers.backfill_contact_details(
             organization_id, customer.id, **updates
         )
@@ -279,6 +379,11 @@ class CustomerService:
         address: str | None = None,
         notes: str | None = None,
     ) -> Customer:
+        phone_number = await self._staff_phone_number(organization_id, phone_number)
+        if await self._find_by_phone(organization_id, phone_number) is not None:
+            # Including a record keyed in a pre-E.164 form, which the unique
+            # constraint alone would not see as the same number.
+            raise EntityAlreadyExistsError("Customer", "phone_number", phone_number)
         return await self._customers.create(
             organization_id=organization_id,
             full_name=full_name,
@@ -299,7 +404,14 @@ class CustomerService:
         address: str | None,
         notes: str | None,
     ) -> Customer:
-        await self.get_customer(organization_id, customer_id)
+        current = await self.get_customer(organization_id, customer_id)
+        if phone_number != current.phone_number:
+            # Re-saving a record with its existing (possibly pre-E.164) key
+            # is left alone; a changed number must be a valid one.
+            phone_number = await self._staff_phone_number(organization_id, phone_number)
+            other = await self._find_by_phone(organization_id, phone_number)
+            if other is not None and other.id != customer_id:
+                raise EntityAlreadyExistsError("Customer", "phone_number", phone_number)
         return await self._customers.update(
             organization_id,
             customer_id,

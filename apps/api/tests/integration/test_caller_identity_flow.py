@@ -64,7 +64,7 @@ async def _customer(org_id: uuid.UUID, *, name: str, phone: str, address: str | 
 @pytest.mark.asyncio(loop_scope="session")
 async def test_associate_then_resolve_round_trip(database_ready):
     org_id = await _org()
-    customer = await _customer(org_id, name="Lucky", phone="123456789", address="16 Street")
+    customer = await _customer(org_id, name="Lucky", phone="6305550184", address="16 Street")
 
     async with AsyncSessionLocal() as session:
         repo = SqlAlchemyCallerIdentityRepository(session)
@@ -85,7 +85,7 @@ async def test_associate_is_idempotent_at_the_database_level(database_ready):
     """ON CONFLICT DO UPDATE, so repeated turns of one call refresh
     `last_seen_at` instead of duplicating or raising."""
     org_id = await _org()
-    customer = await _customer(org_id, name="Lucky", phone="123456789")
+    customer = await _customer(org_id, name="Lucky", phone="6305550184")
 
     async with AsyncSessionLocal() as session:
         repo = SqlAlchemyCallerIdentityRepository(session)
@@ -112,8 +112,8 @@ async def test_one_line_can_belong_to_several_customers(database_ready):
     """A household or office line. The unique constraint covers the whole
     triple precisely so this is representable."""
     org_id = await _org()
-    alice = await _customer(org_id, name="Alice", phone="111")
-    bob = await _customer(org_id, name="Bob", phone="222")
+    alice = await _customer(org_id, name="Alice", phone="+16305550111")
+    bob = await _customer(org_id, name="Bob", phone="+16305550122")
 
     async with AsyncSessionLocal() as session:
         repo = SqlAlchemyCallerIdentityRepository(session)
@@ -132,7 +132,7 @@ async def test_one_line_can_belong_to_several_customers(database_ready):
 @pytest.mark.asyncio(loop_scope="session")
 async def test_one_customer_can_have_several_lines(database_ready):
     org_id = await _org()
-    customer = await _customer(org_id, name="Lucky", phone="123456789")
+    customer = await _customer(org_id, name="Lucky", phone="6305550184")
 
     async with AsyncSessionLocal() as session:
         repo = SqlAlchemyCallerIdentityRepository(session)
@@ -152,8 +152,8 @@ async def test_tenant_isolation_is_enforced_in_the_query(database_ready):
     """The same caller ID in two organizations must never cross over."""
     org_a = await _org()
     org_b = await _org()
-    a_customer = await _customer(org_a, name="Org A Customer", phone="111")
-    b_customer = await _customer(org_b, name="Org B Customer", phone="111")
+    a_customer = await _customer(org_a, name="Org A Customer", phone="+16305550111")
+    b_customer = await _customer(org_b, name="Org B Customer", phone="+16305550111")
 
     async with AsyncSessionLocal() as session:
         repo = SqlAlchemyCallerIdentityRepository(session)
@@ -173,7 +173,7 @@ async def test_tenant_isolation_is_enforced_in_the_query(database_ready):
 @pytest.mark.asyncio(loop_scope="session")
 async def test_blank_caller_number_issues_no_query_and_writes_nothing(database_ready):
     org_id = await _org()
-    customer = await _customer(org_id, name="Lucky", phone="123456789")
+    customer = await _customer(org_id, name="Lucky", phone="6305550184")
 
     async with AsyncSessionLocal() as session:
         repo = SqlAlchemyCallerIdentityRepository(session)

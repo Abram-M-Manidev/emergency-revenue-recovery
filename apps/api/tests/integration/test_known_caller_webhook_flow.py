@@ -1,10 +1,8 @@
-"""P5 through the real Vapi webhook: a caller ID arriving on the wire, an
-association captured by the customer sync, and a later call from the same
-line grounded in the AI Brain.
-
-This is the scenario the first real PSTN call exposed — Lucky, a customer
-the system already held, asked again for their name and address — reproduced
-end to end with a fake model and a real database.
+"""Caller IDs through the real Vapi webhook: an association captured by the
+customer sync, and a returning caller matched to their record by the
+backend — but never revealed to the model, and so never to the caller
+(Phase 2, P2-B). Reproduced end to end with a fake model and a real
+database.
 """
 
 import uuid
@@ -112,7 +110,7 @@ def _reply(**overrides):
         classification=CallClassification.EMERGENCY,
         recommended_action=RecommendedAction.CREATE_EMERGENCY_TICKET,
         customer_name="Lucky",
-        customer_phone="123456789",
+        customer_phone="+16305550184",
         customer_address="16 Street, California",
         summary="No heat.",
     )
@@ -135,6 +133,16 @@ async def _call(client, *, call_id, assistant_id, caller=_CALLER, utterance="No 
     )
 
 
+async def _customer_count(org_id: uuid.UUID) -> int:
+    async with AsyncSessionLocal() as session:
+        return (
+            await session.execute(
+                text("SELECT count(*) FROM customers WHERE organization_id = :org"),
+                {"org": org_id},
+            )
+        ).scalar_one()
+
+
 async def _associations(org_id: uuid.UUID) -> list[tuple[str, str]]:
     async with AsyncSessionLocal() as session:
         rows = await session.execute(
@@ -148,36 +156,38 @@ async def _associations(org_id: uuid.UUID) -> list[tuple[str, str]]:
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_first_call_captures_the_association_and_second_call_is_grounded(
+async def test_a_returning_caller_is_matched_but_never_revealed_to_the_model(
     client: AsyncClient, fake_ai_provider: FakeAIProvider
 ):
-    """The Lucky scenario, end to end."""
+    """The Lucky scenario after Phase 2. The association is still captured
+    and the backend still matches the returning caller to their one customer
+    record, but the model is told nothing about it: the second call's prompt
+    is the same as the first's. On 2026-10-31 the model told a caller "I have
+    a record for this phone number" because the prompt said it did."""
     assistant = _ASSISTANT_ID + "-a"
     org_id = await _register(client, "P5 Org A", "owner-p5-a@example.com")
     await _seed_voice_line(org_id, assistant_id=assistant)
 
-    # First call: nothing known yet, so the prompt must be ungrounded.
     fake_ai_provider.queue_reply(_reply())
     assert (await _call(client, call_id="p5_call_1", assistant_id=assistant)).status_code == 200
-    assert "Caller records" not in fake_ai_provider.requests[-1].system_prompt
+    first_prompt = fake_ai_provider.requests[-1].system_prompt
 
     # The association was captured by the customer sync.
     assert await _associations(org_id) == [(_CALLER, "Lucky")]
 
-    # Second call from the same line is recognised.
     fake_ai_provider.queue_reply(_reply())
     assert (await _call(client, call_id="p5_call_2", assistant_id=assistant)).status_code == 200
-    prompt = fake_ai_provider.requests[-1].system_prompt
+    second_prompt = fake_ai_provider.requests[-1].system_prompt
 
-    assert "Caller records" in prompt
-    assert "Lucky" in prompt
-    assert "address on file" in prompt
-    # The security decision: the stored address is never recited.
-    assert "16 Street" not in prompt
+    assert second_prompt == first_prompt
+    for leaked in ("Lucky", "16 Street", "records for this number", "Caller records", _CALLER):
+        assert leaked not in second_prompt
+    # Matched, not duplicated: one record for the caller across both calls.
+    assert await _customer_count(org_id) == 1
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_call_with_no_caller_id_captures_nothing_and_grounds_nothing(
+async def test_call_with_no_caller_id_captures_nothing(
     client: AsyncClient, fake_ai_provider: FakeAIProvider
 ):
     assistant = _ASSISTANT_ID + "-b"
@@ -190,11 +200,11 @@ async def test_call_with_no_caller_id_captures_nothing_and_grounds_nothing(
     ).status_code == 200
 
     assert await _associations(org_id) == []
-    assert "Caller records" not in fake_ai_provider.requests[-1].system_prompt
+    assert "Lucky" not in fake_ai_provider.requests[-1].system_prompt
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_a_caller_id_from_another_tenant_does_not_ground(
+async def test_a_caller_known_to_another_tenant_is_a_stranger_here(
     client: AsyncClient, fake_ai_provider: FakeAIProvider
 ):
     assistant_c = _ASSISTANT_ID + "-c"
@@ -204,47 +214,39 @@ async def test_a_caller_id_from_another_tenant_does_not_ground(
     await _seed_voice_line(org_c, assistant_id=assistant_c)
     await _seed_voice_line(org_d, assistant_id=assistant_d)
 
-    # Org C learns this caller.
     fake_ai_provider.queue_reply(_reply())
     await _call(client, call_id="p5_call_4", assistant_id=assistant_c)
     assert await _associations(org_c) == [(_CALLER, "Lucky")]
 
-    # The same line calling org D is a stranger there.
-    fake_ai_provider.queue_reply(_reply(customer_name="Someone Else", customer_phone="999"))
+    fake_ai_provider.queue_reply(
+        _reply(customer_name="Someone Else", customer_phone="+16305550199")
+    )
     await _call(client, call_id="p5_call_5", assistant_id=assistant_d)
-    prompt = fake_ai_provider.requests[-1].system_prompt
 
-    assert "Caller records" not in prompt
-    assert "Lucky" not in prompt
+    assert "Lucky" not in fake_ai_provider.requests[-1].system_prompt
+    assert await _associations(org_d) == [(_CALLER, "Someone Else")]
 
 
 @pytest.mark.asyncio(loop_scope="session")
-async def test_shared_line_stops_grounding_once_a_second_customer_appears(
+async def test_a_shared_line_reveals_neither_customer(
     client: AsyncClient, fake_ai_provider: FakeAIProvider
 ):
-    """One customer on the line grounds; two must not."""
     assistant = _ASSISTANT_ID + "-e"
     org_id = await _register(client, "P5 Org E", "owner-p5-e@example.com")
     await _seed_voice_line(org_id, assistant_id=assistant)
 
-    fake_ai_provider.queue_reply(_reply(customer_name="Alice", customer_phone="111"))
-    await _call(client, call_id="p5_call_6", assistant_id=assistant)
+    for call_id, name, phone in (
+        ("p5_call_6", "Alice", "+16305550111"),
+        ("p5_call_7", "Bob", "+16305550122"),
+        ("p5_call_8", "Alice", "+16305550111"),
+    ):
+        fake_ai_provider.queue_reply(_reply(customer_name=name, customer_phone=phone))
+        await _call(client, call_id=call_id, assistant_id=assistant)
+        prompt = fake_ai_provider.requests[-1].system_prompt
+        assert "Alice" not in prompt
+        assert "Bob" not in prompt
 
-    fake_ai_provider.queue_reply(_reply(customer_name="Alice", customer_phone="111"))
-    await _call(client, call_id="p5_call_7", assistant_id=assistant)
-    assert "Alice" in fake_ai_provider.requests[-1].system_prompt
-
-    # A second person answers the same line.
-    fake_ai_provider.queue_reply(_reply(customer_name="Bob", customer_phone="222"))
-    await _call(client, call_id="p5_call_8", assistant_id=assistant)
-
-    fake_ai_provider.queue_reply(_reply(customer_name="Bob", customer_phone="222"))
-    await _call(client, call_id="p5_call_9", assistant_id=assistant)
-    prompt = fake_ai_provider.requests[-1].system_prompt
-
-    assert "Caller records" not in prompt
-    assert "Alice" not in prompt
-    assert "Bob" not in prompt
+    assert await _customer_count(org_id) == 2
 
 
 # --- P5 blocker fix: a failing association must not break a live turn ---

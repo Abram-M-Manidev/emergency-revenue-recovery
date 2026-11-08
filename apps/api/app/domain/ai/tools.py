@@ -142,6 +142,22 @@ class ToolExecutorFactory(ABC):
         it has already performed adds no new coupling."""
         ...
 
+    async def contact_details_locked(
+        self, organization_id: uuid.UUID, conversation_id: uuid.UUID
+    ) -> bool:
+        """Whether this call's contact details now belong to the tools.
+
+        True once a service request exists. From then on the name, phone
+        and address the model reports in its free-form reply on every turn
+        must not overwrite the recorded ones: a correction has to go
+        through `create_service_request`, which can ask for confirmation,
+        and an older value the model repeats from earlier in the call cannot
+        quietly undo a correction. A blank field can still be filled in.
+
+        Not abstract, and False by default, so a factory that predates it
+        keeps the previous behaviour."""
+        return False
+
 
 class ToolErrors:
     """Stable `error` codes for failed tool results.
@@ -151,6 +167,13 @@ class ToolErrors:
     them without matching English."""
 
     MISSING_REQUIRED_FIELDS = "MISSING_REQUIRED_FIELDS"
+    #: A phone number was given but is incomplete or impossible (the
+    #: nine-digit number of 2026-10-31). Distinct from MISSING_REQUIRED_FIELDS
+    #: because the recovery is "read back what you heard and ask again".
+    INVALID_PHONE_NUMBER = "INVALID_PHONE_NUMBER"
+    #: The service address on an existing request would change, and the
+    #: caller has not been asked to confirm the new one.
+    CORRECTION_NOT_CONFIRMED = "CORRECTION_NOT_CONFIRMED"
     NO_SERVICE_REQUEST = "NO_SERVICE_REQUEST"
     EMERGENCY_NOT_BOOKABLE = "EMERGENCY_NOT_BOOKABLE"
     SLOT_UNAVAILABLE = "SLOT_UNAVAILABLE"
@@ -180,10 +203,12 @@ CREATE_SERVICE_REQUEST = ToolDefinition(
         "EMERGENCY, call it as soon as you know what is wrong — do not hold "
         "the ticket back for a name or address the caller cannot give; if "
         "they will not or cannot give a number, the number they are calling "
-        "from is used. Then ask for anything still missing and call it again. "
-        "This creates the real record staff will work from, so call it before "
-        "checking availability or booking. Safe to call again if a detail was "
-        "corrected."
+        "from is used for the ticket. Then ask for anything still missing and "
+        "call it again. This creates the real record staff will work from, so "
+        "call it before checking availability or booking. Call it again "
+        "whenever the caller corrects their name, phone number or address — "
+        "once a request exists, that is the only way a correction is "
+        "recorded."
     ),
     parameters={
         "type": "object",
@@ -197,7 +222,9 @@ CREATE_SERVICE_REQUEST = ToolDefinition(
                 "description": (
                     "The callback number the caller stated, as digits only "
                     "(e.g. \"6305550184\"), converting any number words to "
-                    "digits. Empty string if they have not given one."
+                    "digits, with a leading + and country code if they gave "
+                    "one. Exactly the digits they said: never add, drop or "
+                    "guess a digit. Empty string if they have not given one."
                 ),
             },
             "service_address": {
@@ -228,6 +255,23 @@ CREATE_SERVICE_REQUEST = ToolDefinition(
                     "matches. Determines the visit length."
                 ),
             },
+            "use_caller_id": {
+                "type": "boolean",
+                "description": (
+                    "True only when the caller has just told you the number "
+                    "they are calling from is the best one to reach them. "
+                    "False otherwise — never assume it."
+                ),
+            },
+            "confirmed_correction": {
+                "type": "boolean",
+                "description": (
+                    "True only when you are changing the service address of "
+                    "a request that already exists AND the caller has agreed "
+                    "to the new address after you read it back. False "
+                    "otherwise."
+                ),
+            },
         },
         "required": [
             "customer_name",
@@ -236,6 +280,8 @@ CREATE_SERVICE_REQUEST = ToolDefinition(
             "problem_description",
             "classification",
             "service_name",
+            "use_caller_id",
+            "confirmed_correction",
         ],
         "additionalProperties": False,
     },

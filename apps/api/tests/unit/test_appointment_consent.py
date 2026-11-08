@@ -109,7 +109,7 @@ _AC_REPAIR = Service(
 
 _FRANK = {
     "customer_name": "Frank",
-    "customer_phone": "5550001111",
+    "customer_phone": "6305550111",
     "service_address": "11 69 Street, California",
     "problem_description": "AC running but not cooling.",
     "classification": "non_emergency",
@@ -609,7 +609,7 @@ async def test_case_g_a_selected_slot_taken_by_someone_else_does_not_book():
         conversation_id=rival,
         matched_service_id=_AC_REPAIR.id,
         customer_name="Someone Else",
-        customer_phone="5559998888",
+        customer_phone="6305550188",
         customer_address="2 Other Road",
         summary="Got there first.",
         duration_minutes=90,
@@ -647,7 +647,7 @@ async def test_case_g_a_slot_that_died_releases_the_selection():
         conversation_id=rival,
         matched_service_id=_AC_REPAIR.id,
         customer_name="Someone Else",
-        customer_phone="5559998888",
+        customer_phone="6305550188",
         customer_address="2 Other Road",
         summary="Got there first.",
         duration_minutes=90,
@@ -800,7 +800,7 @@ async def test_case_h_a_selection_cannot_be_borrowed_from_another_conversation()
     harness = _Harness()
     chooser, freeloader = uuid.uuid4(), uuid.uuid4()
     slots = await harness.intake_and_offer(chooser)
-    await harness.intake(freeloader, customer_phone="5550002222")
+    await harness.intake(freeloader, customer_phone="6305550122")
     await harness.offer(freeloader, service_name=_AC_REPAIR.name)
 
     await harness.call(chooser, SELECT_APPOINTMENT_SLOT.name, slot_id=slots[0]["slot_id"])
@@ -992,7 +992,7 @@ async def test_case_j_two_consenting_callers_racing_one_slot_never_overlap():
     harness = _Harness()
     first, second = uuid.uuid4(), uuid.uuid4()
     first_slots = await harness.intake_and_offer(first)
-    await harness.intake(second, customer_phone="5550002222")
+    await harness.intake(second, customer_phone="6305550122")
     second_slots = await harness.offer(second, service_name=_AC_REPAIR.name)
     assert first_slots[0]["slot_id"] == second_slots[0]["slot_id"]
 

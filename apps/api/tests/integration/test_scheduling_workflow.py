@@ -46,7 +46,7 @@ _TEST_VAPI_SECRET = "test-vapi-secret-scheduling"
 
 _LUCKY = {
     "customer_name": "Lucky",
-    "customer_phone": "123456789",
+    "customer_phone": "+16305550184",
     "service_address": "16th Street, California",
     "problem_description": "AC is running but not cooling the house.",
     "classification": "non_emergency",
@@ -196,7 +196,7 @@ async def _turn(client: AsyncClient, *, call_id: str, assistant_id: str, utteran
             "call": {
                 "id": call_id,
                 "assistantId": assistant_id,
-                "customer": {"number": "+15551230000"},
+                "customer": {"number": "+16305550100"},
             },
             "messages": [{"role": "user", "content": utterance}],
         },
@@ -311,7 +311,7 @@ async def test_the_full_workflow_creates_checks_and_books_against_postgres(
         booking["start_time"]
     )
     # And the contact details reached the record this time.
-    assert after.customer_phone == "123456789"
+    assert after.customer_phone == "+16305550184"
     assert after.customer_address == "16th Street, California"
     assert after.customer_id is not None
 
@@ -352,7 +352,7 @@ async def test_a_second_caller_cannot_take_a_slot_that_is_already_booked(
     taken = provider.results[-1].content["slots"][0]
 
     provider.queue_tool_round(
-        [("create_service_request", {**_LUCKY, "customer_phone": "555000111"})]
+        [("create_service_request", {**_LUCKY, "customer_phone": "+16305550133"})]
     )
     provider.queue_tool_round(
         [("check_availability", {"service_name": "Air Conditioning Repair"})]
@@ -549,7 +549,7 @@ async def test_tool_writes_never_cross_a_tenant_boundary(
         [
             (
                 "create_service_request",
-                {**_LUCKY, "organization_id": str(org_b), "customer_phone": "999888777"},
+                {**_LUCKY, "organization_id": str(org_b), "customer_phone": "+16305550144"},
             )
         ]
     )
@@ -576,7 +576,7 @@ async def _stream_turn(
             "call": {
                 "id": call_id,
                 "assistantId": assistant_id,
-                "customer": {"number": "+15551230000"},
+                "customer": {"number": "+16305550100"},
             },
             "messages": [{"role": "user", "content": utterance}],
             "stream": True,

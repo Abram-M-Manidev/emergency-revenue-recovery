@@ -49,7 +49,7 @@ from app.domain.repositories.technician_profile_repository import TechnicianProf
 from app.domain.repositories.user_repository import UserRepository
 from app.domain.transactions import NullSavepoints, Savepoints
 from app.infrastructure.security.password import hash_password
-from app.shared.utils.phone import storable_phone_number
+from app.shared.utils.phone import valid_phone_number
 
 logger = structlog.get_logger("app.dispatch")
 
@@ -187,7 +187,9 @@ class DispatchService:
             conversation_id=conversation_id,
             matched_service_id=None,
             customer_name=None,
-            customer_phone=storable_phone_number(caller_number),
+            # Validated, so a withheld or malformed caller ID is no number
+            # at all rather than a fake one a dispatcher would ring.
+            customer_phone=valid_phone_number(caller_number),
             customer_address=None,
             summary=summary,
         )
@@ -258,7 +260,9 @@ class DispatchService:
         if existing is not None and not _is_blank(existing.customer_phone):
             return outcome
         conversation = await self._conversations.get_by_id(organization_id, conversation_id)
-        caller_id = storable_phone_number(
+        # Validated: a withheld, unavailable or malformed caller ID is not a
+        # callback number, and must not be written onto the ticket as one.
+        caller_id = valid_phone_number(
             conversation.caller_phone_number if conversation is not None else None
         )
         if caller_id is None:

@@ -78,7 +78,7 @@ _SPOKEN_PHONE = "one two three four five six seven eight nine"
 # What the same caller's number looked like on the pilot call that DID book
 # successfully. The model transcribed digits that time; nothing else about
 # the two calls differed on this path.
-_DIGITS_PHONE = "123456789"
+_DIGITS_PHONE = "+16305550184"
 
 # The three times the caller was read before the turn was lost, in UTC.
 _OFFER_TURN_INDEX = 2
@@ -387,4 +387,4 @@ async def test_a_real_correction_still_replaces_the_stored_number(organization_i
     )
 
     outcome = await _committed_outcome(conversation_id)
-    assert outcome.customer_phone == "6305550184"
+    assert outcome.customer_phone == "+16305550184"

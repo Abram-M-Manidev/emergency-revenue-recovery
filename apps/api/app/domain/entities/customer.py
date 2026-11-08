@@ -20,6 +20,11 @@ carrying a phone number — routinely before the caller has given their
 name or address, which would otherwise leave the record permanently
 blank even though the same detail did reach the emergency ticket. A
 non-blank value always wins, so a staff correction is never at risk.
+
+The second exception is a record created during the current call: it
+follows that caller's own corrections to their name and address, because
+nobody else has had a chance to own it yet (see
+`CustomerService._created_during`).
 `phone_number` (the dedupe key), `email`, and `notes` are excluded
 entirely. See `CustomerService._backfill_contact_details`."""
 
