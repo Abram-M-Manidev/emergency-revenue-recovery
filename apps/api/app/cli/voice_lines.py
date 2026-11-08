@@ -6,7 +6,7 @@ HTTP route for this; see `VoiceLineProvisioningService`):
     docker compose exec api python -m app.cli.voice_lines list
     docker compose exec api python -m app.cli.voice_lines assign \
         --org-slug lucky-hvac-services \
-        --assistant-id 0796eff8-5b24-4e92-960f-6c24ce28b4a9 \
+        --assistant-id <vapi assistant id> \
         [--phone-number-id <vapi phone number id>] [--phone-number +16305550100] \
         [--reassign-from <current organization id>] [--replace-existing]
     docker compose exec api python -m app.cli.voice_lines deactivate --org-slug ...
